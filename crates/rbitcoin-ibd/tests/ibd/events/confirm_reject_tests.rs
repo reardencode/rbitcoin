@@ -2435,6 +2435,106 @@ impl WireRig {
         self.engine = Some((engine, ev_rx));
     }
 
+    fn assign(&mut self) {
+        use rbitcoin_ibd::ibd::assign::{assign_work_ordered, AssignDepth};
+        assign_work_ordered(
+            &mut self.st,
+            &self.hub,
+            &self.cfg,
+            &self.stats,
+            AssignDepth::Full,
+            None,
+        );
+    }
+
+    /// Peer 1 answers a getdata that was never sent.
+    fn give(&mut self, body: &bitcoin::Block) {
+        let hash = body.block_hash();
+        self.st.slots[0].in_flight.insert(hash);
+        self.st
+            .inflight
+            .insert(hash, rbitcoin_ibd::ibd::state::InflightReq::new(1));
+        self.deliver(1, body);
+    }
+
+    /// `count` valid blocks on the tip, then one whose coinbase `corrupt` edits
+    /// at its height.
+    fn valid_blocks_then_bad(
+        &self,
+        count: u32,
+        corrupt: impl FnOnce(&mut bitcoin::Transaction, u32),
+    ) -> Vec<bitcoin::Block> {
+        use bitcoin::ScriptBuf;
+        use rbitcoin_consensus::{grind_regtest_pow, mine_regtest_paying};
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mut prev = self.tip;
+        let mut chain = Vec::new();
+        for i in 1..=count + 1 {
+            let time = self.tip_time + 600 * i;
+            let block = mine_regtest_paying(prev, time, self.t + i, spk.clone(), vec![]);
+            prev = block.block_hash();
+            chain.push(block);
+        }
+        let bad = chain.last_mut().expect("one block");
+        corrupt(&mut bad.txdata[0], self.t + count + 1);
+        bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+        grind_regtest_pow(&mut bad.header);
+        chain
+    }
+
+    /// Load rejects the wave `failing`, whose last block is bad, while the
+    /// write stage is stuck behind `lower`, each block its own load batch, as
+    /// when a peer serves blocks faster than they are written. Assign runs
+    /// with `lower` in hand, as the IBD loop does. Write resumes and IBD runs
+    /// until the bad block's verdict. Returns the rejects and how many bodies
+    /// assign asked for: every body was already delivered.
+    fn judge_over_held_write(
+        &mut self,
+        lower: &[bitcoin::Block],
+        failing: &[bitcoin::Block],
+    ) -> (Vec<Reject>, u32) {
+        use std::time::{Duration, Instant};
+        let path: Vec<&bitcoin::Block> = lower.iter().chain(failing).collect();
+        self.plant(&path);
+        self.start_engine();
+        let hub = std::sync::Arc::clone(&self.hub);
+        let feed = std::sync::Arc::clone(&self.feed);
+        let commit = hub.query.lock_tip_commit().expect("tip flush");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // A rewind empties the claims, so its epoch bump also ends the wait.
+        let await_claim = |height: u32| {
+            while !feed.holds(height) && feed.epoch() == 0 {
+                assert!(Instant::now() < deadline, "load did not claim {height}");
+                std::thread::yield_now();
+            }
+        };
+        for (i, body) in lower.iter().enumerate() {
+            self.give(body);
+            await_claim(self.t + 1 + i as u32);
+        }
+        self.assign();
+        self.assign();
+        // Top block first, so lookup takes the whole wave at once.
+        for body in failing.iter().rev() {
+            self.give(body);
+        }
+        await_claim(self.t + 1 + lower.len() as u32);
+        drop(commit);
+        let bad = failing.last().expect("a bad block").block_hash();
+        let mut asked = 0u32;
+        let rejects = self.pump(
+            |_, hash| {
+                asked += 1;
+                path.iter()
+                    .find(|b| b.block_hash() == hash)
+                    .map(|b| (*b).clone())
+                    .expect("planted")
+            },
+            |st, _, _| st.halt.is_some() || st.reorg.invalid.contains(bad.to_byte_array()),
+        );
+        (rejects, asked)
+    }
+
     /// Apply confirm events and run assign. Each getdata to a live peer is
     /// answered with `serve(peer, hash)`. Returns the rejects seen once
     /// `stop` holds after an event. Panics past a deadline: a missing body
@@ -2444,7 +2544,6 @@ impl WireRig {
         mut serve: impl FnMut(usize, BlockHash) -> bitcoin::Block,
         mut stop: impl FnMut(&IbdWorkState, &rbitcoin_net::chain::ChainHub, &[Reject]) -> bool,
     ) -> Vec<Reject> {
-        use rbitcoin_ibd::ibd::assign::{assign_work_ordered, AssignDepth};
         use rbitcoin_ibd::ibd::confirm::ConfirmEvent;
         use std::time::{Duration, Instant};
         let mut rejects = Vec::new();
@@ -2486,14 +2585,7 @@ impl WireRig {
                     return rejects;
                 }
             }
-            assign_work_ordered(
-                &mut self.st,
-                &self.hub,
-                &self.cfg,
-                &self.stats,
-                AssignDepth::Full,
-                None,
-            );
+            self.assign();
             let asks: Vec<(BlockHash, usize)> = self
                 .st
                 .inflight
@@ -4264,6 +4356,87 @@ fn verdict_applied_after_the_tip_moved_asks_for_the_body_again() {
     assert_eq!(rig.st.halt, None, "{rejects:?}");
     assert!(rig.st.reorg.invalid.contains(hb.to_byte_array()));
     assert_eq!(rig.hub.tip_hash(), Some(hp));
+    rig.finish();
+}
+
+/// A coinbase that is not final at its height. Load rejects it at assemble.
+fn nonfinal_coinbase(coinbase: &mut bitcoin::Transaction, height: u32) {
+    use bitcoin::{absolute::LockTime, Sequence};
+    coinbase.lock_time = LockTime::from_height(height).unwrap();
+    coinbase.input[0].sequence = Sequence::ZERO;
+}
+
+/// Blocks tip+1 and tip+2 are past load and still in the write stage when
+/// load rejects tip+3. Core connects one block at a time, so its valid prefix
+/// is connected when it rejects the bad block. Here too: tip+3 gets its
+/// verdict on top of tip+2 on the first try, and no body is fetched again.
+#[test]
+fn lone_load_reject_lands_on_the_valid_prefix() {
+    let mut rig = WireRig::new("load-reject-lone", 1);
+    let chain = rig.valid_blocks_then_bad(2, nonfinal_coinbase);
+    let (lower, failing) = chain.split_at(2);
+    let (rejects, asked) = rig.judge_over_held_write(lower, failing);
+    assert_eq!(
+        rejects,
+        [(
+            chain[2].block_hash(),
+            ConfirmRejectClass::ConsensusInvalid,
+            1
+        )]
+    );
+    assert_eq!(rig.st.halt, None);
+    assert_eq!(rig.hub.tip_hash(), Some(chain[1].block_hash()));
+    assert_eq!(asked, 0, "no body is fetched again");
+    rig.finish();
+}
+
+/// The same for a block its load stamp rejects, here `bad-cb-length`.
+#[test]
+fn stamp_reject_lands_on_the_valid_prefix() {
+    use bitcoin::ScriptBuf;
+    let mut rig = WireRig::new("load-reject-stamp", 1);
+    let chain = rig.valid_blocks_then_bad(2, |coinbase, _| {
+        coinbase.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51; 101]);
+    });
+    let (lower, failing) = chain.split_at(2);
+    let (rejects, asked) = rig.judge_over_held_write(lower, failing);
+    assert_eq!(
+        rejects,
+        [(
+            chain[2].block_hash(),
+            ConfirmRejectClass::ConsensusInvalid,
+            1
+        )]
+    );
+    assert_eq!(rig.st.halt, None);
+    assert_eq!(rig.hub.tip_hash(), Some(chain[1].block_hash()));
+    assert_eq!(asked, 0, "no body is fetched again");
+    rig.finish();
+}
+
+/// The wave load rejects is tip+3 and the bad tip+4, with tip+1 and tip+2 in
+/// the write stage. They are not dropped. The retry runs one block at a time
+/// on top of tip+2, connects tip+3, and judges tip+4.
+#[test]
+fn batched_load_reject_lands_on_the_valid_prefix() {
+    let mut rig = WireRig::new("load-reject-batched", 1);
+    let chain = rig.valid_blocks_then_bad(3, nonfinal_coinbase);
+    let (lower, failing) = chain.split_at(2);
+    let (rejects, asked) = rig.judge_over_held_write(lower, failing);
+    assert_eq!(
+        rejects,
+        [
+            (chain[2].block_hash(), ConfirmRejectClass::Cascade, 2),
+            (
+                chain[3].block_hash(),
+                ConfirmRejectClass::ConsensusInvalid,
+                1
+            )
+        ]
+    );
+    assert_eq!(rig.st.halt, None);
+    assert_eq!(rig.hub.tip_hash(), Some(chain[2].block_hash()));
+    assert_eq!(asked, 0, "no body is fetched again");
     rig.finish();
 }
 

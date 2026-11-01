@@ -280,6 +280,19 @@ impl ConfirmFeed {
         self.inner.lock().unwrap().inflight.contains(&height)
     }
 
+    /// Block until load has no claim below `height`: each such batch was
+    /// written, rejected, or dropped by a rewind. Load claims in height order
+    /// on its own thread, so the set only shrinks here. `stop` ends the wait.
+    pub fn wait_claims_below(&self, height: u32, stop: impl Fn() -> bool) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        while g.inflight.iter().any(|&h| h < height) && !stop() {
+            (g, _) = self
+                .cv
+                .wait_timeout(g, Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
     /// Note readiness (wire lives in the body queue — denserels reloads it).
     pub fn note(&self, height: u32, hash: BlockHash) {
         self.note_wire(height, hash);
@@ -698,6 +711,17 @@ pub fn apply_write_reject(
     if !rearm_after_reject(hub, feed, class, wave) {
         reset_lookahead.store(true, Ordering::Release);
     }
+}
+
+/// Let every batch below a rejected load wave finish scripts and write before
+/// load classes and rewinds. Core connects one block at a time, so the valid
+/// prefix is connected when it judges a bad block. The rewind's epoch bump
+/// would make write drop those batches, and no stage would hold their bodies.
+#[doc(hidden)]
+pub fn await_batches_below_reject(hub: &ChainHub, feed: &ConfirmFeed, first_h: u32) {
+    let t_wait = Instant::now();
+    feed.wait_claims_below(first_h, || feed.stopped() || hub.query.confirm_cancelled());
+    confirm_thr_stats::add_load_reject(hub.query.confirm_stats(), t_wait.elapsed());
 }
 
 /// The class a load reject of `wave` is rewound and sent with. A lone
@@ -2616,6 +2640,7 @@ pub fn spawn_confirm_engine(
                             return;
                         }
                         let session_fault = e.is_uring_session_fault();
+                        await_batches_below_reject(&hub_load, &feed_load, expect_h);
                         let parent_check = match (&e, wire_batch.as_slice()) {
                             (
                                 rbitcoin_query::ConfirmError::Rules(
@@ -2811,6 +2836,7 @@ pub fn spawn_confirm_engine(
                         }
                         let session_fault =
                             rbitcoin_store::StoreError::is_uring_session_fault_msg(&msg);
+                        await_batches_below_reject(&hub_load, &feed_load, expect_h);
                         let t_rewind = Instant::now();
                         if session_fault {
                             hub_load.query.uring_recover_or_abort("ibd-confirm-load");
