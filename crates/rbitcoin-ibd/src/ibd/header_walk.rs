@@ -2044,21 +2044,34 @@ pub fn unproved_anchor(st: &IbdWorkState, hub: &ChainHub) -> Option<(BlockHash, 
     if reached {
         return None;
     }
-    // The highest proved point under the front. The confirmed tip is proved,
-    // so it beats a lower checkpoint: named ahead of the candidate, that
-    // checkpoint got a reply of headers the node already had.
-    let tip_below = hub
-        .tip_height()
-        .zip(hub.tip_hash())
-        .filter(|(tip_h, _)| *tip_h < front_h);
     if let Some(cp) = below {
-        return match tip_below {
-            Some((tip_h, tip_hash)) if tip_h > cp.height => Some((tip_hash, tip_h)),
-            _ => Some((cp.hash, cp.height)),
-        };
+        return Some((cp.hash, cp.height));
     }
-    let (tip_h, tip_hash) = tip_below?;
-    (front_h == tip_h.saturating_add(1)).then_some((tip_hash, tip_h))
+    let tip_h = hub.tip_height()?;
+    if front_h == tip_h.saturating_add(1) {
+        return Some((hub.tip_hash()?, tip_h));
+    }
+    None
+}
+
+/// The confirmed tip when it sits under the queue front and above `anchor`.
+///
+/// It is proved too, and a peer forked at it answers from it. Named after
+/// the anchor, that peer got the window above the anchor, which the node
+/// already had; the anchor stays, for a peer on the candidate's own chain
+/// when the tip is on another branch.
+#[doc(hidden)]
+pub fn confirmed_tip_above_anchor(
+    st: &IbdWorkState,
+    hub: &ChainHub,
+    anchor_h: u32,
+) -> Option<BlockHash> {
+    let front = st.ordered.front()?;
+    let front_h = *st.hash_height.get(front)?;
+    let tip_h = hub.tip_height()?;
+    (tip_h < front_h && tip_h > anchor_h)
+        .then(|| hub.tip_hash())
+        .flatten()
 }
 
 /// A batch from the proved anchor under an unproved queue.
@@ -2693,10 +2706,12 @@ pub struct AskTips {
 ///
 /// Bitcoin answers after the first locator hash the peer knows. While the
 /// queue can take headers, that hash is the stored tip, which can sit below
-/// the candidate. An unproved queue also names the highest proved point under
-/// it ([`unproved_anchor`]) ahead of the candidate, so a peer that does not
-/// have the guess still sends the gap, and a peer that has the candidate does
-/// not answer above the guess. A full queue is look-ahead and names neither.
+/// the candidate. An unproved queue also names the proved points under it
+/// ahead of the candidate, highest first: the confirmed tip when it is above
+/// the anchor ([`confirmed_tip_above_anchor`]), then the anchor
+/// ([`unproved_anchor`]). A peer that does not have the guess still sends the
+/// gap from the highest one it shares, and a peer that has the candidate does
+/// not answer above the guess. A full queue is look-ahead and names none.
 #[doc(hidden)]
 pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     let mut tips = AskTips {
@@ -2705,8 +2720,11 @@ pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     };
     if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
         tips.refill.extend(stored_top_hash(st, hub));
-        tips.refill
-            .extend(unproved_anchor(st, hub).map(|(anchor, _)| anchor));
+        if let Some((anchor, anchor_h)) = unproved_anchor(st, hub) {
+            tips.refill
+                .extend(confirmed_tip_above_anchor(st, hub, anchor_h));
+            tips.refill.push(anchor);
+        }
     }
     if tips.refill.is_empty() && tips.walk.is_empty() {
         tips.refill = super::path::work_path_tips(st);

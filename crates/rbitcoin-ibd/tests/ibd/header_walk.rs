@@ -1774,6 +1774,95 @@ fn a_peer_without_the_guess_refills_from_the_anchor_it_shares() {
     assert!(!st.header_walk.walk_quiet.contains(&0));
 }
 
+/// The confirmed tip is on another branch than the proved candidate, and the
+/// queue holds a guess that continues the confirmed chain. A peer on the
+/// candidate's chain has neither the guess nor the confirmed tip. Its reply,
+/// taken from the locator as Core answers it, must start at the candidate's
+/// checkpoint and drop the guess, not after the candidate, which would be
+/// empty and leave the guess queued.
+#[test]
+fn a_confirmed_tip_on_another_branch_keeps_the_candidate_anchor() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("locator-other-branch");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let mined = hub
+        .generate_to_script(
+            LOCATOR_FIXTURE_TIP,
+            bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            vec![],
+        )
+        .unwrap();
+    let confirmed: Vec<Header> = std::iter::once(gen)
+        .chain(mined)
+        .map(|hash| hub.header_of(&hash).expect("a mined header"))
+        .collect();
+    let tip = *confirmed.last().unwrap();
+    let fork_at = 20usize;
+    let branch = headers_on(confirmed[fork_at], 21..=34);
+    let branch_tip = branch.last().unwrap().block_hash();
+    let (s0, mut rx) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(tip.block_hash()), Some(LOCATOR_FIXTURE_TIP));
+    ensure_origin(&mut st, &hub);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let _ = rx.try_recv();
+    // A heavier branch below the confirmed tip becomes the candidate. The
+    // walk had recorded the batch that ended at the fork as a checkpoint.
+    apply(&mut st, &hub, 0, branch.clone());
+    assert_eq!(st.header_walk.tip_hash(), Some(branch_tip));
+    let at_fork = checkpoint_at(&WalkTip {
+        hash: Some(confirmed[fork_at].block_hash()),
+        height: fork_at as u32,
+        work: hub.work_through_height(fork_at as u32).unwrap(),
+        header: Some(confirmed[fork_at]),
+        ..WalkTip::default()
+    });
+    st.header_walk.checkpoints.insert(0, at_fork);
+    // Its queue drains, then a peer still on the confirmed chain refills one
+    // header above the confirmed tip: short of the candidate's checkpoint,
+    // the guess is queued.
+    st.ordered.clear();
+    st.ordered_set.clear();
+    for height in 21..=34u32 {
+        st.height_to_hash.remove(&height);
+    }
+    let guess = mine_at(tip.block_hash(), 40, tip.time + 40);
+    apply(&mut st, &hub, 0, vec![guess]);
+    assert!(
+        st.ordered_set.contains(&guess.block_hash()),
+        "a short refill above the confirmed tip is queued"
+    );
+
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let locator = take_locator(&mut rx);
+    assert_eq!(
+        locator[..3],
+        [
+            guess.block_hash(),
+            tip.block_hash(),
+            confirmed[fork_at].block_hash()
+        ],
+        "the guess, the confirmed tip, then the candidate's checkpoint"
+    );
+    let on_branch: Vec<Header> = confirmed[..=fork_at]
+        .iter()
+        .chain(branch.iter())
+        .copied()
+        .collect();
+    let reply = core_reply(&on_branch, &locator, 20);
+    assert_eq!(
+        reply.first().map(|hdr| hdr.prev_blockhash),
+        Some(confirmed[fork_at].block_hash()),
+        "a peer on the candidate's chain answers from the checkpoint it shares"
+    );
+    assert_eq!(reply.len(), branch.len());
+    apply(&mut st, &hub, 0, reply);
+    assert!(
+        !st.ordered_set.contains(&guess.block_hash()),
+        "a reply that meets the candidate's checkpoint drops the guess"
+    );
+    assert_eq!(st.header_walk.tip_hash(), Some(branch_tip));
+}
+
 #[test]
 fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-6");
@@ -5852,18 +5941,14 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
     f.queue_candidate(1);
     let locator = f.ask();
     assert_eq!(
-        locator[..3],
-        [stored, tip, walk_tip],
-        "the stored tip, then the confirmed tip as the proved anchor, then the candidate"
+        locator[..4],
+        [stored, tip, checkpoint, walk_tip],
+        "the stored tip, the confirmed tip, the checkpoint under it, then the candidate"
     );
-    let rest = f.heights(&locator[3..]);
+    let rest = f.heights(&locator[4..]);
     assert!(
         rest.windows(2).all(|pair| pair[0] > pair[1]),
         "what follows descends by height, got {rest:?}"
-    );
-    assert!(
-        locator[3..].contains(&checkpoint),
-        "the checkpoint under the confirmed tip is still named, in height order"
     );
     let on_candidate: Vec<Header> = f
         .confirmed
@@ -5898,14 +5983,10 @@ fn an_unproved_anchor_does_not_preempt_a_peer_on_a_heavier_fork() {
     let peer_chain: Vec<Header> = f.confirmed.iter().chain(fork.iter()).copied().collect();
     let locator = f.ask();
     assert_eq!(
-        locator[1],
-        tip,
-        "the confirmed tip is the proved anchor under the queue, got heights {:?}",
+        locator[1..3],
+        [tip, anchor],
+        "the confirmed tip is named before the checkpoint under it, got heights {:?}",
         f.heights(&locator)
-    );
-    assert!(
-        locator[2..].contains(&anchor),
-        "the lower checkpoint follows in height order"
     );
     // Five headers: from the anchor the reply would stop at the candidate's
     // height; from the confirmed tip it shows the whole heavier fork.
