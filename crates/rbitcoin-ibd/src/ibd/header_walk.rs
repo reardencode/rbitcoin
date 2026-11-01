@@ -2686,9 +2686,11 @@ pub struct AskTips {
 ///
 /// Bitcoin answers after the first locator hash the peer knows. While the
 /// queue can take headers, that hash is the stored tip, which can sit below
-/// the candidate. An unproved queue also names the proved anchor under it, so
-/// a peer that does not have the guess still sends the gap. A full queue is
-/// look-ahead and names neither.
+/// the candidate. An unproved queue also names the proved anchor under it,
+/// ranked by height with the rest, so a peer that does not have the guess
+/// still sends the gap from the highest hash it shares. Named ahead of the
+/// confirmed tip, the anchor got a reply the node already had. A full queue
+/// is look-ahead and names neither.
 #[doc(hidden)]
 pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     let mut tips = AskTips {
@@ -2697,8 +2699,11 @@ pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     };
     if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
         tips.refill.extend(stored_top_hash(st, hub));
-        tips.refill
-            .extend(unproved_anchor(st, hub).map(|(anchor, _)| anchor));
+        if let Some((anchor, height)) = unproved_anchor(st, hub) {
+            if !tips.walk.iter().any(|(_, hash)| *hash == anchor) {
+                tips.walk.push((height, anchor));
+            }
+        }
     }
     if tips.refill.is_empty() && tips.walk.is_empty() {
         tips.refill = super::path::work_path_tips(st);

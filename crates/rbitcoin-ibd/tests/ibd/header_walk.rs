@@ -5804,14 +5804,18 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
     f.queue_candidate(1);
     let locator = f.ask();
     assert_eq!(
-        locator[..3],
-        [stored, anchor, walk_tip],
-        "the stored tip and its anchor come before the candidate"
+        locator[..2],
+        [stored, walk_tip],
+        "the stored tip comes first, then the candidate"
     );
-    let rest = f.heights(&locator[3..]);
+    let rest = f.heights(&locator[2..]);
     assert!(
         rest.windows(2).all(|pair| pair[0] > pair[1]),
         "what follows descends by height, got {rest:?}"
+    );
+    assert!(
+        locator[2..].contains(&anchor),
+        "the proved anchor under the unproved queue is named in height order"
     );
     let on_candidate: Vec<Header> = f
         .confirmed
@@ -5824,4 +5828,47 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
         stored,
         "a peer on the candidate sends what the queue can take"
     );
+}
+
+/// An unproved queue holds one candidate header; its proved anchor sits two
+/// checkpoints below the confirmed tip. A peer forked at the confirmed tip
+/// with a taller chain must be answered from that tip, not from the anchor:
+/// the anchor's reply ends below the candidate's work, is only a challenger,
+/// and every later ask would repeat it.
+#[test]
+fn an_unproved_anchor_does_not_preempt_a_peer_on_a_heavier_fork() {
+    let mut f = WithheldCandidate::new("locator-anchor-ranked");
+    let tip = f.at(LOCATOR_FIXTURE_TIP);
+    let anchor = f.at(28);
+    f.st.ordered.clear();
+    f.st.ordered_set.clear();
+    f.st.hash_height.clear();
+    f.st.height_to_hash.clear();
+    f.queue_candidate(1);
+    let fork = headers_on(*f.confirmed.last().unwrap(), 11..=15);
+    let fork_tip = fork[4].block_hash();
+    let peer_chain: Vec<Header> = f.confirmed.iter().chain(fork.iter()).copied().collect();
+    let locator = f.ask();
+    let anchor_at = locator.iter().position(|hash| *hash == anchor);
+    let tip_at = locator.iter().position(|hash| *hash == tip);
+    assert!(
+        tip_at < anchor_at,
+        "the confirmed tip is named before the anchor, got heights {:?}",
+        f.heights(&locator)
+    );
+    // Five headers: from the anchor the reply would stop at the candidate's
+    // height; from the confirmed tip it shows the whole heavier fork.
+    let reply = core_reply(&peer_chain, &locator, 5);
+    assert_eq!(
+        reply.first().map(|hdr| hdr.prev_blockhash),
+        Some(tip),
+        "the peer answers from the confirmed tip"
+    );
+    apply(&mut f.st, &f.hub, 0, reply);
+    assert_eq!(
+        f.st.header_walk.tip_hash(),
+        Some(fork_tip),
+        "the heavier fork replaces the candidate on the first reply"
+    );
+    assert!(!f.st.header_walk.walk_quiet.contains(&0));
 }
