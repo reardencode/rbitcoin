@@ -4,10 +4,11 @@
 //! lowest time to a first block byte among peers that have not failed the
 //! walk, is asked for the next header that is not already stored. While the
 //! queue has room the locator starts at the stored tip, so the reply can be
-//! enqueued. The candidate, a lighter fork, the checkpoints, and the confirmed
-//! chain follow by descending height. A full queue starts with those. Headers
-//! already written are appended locally while the queue is under
-//! [`ORDERED_HEADERS_SOFT_CAP`].
+//! enqueued, then a lighter fork still being weighed when it is taller than
+//! the confirmed tip, then the proved points under an unproved queue. The
+//! candidate, that fork, the checkpoints, and the confirmed chain follow by
+//! descending height. A full queue starts with those. Headers already written
+//! are appended locally while the queue is under [`ORDERED_HEADERS_SOFT_CAP`].
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
