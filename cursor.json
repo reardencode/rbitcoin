@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
-  "new_skip": 1266,
-  "old_index": 4662,
+  "new_skip": 1392,
+  "old_index": 4862,
   "new_cap_used": true,
-  "run_id": "41176266659",
-  "old_name": "crates/rbitcoin-ibd/src/ibd/header_walk.rs:171:9: replace HeaderWalk::tip_height -> u32 with 0",
-  "new_len": 2947,
-  "new_remaining": 1681,
-  "completed_new": 0,
-  "completed_old": 612,
-  "old_len": 29664,
-  "old_remaining": 29052
+  "run_id": "41282609624",
+  "old_name": "crates/rbitcoin-ibd/src/ibd/header_walk.rs:824:9: replace || with && in header_ask_due",
+  "new_len": 2954,
+  "new_remaining": 1562,
+  "completed_new": 126,
+  "completed_old": 200,
+  "old_len": 29660,
+  "old_remaining": 29460
 }
