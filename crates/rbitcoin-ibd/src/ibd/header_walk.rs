@@ -2706,12 +2706,15 @@ pub struct AskTips {
 ///
 /// Bitcoin answers after the first locator hash the peer knows. While the
 /// queue can take headers, that hash is the stored tip, which can sit below
-/// the candidate. An unproved queue also names the proved points under it
-/// ahead of the candidate, highest first: the confirmed tip when it is above
-/// the anchor ([`confirmed_tip_above_anchor`]), then the anchor
-/// ([`unproved_anchor`]). A peer that does not have the guess still sends the
-/// gap from the highest one it shares, and a peer that has the candidate does
-/// not answer above the guess. A full queue is look-ahead and names none.
+/// the candidate. A lighter fork still being weighed comes next when it is
+/// taller than the confirmed tip, so its peer continues it with the next
+/// window instead of resending the one that did not beat the candidate. An
+/// unproved queue then names the proved points under it ahead of the
+/// candidate, highest first: the confirmed tip when it is above the anchor
+/// ([`confirmed_tip_above_anchor`]), then the anchor ([`unproved_anchor`]).
+/// A peer that does not have the guess still sends the gap from the highest
+/// one it shares, and a peer that has the candidate does not answer above
+/// the guess. A full queue is look-ahead and names none.
 #[doc(hidden)]
 pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     let mut tips = AskTips {
@@ -2720,6 +2723,11 @@ pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     };
     if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
         tips.refill.extend(stored_top_hash(st, hub));
+        if let Some(ch) = &st.header_walk.challenger {
+            if hub.tip_height().is_none_or(|tip_h| ch.tip.height > tip_h) {
+                tips.refill.extend(ch.tip.hash);
+            }
+        }
         if let Some((anchor, anchor_h)) = unproved_anchor(st, hub) {
             tips.refill
                 .extend(confirmed_tip_above_anchor(st, hub, anchor_h));
