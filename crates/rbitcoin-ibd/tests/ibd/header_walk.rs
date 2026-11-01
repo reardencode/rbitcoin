@@ -1727,6 +1727,53 @@ fn an_unproved_queue_does_not_hide_the_checkpoint() {
     assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
 }
 
+/// The queue holds a wrong guess under a proved candidate. An honest peer has
+/// the candidate but not the guess. Its reply, taken from the locator as Core
+/// answers it, must start under the guess and replace it, not after the
+/// candidate, which would be empty.
+#[test]
+fn a_peer_without_the_guess_refills_from_the_anchor_it_shares() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-guess-refill");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let genesis = hub.header_of(&gen).unwrap();
+    let good = mine(gen, 1);
+    let later = mine(good.block_hash(), 2);
+    let miss = mine(gen, 9);
+    let (s0, mut rx) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let _ = rx.try_recv();
+    apply(&mut st, &hub, 0, vec![good, later]);
+    st.ordered.clear();
+    st.ordered_set.clear();
+    st.height_to_hash.remove(&1);
+    st.height_to_hash.remove(&2);
+    apply(&mut st, &hub, 0, vec![miss]);
+    assert!(st.ordered_set.contains(&miss.block_hash()));
+
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let locator = take_locator(&mut rx);
+    let honest = [genesis, good, later];
+    let reply = core_reply(&honest, &locator, 5);
+    assert_eq!(
+        reply,
+        vec![good, later],
+        "the peer answers under the guess, got locator heights {:?}",
+        locator
+            .iter()
+            .map(|hash| honest.iter().position(|hdr| hdr.block_hash() == *hash))
+            .collect::<Vec<_>>()
+    );
+    apply(&mut st, &hub, 0, reply);
+    assert!(
+        st.ordered_set.contains(&good.block_hash()),
+        "the reply replaces the guess"
+    );
+    assert!(!st.ordered_set.contains(&miss.block_hash()));
+    assert!(!st.header_walk.walk_quiet.contains(&0));
+}
+
 #[test]
 fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-6");
@@ -5796,7 +5843,8 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
     let mut f = WithheldCandidate::new("locator-refill-first");
     let stored = f.candidate[0].block_hash();
     let walk_tip = f.candidate[2].block_hash();
-    let anchor = f.at(28);
+    let tip = f.at(LOCATOR_FIXTURE_TIP);
+    let checkpoint = f.at(28);
     f.st.ordered.clear();
     f.st.ordered_set.clear();
     f.st.hash_height.clear();
@@ -5804,18 +5852,18 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
     f.queue_candidate(1);
     let locator = f.ask();
     assert_eq!(
-        locator[..2],
-        [stored, walk_tip],
-        "the stored tip comes first, then the candidate"
+        locator[..3],
+        [stored, tip, walk_tip],
+        "the stored tip, then the confirmed tip as the proved anchor, then the candidate"
     );
-    let rest = f.heights(&locator[2..]);
+    let rest = f.heights(&locator[3..]);
     assert!(
         rest.windows(2).all(|pair| pair[0] > pair[1]),
         "what follows descends by height, got {rest:?}"
     );
     assert!(
-        locator[2..].contains(&anchor),
-        "the proved anchor under the unproved queue is named in height order"
+        locator[3..].contains(&checkpoint),
+        "the checkpoint under the confirmed tip is still named, in height order"
     );
     let on_candidate: Vec<Header> = f
         .confirmed
@@ -5830,11 +5878,11 @@ fn a_refill_still_asks_after_the_stored_tip_first() {
     );
 }
 
-/// An unproved queue holds one candidate header; its proved anchor sits two
-/// checkpoints below the confirmed tip. A peer forked at the confirmed tip
-/// with a taller chain must be answered from that tip, not from the anchor:
-/// the anchor's reply ends below the candidate's work, is only a challenger,
-/// and every later ask would repeat it.
+/// An unproved queue holds one candidate header; the walk's highest checkpoint
+/// under it sits two below the confirmed tip. A peer forked at the confirmed
+/// tip with a taller chain must be answered from that tip, not from the
+/// checkpoint: that reply ends below the candidate's work, is only a
+/// challenger, and every later ask would repeat it.
 #[test]
 fn an_unproved_anchor_does_not_preempt_a_peer_on_a_heavier_fork() {
     let mut f = WithheldCandidate::new("locator-anchor-ranked");
@@ -5849,12 +5897,15 @@ fn an_unproved_anchor_does_not_preempt_a_peer_on_a_heavier_fork() {
     let fork_tip = fork[4].block_hash();
     let peer_chain: Vec<Header> = f.confirmed.iter().chain(fork.iter()).copied().collect();
     let locator = f.ask();
-    let anchor_at = locator.iter().position(|hash| *hash == anchor);
-    let tip_at = locator.iter().position(|hash| *hash == tip);
-    assert!(
-        tip_at < anchor_at,
-        "the confirmed tip is named before the anchor, got heights {:?}",
+    assert_eq!(
+        locator[1],
+        tip,
+        "the confirmed tip is the proved anchor under the queue, got heights {:?}",
         f.heights(&locator)
+    );
+    assert!(
+        locator[2..].contains(&anchor),
+        "the lower checkpoint follows in height order"
     );
     // Five headers: from the anchor the reply would stop at the candidate's
     // height; from the confirmed tip it shows the whole heavier fork.

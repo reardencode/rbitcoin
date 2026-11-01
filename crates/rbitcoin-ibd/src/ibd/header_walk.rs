@@ -2044,14 +2044,21 @@ pub fn unproved_anchor(st: &IbdWorkState, hub: &ChainHub) -> Option<(BlockHash, 
     if reached {
         return None;
     }
+    // The highest proved point under the front. The confirmed tip is proved,
+    // so it beats a lower checkpoint: named ahead of the candidate, that
+    // checkpoint got a reply of headers the node already had.
+    let tip_below = hub
+        .tip_height()
+        .zip(hub.tip_hash())
+        .filter(|(tip_h, _)| *tip_h < front_h);
     if let Some(cp) = below {
-        return Some((cp.hash, cp.height));
+        return match tip_below {
+            Some((tip_h, tip_hash)) if tip_h > cp.height => Some((tip_hash, tip_h)),
+            _ => Some((cp.hash, cp.height)),
+        };
     }
-    let tip_h = hub.tip_height()?;
-    if front_h == tip_h.saturating_add(1) {
-        return Some((hub.tip_hash()?, tip_h));
-    }
-    None
+    let (tip_h, tip_hash) = tip_below?;
+    (front_h == tip_h.saturating_add(1)).then_some((tip_hash, tip_h))
 }
 
 /// A batch from the proved anchor under an unproved queue.
@@ -2686,11 +2693,10 @@ pub struct AskTips {
 ///
 /// Bitcoin answers after the first locator hash the peer knows. While the
 /// queue can take headers, that hash is the stored tip, which can sit below
-/// the candidate. An unproved queue also names the proved anchor under it,
-/// ranked by height with the rest, so a peer that does not have the guess
-/// still sends the gap from the highest hash it shares. Named ahead of the
-/// confirmed tip, the anchor got a reply the node already had. A full queue
-/// is look-ahead and names neither.
+/// the candidate. An unproved queue also names the highest proved point under
+/// it ([`unproved_anchor`]) ahead of the candidate, so a peer that does not
+/// have the guess still sends the gap, and a peer that has the candidate does
+/// not answer above the guess. A full queue is look-ahead and names neither.
 #[doc(hidden)]
 pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     let mut tips = AskTips {
@@ -2699,11 +2705,8 @@ pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
     };
     if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
         tips.refill.extend(stored_top_hash(st, hub));
-        if let Some((anchor, height)) = unproved_anchor(st, hub) {
-            if !tips.walk.iter().any(|(_, hash)| *hash == anchor) {
-                tips.walk.push((height, anchor));
-            }
-        }
+        tips.refill
+            .extend(unproved_anchor(st, hub).map(|(anchor, _)| anchor));
     }
     if tips.refill.is_empty() && tips.walk.is_empty() {
         tips.refill = super::path::work_path_tips(st);
