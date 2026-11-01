@@ -6,5 +6,5 @@ Fixed
   nobody serves, a peer on a heavier fork sent 2,000 headers from a checkpoint
   the node already had, and the node stayed on that candidate
   ([#1337](https://github.com/reardencode/rbitcoin/issues/1337)). After the
-  stored tip a refill asks from, the locator now descends by height, as in
-  Core.
+  refill prefix, the stored tip and the proved points under an unproved
+  queue, the locator now descends by height, as in Core.
