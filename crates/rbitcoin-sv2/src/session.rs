@@ -131,7 +131,13 @@ pub struct FeePush {
 #[doc(hidden)]
 pub struct Templates {
     pub last_id: u64,
+    /// The prev hash the client was last sent `SetNewPrevHash` for. Only
+    /// [`Session::send`] moves it, so a session that retires jobs without
+    /// ever pushing a template still announces its tip when it first does.
     pub current_prev: Option<[u8; 32]>,
+    /// The tip retention last moved to ([`Self::start_grace`]): the prev hash
+    /// no entry retires for.
+    tip: Option<[u8; 32]>,
     /// `SetNewPrevHash.header_timestamp` sent for `current_prev`, and when.
     pub prev_sent: Option<(u32, Instant)>,
     /// `SetNewPrevHash.n_bits` and `target` sent for `current_prev`.
@@ -142,7 +148,7 @@ pub struct Templates {
     pub last_value_remaining: Option<u64>,
     pub retained: VecDeque<Retained>,
     /// `(prev hash, deadline)` for the tips this session moved off, oldest
-    /// first, at most [`MAX_RETIRED_TIPS`]. Never holds `current_prev`.
+    /// first, at most [`MAX_RETIRED_TIPS`]. Never holds `tip`.
     retired: VecDeque<([u8; 32], Instant)>,
 }
 
@@ -208,7 +214,7 @@ impl Admitted {
 impl Templates {
     /// A job validated while the session is on another tip carries that
     /// tip's recorded deadline, which may already have passed: it is never
-    /// given a fresh grace. A job on `current_prev`, or on a tip the session
+    /// given a fresh grace. A job on `tip`, or on a tip the session
     /// has not moved off yet (a validation can read the store tip before this
     /// session handles its event), has none, and the next [`Self::start_grace`]
     /// classifies it.
@@ -245,20 +251,20 @@ impl Templates {
         self.retained.iter().find(|r| r.id == id)
     }
 
-    /// The session moves to `new_prev`. Entries on any other prev hash retire
+    /// Retention moves to `new_prev`. Entries on any other prev hash retire
     /// at `deadline` unless they already have one; entries on `new_prev` are
     /// current, including ones from before an earlier move off it. The tip
     /// left behind records `deadline` for jobs that finish on it later.
     #[doc(hidden)]
     pub fn start_grace(&mut self, new_prev: [u8; 32], deadline: Instant) {
         self.retired.retain(|(prev, _)| *prev != new_prev);
-        if let Some(left) = self.current_prev.filter(|prev| *prev != new_prev) {
+        if let Some(left) = self.tip.filter(|prev| *prev != new_prev) {
             if self.retired.len() == MAX_RETIRED_TIPS {
                 self.retired.pop_front();
             }
             self.retired.push_back((left, deadline));
         }
-        self.current_prev = Some(new_prev);
+        self.tip = Some(new_prev);
         for r in &mut self.retained {
             if r.job.prev_hash == new_prev {
                 r.retire_at = None;
@@ -447,8 +453,17 @@ impl Session {
                     idle_at = idle_timeout.map(|t| Instant::now() + t);
                 }
                 tip = tips.recv() => match tip {
-                    Ok(ev) if !self.templates.on_tip(ev.hash.to_byte_array()) => {}
-                    Ok(_) | Err(RecvError::Lagged(_)) => self.publish().await?,
+                    Ok(ev) => {
+                        let hash = ev.hash.to_byte_array();
+                        if !self.announces_prev() {
+                            let deadline = Instant::now() + self.stale_grace;
+                            self.templates.start_grace(hash, deadline);
+                        }
+                        if self.templates.on_tip(hash) {
+                            self.publish().await?;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => self.publish().await?,
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
@@ -512,6 +527,13 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// A session with constraints is told each new prev hash by [`Self::send`],
+    /// and its grace starts there, once the client knows the tip changed. One
+    /// without (it only validates jobs) has its grace started by the tip event.
+    fn announces_prev(&self) -> bool {
+        self.constraints.is_some()
     }
 
     /// Past the setup deadline's reach: constraints arrived, or the session
@@ -782,6 +804,7 @@ impl Session {
             let now = Instant::now();
             self.templates.prev_sent = Some((t.job.header_timestamp, now));
             self.templates.sent_bits = Some((t.n_bits, t.target));
+            self.templates.current_prev = Some(t.job.prev_hash);
             self.templates
                 .start_grace(t.job.prev_hash, now + self.stale_grace);
         }

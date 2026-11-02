@@ -1109,7 +1109,13 @@ Three review findings on the hold and the retained ring, one rule each.
   start the template stream as they always did. A session without the flag
   keeps the setup deadline (`session_without_constraints_is_dropped_at_the_setup_deadline`).
   The handshake deadline in `serve` is unchanged. No flag, no message, no
-  wire field. A configured idle timeout shorter than the 30 s provide hold
+  wire field. Retention follows the tip for it too: `Templates` keeps `tip`
+  (where retention last moved, `start_grace`) apart from `current_prev` (the
+  prev hash `send` announced), and `Session::run` calls `start_grace` on a
+  tip event when the session has no constraints, so its retained jobs, private
+  supplied bodies included, retire by their own parent after `stale_grace`
+  like a template's. Constraints sent later still get a future template and
+  `SetNewPrevHash`, since the event never moved `current_prev`. A configured idle timeout shorter than the 30 s provide hold
   closes a quiet JDS that is waiting for its JDC to answer a
   `ProvideMissingTransactions`; the operator doc says so.
 - **Red:** `validation_only_session_validates_and_solves_past_the_setup_timeout`:
@@ -1121,6 +1127,11 @@ Three review findings on the hold and the retained ring, one rule each.
   a flagged session with the default 10 s setup timeout and a 300 ms idle timeout
   that sends nothing is closed (red: it stayed open, as the idle arm waited
   for constraints).
+  `validation_only_session_retires_jobs_on_a_tip_change`: a job validated on
+  tip A answers `stale-template-id` after a block moves the tip and
+  `stale_grace` passes (red: still retained five seconds later), a job
+  validated on the new tip stays, and constraints sent afterwards get
+  `NewTemplate(future=true)` and `SetNewPrevHash`.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite validation_only`.
 
 ### Test budget
@@ -1158,11 +1169,15 @@ the mempool write lock held. No `rbitcoin-test` node journey yet
   same-tip pushes and validations the oldest goes; a
   `SubmitSolution` for it is dropped and JDC's own propagation (JDP 6.4.9)
   covers the block.
-- A validation-only session (D17) never starts a template stream, so its
-  tip events never open a stale grace and its retained jobs leave only
-  through the 64-slot ring, not on a timer. A solution on a job of an old
-  tip is a side block, as before; the RAM bound is the ring (D10), which a
-  JDS can already fill at one tip.
+- A validation-only session (D17) retires its jobs on the tip event: it
+  is sent no `SetNewPrevHash`, so its grace starts when the session handles
+  the event, where a session with constraints starts it when it sends the
+  new prev hash (`Session::announces_prev` picks which). A session with
+  constraints that is holding (IBD, or a pool that is not maintained) has
+  sent no new prev hash, so its jobs keep their parent's mark until the
+  first template goes out; the 64-slot ring (D10) bounds that. A missed
+  event (`Lagged`) leaves retention on the old tip until the next one. A
+  solution on a job of an old tip is a side block, as before.
 - A validated job's solution is hashed by a JDC with the nBits its own TP
   sent, which this session may never have sent (D16). The header is rebuilt
   with the consensus nBits of a child of the job's parent at the submitted

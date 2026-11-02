@@ -1449,12 +1449,33 @@ async fn connect_tp_timed(
     provide_timeout: Duration,
     setup_timeout: Duration,
 ) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_graced(
+        tc,
+        flags,
+        template_interval,
+        provide_timeout,
+        setup_timeout,
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+/// [`connect_tp_timed`] on a TP that keeps a replaced tip's jobs for
+/// `stale_grace`.
+async fn connect_tp_graced(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+    setup_timeout: Duration,
+    stale_grace: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
-        stale_grace: Duration::from_secs(10),
+        stale_grace,
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
@@ -2451,6 +2472,75 @@ async fn validation_only_session_validates_and_solves_past_the_setup_timeout() {
 
     c.coinbase_output_constraints(0, 0).await.unwrap();
     expect_template(&mut c, &tc, &[], true).await;
+
+    tp.shutdown().await;
+}
+
+/// Moves the store tip one empty block on, as a peer's block would.
+fn advance_tip(tc: &TestChain) {
+    let tip = tc.chain.tip_header().expect("tip");
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let next = mine_empty_regtest(tip.block_hash(), tip.time + 1, h + 1);
+    let loaded = tc
+        .chain
+        .confirm_wire_load_phase(&[(Height(h + 1), next)])
+        .expect("load")
+        .expect("contiguous");
+    let scripted = confirm_scripts_phase(loaded.batch).expect("scripts");
+    tc.chain.confirm_write(scripted.batch).expect("write");
+}
+
+/// Asks for `template_id` until the session answers stale-template-id: the
+/// retirement is a timer in the session, so the moment it fires is not
+/// observable any other way.
+async fn expect_retired(c: &mut TpClient, template_id: u64) {
+    for _ in 0..100 {
+        c.request_transaction_data(template_id).await.unwrap();
+        let mut f = recv_in_time(c).await;
+        if f.msg_type == MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR {
+            let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+            assert_eq!(e.error_code.as_utf8_or_hex(), "stale-template-id");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("job {template_id} was still retained five seconds after its tip was replaced");
+}
+
+/// A session that never sends `CoinbaseOutputConstraints` pushes no
+/// template, but its jobs retire by their own parent like any session's:
+/// after the tip moves and `stale_grace` passes, a job validated on the old
+/// tip answers stale-template-id (its private bodies are released) and a job
+/// validated on the new tip stays. Constraints sent later still get a future
+/// template and the `SetNewPrevHash` of the tip, because retiring jobs did
+/// not announce it.
+#[tokio::test(flavor = "multi_thread")]
+async fn validation_only_session_retires_jobs_on_a_tip_change() {
+    let tc = shared_regtest(0);
+    mock_live_tip(&tc);
+    let grace = Duration::from_millis(200);
+    let (tp, mut c) = connect_tp_graced(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        PROVIDE_TIMEOUT,
+        SETUP_TIMEOUT,
+        grace,
+    )
+    .await;
+
+    let on_a = Declared::validate(&tc, &mut c, 1, 1).await;
+    expect_retained(&mut c, on_a.template_id, &[]).await;
+    advance_tip(&tc);
+    expect_retired(&mut c, on_a.template_id).await;
+
+    let on_b = Declared::validate(&tc, &mut c, 2, 2).await;
+    tokio::time::sleep(grace * 3).await;
+    expect_retained(&mut c, on_b.template_id, &[]).await;
+
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[], true).await;
+    expect_retained(&mut c, on_b.template_id, &[]).await;
 
     tp.shutdown().await;
 }
