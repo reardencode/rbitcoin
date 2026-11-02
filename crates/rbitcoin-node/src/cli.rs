@@ -608,6 +608,14 @@ pub fn store_read_budget(hdd: bool, parallelism: usize, flag: Option<usize>) -> 
     }
 }
 
+/// Proposal validations the SV2 TP runs at once: a quarter of
+/// [`blocking_pool_size`], at least one, so proposals leave the rest of the
+/// pool to every other user of it.
+#[doc(hidden)]
+pub fn proposal_validation_permits() -> usize {
+    (blocking_pool_size() / 4).max(1)
+}
+
 #[doc(hidden)]
 pub fn node_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()

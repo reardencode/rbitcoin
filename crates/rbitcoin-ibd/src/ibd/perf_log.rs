@@ -1276,6 +1276,7 @@ pub struct TipPerfLog {
     pub sv2_builds: u64,
     pub sv2_build_avg_us: u64,
     pub sv2_build_max_us: u64,
+    pub sv2_validating: u64,
 }
 
 /// `tip: perf` body. Compact JSON, `ts` is unix milliseconds.

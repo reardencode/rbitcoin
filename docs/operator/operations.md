@@ -315,7 +315,7 @@ Core functional tests still grep `UpdateTip: …` via the debug.log map
 
 | Line | Level | Use |
 |------|-------|-----|
-| `tip: perf` | DEBUG | One JSON object every ~5s: follow peers, blocks this window, mempool accept/reject + wall µs, inv/getdata/announce, Esplora/Electrum req counts + avg/max µs, historical block serve (`serve_n`, `serve_bytes`, `serve_tx`, `serve_avg_us`, `serve_max_us`), and SV2 (`sv2_checks`, `sv2_builds`, `sv2_build_avg_us`, `sv2_build_max_us`; zeros without `--sv2-tp-listen`) |
+| `tip: perf` | DEBUG | One JSON object every ~5s: follow peers, blocks this window, mempool accept/reject + wall µs, inv/getdata/announce, Esplora/Electrum req counts + avg/max µs, historical block serve (`serve_n`, `serve_bytes`, `serve_tx`, `serve_avg_us`, `serve_max_us`), and SV2 (`sv2_checks`, `sv2_builds`, `sv2_build_avg_us`, `sv2_build_max_us`, `sv2_validating`; zeros without `--sv2-tp-listen`) |
 | `tip: accept` | DEBUG | Per accepted tip block: wall/load/script/class_a/class_c/SH plus lookup/struct/drain/mp_strip/other (not emitted on reject) |
 | `tip: best=` | INFO | New best hash/height after connect |
 | `cmpct reconstruct` | INFO | Per compact reconstruct: fill sources (`prefill`/`mempool`/`extra`/`orphan`) and `fetched=` `blocktxn` count/bytes. `fetched=0/0` means no getblocktxn round-trip. Getdata fallback: `getdata missing=` |
@@ -557,6 +557,7 @@ lock on the progress registry. NixOS:
 | `rbitcoin_electrum_requests_total` / `_request_seconds_total` | counter | Lifetime sum of `tip: perf` JSON `electrum_n`, and of that handler's wall time in seconds. The DEBUG line is the last ~5s window (`electrum_avg_us` in microseconds) |
 | `rbitcoin_block_serve_total` / `_bytes_total` | counter | Lifetime sum of `tip: perf` JSON `serve_n` / `serve_bytes`. That line is the last ~5s window |
 | `rbitcoin_sv2_fee_checks_total` | counter | Lifetime sum of `tip: perf` JSON `sv2_checks` (with `--sv2-tp-listen`): about one per SV2 session per `--sv2-tp-template-interval` |
+| `rbitcoin_sv2_validations_running` | gauge | SV2 `ProposeTemplate` validations on blocking threads now (`tip: perf` JSON `sv2_validating`); at most a quarter of the blocking pool, at least 1 |
 | `rbitcoin_sv2_template_builds_total` / `_template_build_seconds_total` | counter | Lifetime sum of `tip: perf` JSON `sv2_builds`, and of the build wall time in seconds. Every template sent is a build; a fee check whose gain is under the delta builds one it does not send |
 | `rbitcoin_mempool_accepts_total` / `_rejects_total` | counter | Lifetime sum of `tip: perf` JSON `accepts` / `rejects`. That line is the last ~5s window |
 | `process_resident_memory_bytes` | gauge | Same RSS reading as `ibd: perf` JSON `rss_kb` and `tip: perf` JSON `rss.rss_kb`, in bytes (`rss_kb * 1024`). Linux and macOS |

@@ -76,6 +76,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -150,6 +151,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -188,6 +190,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -233,6 +236,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -315,6 +319,7 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -356,6 +361,7 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -424,6 +430,7 @@ async fn oversized_client_frame_closes_the_session() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -514,10 +521,32 @@ async fn out_of_range_timing_refuses_to_start() {
             fee_delta: FEE_DELTA,
             template_interval,
             constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+            validation_permits: 4,
         })
         .await
         .err()
         .expect("out-of-range config must not start");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+    }
+    for validation_permits in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+        let e = run_sv2_tp(Sv2TpConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            chain: Arc::clone(&chain),
+            authority_secret: [7; 32],
+            cert_validity: hour,
+            stale_grace: Duration::ZERO,
+            setup_timeout: SETUP_TIMEOUT,
+            idle_timeout: None,
+            write_timeout: WRITE_TIMEOUT,
+            provide_timeout: PROVIDE_TIMEOUT,
+            fee_delta: FEE_DELTA,
+            template_interval: TEMPLATE_INTERVAL,
+            constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+            validation_permits,
+        })
+        .await
+        .err()
+        .expect("out-of-range validation permits must not start");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
     let e = run_sv2_tp(Sv2TpConfig {
@@ -533,6 +562,7 @@ async fn out_of_range_timing_refuses_to_start() {
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .err()

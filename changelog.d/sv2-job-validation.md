@@ -15,9 +15,14 @@ Added
   `SubmitSolution` accepts like one of the node's own templates; the job is
   retained like one too (same ring, same stale grace). Duplicated,
   undeclared, or malformed input is refused before anything is decoded.
-  Validation runs off the session loop, up to four at once per
-  connection, so a `SubmitSolution` or a tip push never waits behind
-  another client's proposal. A connection holds at most 16 accepted
+  Validation runs off the session loop, so a `SubmitSolution` or a tip
+  push never waits behind another client's proposal. Across all
+  connections, at most a quarter of the node's blocking-thread pool (at
+  least one) validates at once, and a validation already running keeps its
+  share until it finishes even if its connection closes; that reserves
+  threads from proposals but does not stop other work from using the pool.
+  `/metrics` `rbitcoin_sv2_validations_running` and the `tip: perf`
+  `sv2_validating` field show how many run. A connection holds at most 16 accepted
   proposals and 16 MiB of them (wtxids, coinbase split, supplied
   transactions) at once; one past either is answered
   `job-validation-unavailable` and the connection keeps serving.

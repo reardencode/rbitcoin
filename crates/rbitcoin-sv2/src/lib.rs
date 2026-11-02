@@ -18,6 +18,7 @@ use bitcoin::secp256k1::{Keypair, Secp256k1};
 use rbitcoin_net::{ChainHub, RequestMeter};
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -115,6 +116,13 @@ pub struct Sv2TpConfig {
     /// How long a changed coinbase budget waits after the previous template.
     /// The node passes [`CONSTRAINTS_COOLDOWN`].
     pub constraints_cooldown: Duration,
+    /// Proposal validations that may run at once across every session, from
+    /// 1 to [`Semaphore::MAX_PERMITS`]. CPU and thread trade (CONTRIBUTING 9):
+    /// each is one full proposal check on a blocking thread, so this reserves
+    /// that many blocking threads from proposals; it does not stop other users
+    /// of the pool. Internal sizing, not an operator flag: the node passes a
+    /// quarter of its blocking pool.
+    pub validation_permits: usize,
 }
 
 /// Template work across this listener's sessions, for `tip: perf` and
@@ -126,6 +134,29 @@ pub struct Sv2TpStats {
     pub fee_checks: RequestMeter,
     /// Template builds (constraints, tip, fee check), wall time each.
     pub builds: RequestMeter,
+    /// Proposal validations running on blocking threads now. Each holds a
+    /// listener permit, so it never exceeds `validation_permits`.
+    validations_running: AtomicU64,
+}
+
+impl Sv2TpStats {
+    /// Proposal validations running on blocking threads now.
+    pub fn validations_running(&self) -> u64 {
+        self.validations_running.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn enter_validation(self: &Arc<Self>) -> RunningValidation {
+        self.validations_running.fetch_add(1, Ordering::Relaxed);
+        RunningValidation(Arc::clone(self))
+    }
+}
+
+pub(crate) struct RunningValidation(Arc<Sv2TpStats>);
+
+impl Drop for RunningValidation {
+    fn drop(&mut self) {
+        self.0.validations_running.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 pub struct Sv2TpHandle {
@@ -195,6 +226,15 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             ),
         ));
     }
+    if !(1..=Semaphore::MAX_PERMITS).contains(&config.validation_permits) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "sv2 validation_permits: want 1 to {}",
+                Semaphore::MAX_PERMITS
+            ),
+        ));
+    }
     let keypair =
         Keypair::from_seckey_slice(&Secp256k1::new(), &config.authority_secret).map_err(|e| {
             io::Error::new(
@@ -221,6 +261,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let stats = Arc::new(Sv2TpStats::default());
     let slots = Arc::new(Semaphore::new(MAX_SESSIONS));
     let flight = Arc::new(template::TemplateFlight::new());
+    let permits = Arc::new(Semaphore::new(config.validation_permits));
     let sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let sessions_c = sessions.clone();
     let stats_c = Arc::clone(&stats);
@@ -261,6 +302,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             let chain = Arc::clone(&chain);
             let stats = Arc::clone(&stats_c);
             let flight = Arc::clone(&flight);
+            let permits = Arc::clone(&permits);
             let h = tokio::spawn(async move {
                 let _slot = slot;
                 match session::serve(
@@ -276,6 +318,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     constraints_cooldown,
                     stats,
                     flight,
+                    permits,
                 )
                 .await
                 {

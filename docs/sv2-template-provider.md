@@ -814,9 +814,10 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   while a validation is in flight; `ProposeTemplate.Success` / `.Error` is
   sent when the validation completes, paired by `request_id`, and the job
   is retained when that reply is sent (so it takes the template id current
-  then). Up to `MAX_INFLIGHT_VALIDATIONS` (4) validations run at once per
-  session; further proposals wait in arrival order up to the D13 bound.
-  Session end aborts the in-flight set. Before D11 `on_frame` awaited the
+  then). How many validations run at once is the D14 node-wide bound;
+  accepted proposals wait in arrival order up to the D13 bound. A session
+  that ends discards its verdicts, but a validation already on a blocking
+  thread runs to completion and keeps its permit until then (D14). Before D11 `on_frame` awaited the
   validation inline inside the session `select!`, so a JDS multiplexing
   many JDCs over one connection could have a found block's
   `SubmitSolution` sit behind another JDC's validation.
@@ -854,6 +855,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   bounded by D13.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 10 times in
   a loop.
+- **Superseded in part:** D11 first ran four validations per session
+  (`MAX_INFLIGHT_VALIDATIONS`); D14 replaced that count with one
+  listener-wide bound.
 
 ### D12 — Missing transactions as a request/provide pair
 
@@ -946,6 +950,47 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   runs at the IBD gate.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite propose_template_admission`.
 
+### D14 — Node-wide validation bound
+
+- **Contract:** one `tokio::sync::Semaphore` per listener, sized by
+  `Sv2TpConfig::validation_permits` (internal, not an operator flag; the
+  listener refuses 0 and anything over `Semaphore::MAX_PERMITS`). A session
+  takes an `OwnedSemaphorePermit` before `spawn_blocking` and moves it into
+  the closure, so the permit is released only when the blocking work
+  returns, even if the session and its `JoinSet` are gone: dropping the
+  `JoinSet` discards verdicts but cannot stop a started blocking closure, so
+  reconnecting does not buy more concurrent validations. A session waits for
+  its permit in its select loop with one pending acquire at a time (no task
+  or thread per waiting proposal), so its queue stays FIFO and sessions are
+  served in the semaphore's FIFO order. The node sets the count to
+  `max(1, blocking_pool / 4)` from the function that sizes its blocking pool
+  (`cli::proposal_validation_permits` over `blocking_pool_size`), so
+  proposals use at most a quarter of the pool and a four-thread node runs one
+  at a time. This reserves blocking threads from proposals; it does not stop
+  other users of the pool (template builds, `SubmitSolution`, Electrum, RPC)
+  from filling it. `Sv2TpStats::validations_running` counts closures between
+  permit and return; it is exported as `/metrics`
+  `rbitcoin_sv2_validations_running` and `tip: perf` JSON `sv2_validating`.
+- **Red:** `propose_template_validations_are_bounded_across_sessions` on a
+  runtime with `max_blocking_threads(4)` and one permit (what the node
+  computes for four). With the mempool write lock held, one session's
+  proposal runs and two other sessions' wait: the gauge is 1 (Red was 3, the
+  per-session path) and a `spawn_blocking` on the same runtime completes.
+  The running validation's client drops, a new session proposes, and the
+  gauge stays 1. On release the three live sessions each get a verdict and
+  the gauge is 0. `proposal_validations_use_a_quarter_of_the_blocking_pool`
+  pins the node's count; `out_of_range_timing_refuses_to_start` gains the
+  permit bounds; the `sv2_tp_bootstrap` journey reads the metric.
+- **Green:** `Session.permits` and `permit_wait` replace the per-session
+  in-flight count; `start_validation` moves the permit, then an
+  `enter_validation` guard (increment, decrement on drop), into the closure.
+- **CPU and thread trade:** a quarter of the blocking pool for proposals
+  (16 on a 64-core host, 1 on a 4-thread one). A JDS declaring for many JDCs
+  at a tip change queues behind that bound (D13) and sees verdicts one
+  validation at a time on a small node; validation speed, not safety, is
+  what a small node gives up.
+- **Verify:** `cargo test -p rbitcoin-sv2 --test suite propose_template_validations`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -953,8 +998,8 @@ Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
 Journeys in `rbitcoin-sv2`
 `template_tests`: five, each one TP and one session on the shared regtest
 pad; the D11 journey is the heaviest (a fan-out block, then three
-validations of 400 supplied spends); D13 adds two more, each one TP and one
-session with the mempool write lock held. No `rbitcoin-test` node journey yet
+validations of 400 supplied spends); D13 adds two more and D14 one, each with
+the mempool write lock held. No `rbitcoin-test` node journey yet
 (follow-up with a JDS client).
 
 ### Risks / follow-ups

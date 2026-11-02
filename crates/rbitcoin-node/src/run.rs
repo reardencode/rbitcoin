@@ -1393,9 +1393,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let (esp_n, esp_us, esp_max) = rbitcoin_esplora::sample_reset_perf();
                 let (el_n, el_us, el_max) = rbitcoin_electrum::sample_reset_perf();
                 let serve = sample_reset_serve_perf();
-                let sv2 = sv2_stats
-                    .as_ref()
-                    .map(|s| (s.fee_checks.take_window().0, s.builds.take_window()));
+                let sv2 = sv2_stats.as_ref().map(|s| {
+                    (
+                        s.fee_checks.take_window().0,
+                        s.builds.take_window(),
+                        s.validations_running(),
+                    )
+                });
                 let blks = std::mem::take(&mut window_blocks);
                 if enabled(Level::Debug) {
                     let live = mempool_blocking(&mempool, MempoolHub::live_count).await?;
@@ -1406,9 +1410,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         .unwrap_or(mp.accept_us);
                     let esp_avg = esp_us.checked_div(esp_n).unwrap_or(0);
                     let el_avg = el_us.checked_div(el_n).unwrap_or(0);
-                    let (sv2_checks, sv2_builds, sv2_build_us, sv2_build_max_us) = sv2
-                        .map(|(checks, (n, us, max))| (checks, n, us, max))
-                        .unwrap_or((0, 0, 0, 0));
+                    let (sv2_checks, sv2_builds, sv2_build_us, sv2_build_max_us, sv2_validating) =
+                        sv2.map(|(checks, (n, us, max), validating)| {
+                            (checks, n, us, max, validating)
+                        })
+                        .unwrap_or((0, 0, 0, 0, 0));
                     let line = tip_perf_json(&TipPerfLog {
                         rss: read_platform_rss(),
                         cache_bodies: node.hub.cache_body_count(),
@@ -1442,6 +1448,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         sv2_builds,
                         sv2_build_avg_us: sv2_build_us.checked_div(sv2_builds).unwrap_or(0),
                         sv2_build_max_us,
+                        sv2_validating,
                     });
                     debug!("tip: perf {line}");
                 }
@@ -2585,6 +2592,7 @@ pub async fn start_sv2_tp(
         fee_delta: config.sv2_tp_fee_delta,
         template_interval: config.sv2_tp_template_interval,
         constraints_cooldown: config.sv2_tp_constraints_cooldown,
+        validation_permits: crate::cli::proposal_validation_permits(),
     };
     let h = run_sv2_tp(cfg)
         .await

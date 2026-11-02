@@ -321,6 +321,12 @@ the node checks a Job Declarator Server's declared job as a block on its tip
 (no proof of work; no script checks beyond what mempool admission already
 ran), asks for the transactions it lacks, and retains a valid job under a
 template id that `SubmitSolution` accepts, naming the tip it validated on.
+Across all sessions, at most a quarter of the node's blocking-thread pool (at
+least one, so one at a time on a four-thread host) validates proposals at once; a
+validation already running keeps its share until it finishes, even if its client
+disconnects. That reserves threads from proposals; other work can still fill the
+pool. `rbitcoin_sv2_validations_running` (`/metrics`) and `sv2_validating`
+(`tip: perf`) show the running count.
 A session holds at most 16 accepted proposals and 16 MiB of them
 (wtxids, coinbase split, supplied transactions) that are not yet answered; one past
 either bound is answered `job-validation-unavailable` and the session keeps serving.
