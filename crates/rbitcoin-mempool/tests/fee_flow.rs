@@ -81,3 +81,40 @@ fn idle_decays() {
     let bi = bucket_index(500);
     assert!(cold[bi] < hot[bi], "hot={} cold={}", hot[bi], cold[bi]);
 }
+
+/// A steady stream settles at the stream's own rate: 10_000 WU every second
+/// for 20 half-lives reads 10_000 WU/s. Decaying the admitted bucket twice
+/// settled near half that.
+#[test]
+fn steady_stream_reads_its_own_rate() {
+    let t0 = Instant::now();
+    let mut m = FeeFlowMeter::new(t0);
+    for i in 1..=3_000 {
+        m.note_admit(10_000, 1_000, t0 + Duration::from_secs(i));
+    }
+    let rates = m.admit_rates_wu_s(t0 + Duration::from_secs(3_000));
+    assert_eq!(rates[bucket_index(1_000)], 10_000);
+}
+
+/// A snapshot between admits leaves the next sample alone. The read used to
+/// move the gap clock, so the admit at 400 s divided its weight by the 1 s
+/// since the read instead of the 300 s since the last admit.
+#[test]
+fn snapshot_read_does_not_change_the_next_sample() {
+    let t0 = Instant::now();
+    let mut quiet = FeeFlowMeter::new(t0);
+    let mut read = FeeFlowMeter::new(t0);
+    for m in [&mut quiet, &mut read] {
+        m.note_admit(1_000_000, 1_000, t0 + Duration::from_secs(100));
+    }
+    read.admit_rates_wu_s(t0 + Duration::from_secs(399));
+    for m in [&mut quiet, &mut read] {
+        m.note_admit(1_000_000, 1_000, t0 + Duration::from_secs(400));
+    }
+    let at = t0 + Duration::from_secs(400);
+    let bi = bucket_index(1_000);
+    assert_eq!(
+        read.admit_rates_wu_s(at)[bi],
+        quiet.admit_rates_wu_s(at)[bi]
+    );
+}
