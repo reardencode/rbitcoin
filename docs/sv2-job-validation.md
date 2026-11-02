@@ -303,7 +303,7 @@ rejection strings (`bad-txns-inputs-missingorspent`, `bad-cb-length`,
 | unknown-request-id        | `ProvideMissingTransactions.Success.request_id` names no proposal the server holds: never asked about, already answered, dropped under the per-connection bound, or past the hold timeout |
 | duplicate-request-id      | `ProposeTemplate.request_id` names a proposal the server has accepted and not yet answered, or still holds for its missing transactions |
 | bad-cb-decode             | `coinbase_tx_prefix` does not parse as one input with a scriptSig length covering the bytes present, or the reconstructed coinbase does not decode |
-| job-validation-unavailable | The server cannot validate now (for example, initial block download, a chain tip it cannot read, or a connection at its bound on accepted proposals). The connection stays open, its retained templates and jobs stay available, and the client may propose again |
+| job-validation-unavailable | The server cannot validate now (for example, initial block download, a chain tip or other chain data it cannot read while checking the job, or a connection at its bound on accepted proposals). The connection stays open, its retained templates and jobs stay available, and the client may propose again |
 
 ### 4.6 `SubmitSolution` for validated jobs
 

@@ -31,7 +31,8 @@ Added
   proposals and 16 MiB of them (wtxids, coinbase split, supplied
   transactions) at once; one past either is answered
   `job-validation-unavailable` and the connection keeps serving, as it
-  does for a proposal whose validation cannot read the chain tip. A client
+  does for a proposal whose validation cannot read the chain tip or the
+  chain data its check needs. A client
   frame over 65557 bytes closes a connection that did not set the flag; only a
   flagged one may send the ~2.3 MB `ProposeTemplate` or ~4.2 MB provide.
   `SetupConnection.Error.flags` names only the unsupported bits.

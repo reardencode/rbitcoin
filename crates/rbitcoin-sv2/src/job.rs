@@ -8,7 +8,7 @@ use binary_sv2::{Seq064K, B016M};
 use bitcoin::consensus::encode::{deserialize_partial, VarInt};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
-use rbitcoin_net::ChainHub;
+use rbitcoin_net::{ChainHub, ProposalError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -201,7 +201,11 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
     // declaration; a flood costs blocking threads, not the reactor.
     let fees = match chain.check_block_proposal(&block) {
         Ok(fees) => fees,
-        Err(code) => return Verdict::Rejected(code),
+        Err(ProposalError::Reject(code)) => return Verdict::Rejected(code),
+        Err(ProposalError::Unreadable(e)) => {
+            rbitcoin_log::info!("sv2: proposal not validated ({e})");
+            return rejected(UNAVAILABLE);
+        }
     };
     Verdict::Valid {
         fees,
@@ -211,6 +215,18 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
             Bits::Consensus,
         ),
     }
+}
+
+/// `ProposeTemplate.Error.error_code` is a `Str0255`. Every code the proposal
+/// check produces is Core's short reject token; a longer one is cut on a
+/// character boundary rather than failing the encode, which would close the
+/// session. The cut keeps the leading reject token a JDS matches on.
+pub(crate) fn wire_code(code: &str) -> &str {
+    let mut end = code.len().min(255);
+    while !code.is_char_boundary(end) {
+        end -= 1;
+    }
+    &code[..end]
 }
 
 /// §4.1: `coinbase_tx_prefix` ends inside the scriptSig and
@@ -244,7 +260,18 @@ fn compact_size(bytes: &[u8]) -> Option<(u64, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::extranonce_len;
+    use super::{extranonce_len, wire_code};
+
+    #[test]
+    fn a_reject_code_is_cut_to_the_wire_limit_on_a_char_boundary() {
+        assert_eq!(wire_code("bad-blk-weight"), "bad-blk-weight");
+        let exact = "x".repeat(255);
+        assert_eq!(wire_code(&exact), exact);
+        let long = format!("{exact}tail");
+        assert_eq!(wire_code(&long), exact);
+        let wide = format!("{}é", "x".repeat(254));
+        assert_eq!(wire_code(&wide), "x".repeat(254), "no split character");
+    }
 
     fn prefix(segwit: bool, inputs: u8, len: u8, present: usize) -> Vec<u8> {
         let mut p = vec![2, 0, 0, 0];

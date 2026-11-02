@@ -65,7 +65,9 @@ pub use asmap::{
     ASMAP_TWO_SHORT_MATCHES, LONE_RETURN_ASMAP, LOOPBACK_ASMAP, TWO_PREFIX_ASMAP,
 };
 pub use cache::BlockCache;
-pub use chain::{check_block_proposal_with, AcceptOutcome, ChainHub, ChainTipInfo, TipEvent};
+pub use chain::{
+    check_block_proposal_with, AcceptOutcome, ChainHub, ChainTipInfo, ProposalError, TipEvent,
+};
 pub use compact::{
     classify_v2_cmpct_peer, cmpct_init_data_ok, shortid_map_from_txs, try_reconstruct,
     v2_header_hashes, CmpctPeerFrame,

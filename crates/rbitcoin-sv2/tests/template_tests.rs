@@ -2152,6 +2152,51 @@ async fn propose_template_tip_read_failure_is_unavailable_and_the_session_surviv
     tp.shutdown().await;
 }
 
+/// A read that fails inside the proposal check, after the tip was read for
+/// the header, says nothing about the block: the JDS gets the same
+/// `job-validation-unavailable` as for the tip read, not the store's error
+/// text as a reject code, and the session keeps serving. The one-shot header
+/// read failure is armed while the validation waits on the held pool lock,
+/// past `next_header`, so the proposal check's tip header read consumes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_read_failure_in_the_check_is_unavailable_and_the_session_survives() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        ..
+    } = first_template_every(&tc, REQUIRES_JOB_VALIDATION, MAX_TEMPLATE_INTERVAL).await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let job = Job::declare(&tc, 1, &coinbase, &[&a, &b]);
+
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut c).await;
+    until("the validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tc.chain.query.fail_next_header_read_cancelled();
+    pool.release();
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+
+    expect_retained(&mut c, last, &[&a, &b]).await;
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    tp.shutdown().await;
+}
+
 /// §4.5: a `SubmitSolution` on a validated job's template id is assembled
 /// from the retained job and the JDS's final coinbase (extranonce in place
 /// of the placeholder) and accepted like one for a pushed template.

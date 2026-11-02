@@ -4740,7 +4740,10 @@ fn coinbase_spend_rejects_cached_height_after_disconnect() {
         100,
     )
     .expect_err("a disconnected create is not a mature input");
-    assert_eq!(err, "bad-txns-inputs-missingorspent");
+    assert_eq!(
+        err,
+        ProposalError::Reject("bad-txns-inputs-missingorspent".into())
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -4793,7 +4796,7 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
     let mut off_tip = block.clone();
     off_tip.header.prev_blockhash = BlockHash::from_byte_array([0xab; 32]);
     assert_eq!(
-        hub.check_block_proposal(&off_tip).unwrap_err(),
+        hub.check_block_proposal(&off_tip).unwrap_err().to_string(),
         "inconclusive-not-best-prevblk"
     );
 
@@ -4802,26 +4805,26 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
     *cb = Amount::from_sat(cb.to_sat() + 1);
     let root_for_fat_cb = fat_cb.compute_merkle_root().unwrap();
     assert_eq!(
-        hub.check_block_proposal(&fat_cb).unwrap_err(),
+        hub.check_block_proposal(&fat_cb).unwrap_err().to_string(),
         "bad-txnmrklroot",
         "structure checks run before the coinbase is priced"
     );
     fat_cb.header.merkle_root = root_for_fat_cb;
     assert_eq!(
-        hub.check_block_proposal(&fat_cb).unwrap_err(),
+        hub.check_block_proposal(&fat_cb).unwrap_err().to_string(),
         "bad-cb-amount"
     );
 
     let cb_txid = fat_cb.txdata[0].compute_txid();
     fat_cb.txdata.push(spend_out(cb_txid, 0));
     assert_eq!(
-        hub.check_block_proposal(&fat_cb).unwrap_err(),
+        hub.check_block_proposal(&fat_cb).unwrap_err().to_string(),
         "bad-txnmrklroot",
         "structure checks run before the immature spend"
     );
     fat_cb.header.merkle_root = fat_cb.compute_merkle_root().unwrap();
     assert_eq!(
-        hub.check_block_proposal(&fat_cb).unwrap_err(),
+        hub.check_block_proposal(&fat_cb).unwrap_err().to_string(),
         "bad-txns-premature-spend-of-coinbase",
         "a same-block coinbase spend must not inflate fees"
     );
@@ -4837,7 +4840,7 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
         .assemble_block_to_script(op_true.clone(), vec![immature])
         .unwrap();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-txns-premature-spend-of-coinbase"
     );
     let over = spend_out(tip_cb.compute_txid(), tip_cb_value + 1);
@@ -4845,7 +4848,7 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
         .assemble_block_to_script(op_true.clone(), vec![over])
         .unwrap();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-txns-premature-spend-of-coinbase",
         "maturity is reported before bad-txns-in-belowout"
     );
@@ -4911,7 +4914,7 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
         .unwrap();
     let _ = store.txs.sample_reset_body_decodes();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-txns-inputs-missingorspent",
         "spentness is probed per input; the parent seen first through unspent vout 1 does not vouch for vout 0"
     );
@@ -4926,7 +4929,7 @@ fn check_block_proposal_prices_fees_and_rejects_on_one_chain() {
         .unwrap();
     let _ = store.txs.sample_reset_body_decodes();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-txns-inputs-missingorspent",
         "an output that exists only in a reorged-out block is not spendable"
     );
@@ -5033,7 +5036,9 @@ fn check_block_proposal_reads_medians_from_confirmed_headers() {
     let met = time_locked(118);
     assert_eq!(hub.check_block_proposal(&met), Ok(10_000));
     assert_eq!(
-        hub.check_block_proposal(&time_locked(119)).unwrap_err(),
+        hub.check_block_proposal(&time_locked(119))
+            .unwrap_err()
+            .to_string(),
         "bad-txns-nonfinal"
     );
     let empty = hub
@@ -5046,14 +5051,20 @@ fn check_block_proposal_reads_medians_from_confirmed_headers() {
         .set_raw_for_test(&rbitcoin_store::ClassCWrite::for_test(), Height(11), 0)
         .unwrap();
     let err = hub.check_block_proposal(&met).unwrap_err();
-    assert!(err.contains(missing), "coin median: {err}");
+    assert!(
+        matches!(&err, ProposalError::Unreadable(m) if m.contains(missing)),
+        "coin median is a read failure, not a reject: {err:?}"
+    );
     assert_eq!(hub.check_block_proposal(&empty), Ok(0));
     confirmed
         .set_raw_for_test(&rbitcoin_store::ClassCWrite::for_test(), Height(110), 0)
         .unwrap();
     hub.query.store().rebuild_height_fence().unwrap();
     let err = hub.check_block_proposal(&empty).unwrap_err();
-    assert!(err.contains(missing), "tip median: {err}");
+    assert!(
+        matches!(&err, ProposalError::Unreadable(m) if m.contains(missing)),
+        "tip median is a read failure, not a reject: {err:?}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -5111,7 +5122,7 @@ fn check_block_proposal_rejects_witness_sigops_over_the_limit() {
         .assemble_block_to_script(op_true, vec![fan, spend])
         .unwrap();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-blk-sigops"
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -5189,7 +5200,7 @@ fn proposal_spend_of_an_unspendable_output_is_missing() {
             .assemble_block_to_script(op_true.clone(), vec![tx])
             .unwrap();
         assert_eq!(
-            hub.check_block_proposal(&block).unwrap_err(),
+            hub.check_block_proposal(&block).unwrap_err().to_string(),
             "bad-txns-inputs-missingorspent"
         );
     };
@@ -5213,7 +5224,7 @@ fn proposal_spend_of_an_unspendable_output_is_missing() {
         .assemble_block_to_script(op_true.clone(), vec![parent, child])
         .unwrap();
     assert_eq!(
-        hub.check_block_proposal(&block).unwrap_err(),
+        hub.check_block_proposal(&block).unwrap_err().to_string(),
         "bad-txns-inputs-missingorspent"
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -5947,7 +5958,9 @@ fn review_trust_proposal_is_silent() {
     wrong_prev.header.prev_blockhash = BlockHash::from_byte_array([0xab; 32]);
     rbitcoin_log::capture_logs(true);
     assert_eq!(
-        hub.check_block_proposal(&wrong_prev).unwrap_err(),
+        hub.check_block_proposal(&wrong_prev)
+            .unwrap_err()
+            .to_string(),
         "inconclusive-not-best-prevblk"
     );
     assert_proposal_silent();
@@ -5958,11 +5971,17 @@ fn review_trust_proposal_is_silent() {
     bits.header.merkle_root = bits.compute_merkle_root().unwrap();
     hub.query.set_trust_peer(false);
     rbitcoin_log::capture_logs(true);
-    assert_eq!(hub.check_block_proposal(&bits).unwrap_err(), "bad-diffbits");
+    assert_eq!(
+        hub.check_block_proposal(&bits).unwrap_err().to_string(),
+        "bad-diffbits"
+    );
     assert_proposal_silent();
     hub.query.set_trust_peer(true);
     rbitcoin_log::capture_logs(true);
-    assert_eq!(hub.check_block_proposal(&bits).unwrap_err(), "bad-diffbits");
+    assert_eq!(
+        hub.check_block_proposal(&bits).unwrap_err().to_string(),
+        "bad-diffbits"
+    );
     assert_proposal_silent();
 
     let mut excess = template.clone();
@@ -5971,7 +5990,7 @@ fn review_trust_proposal_is_silent() {
     excess.header.merkle_root = excess.compute_merkle_root().unwrap();
     rbitcoin_log::capture_logs(true);
     assert_eq!(
-        hub.check_block_proposal(&excess).unwrap_err(),
+        hub.check_block_proposal(&excess).unwrap_err().to_string(),
         "bad-cb-amount"
     );
     assert_proposal_silent();
@@ -5984,7 +6003,7 @@ fn review_trust_proposal_is_silent() {
         .push(spend_coinbase(cb_txid, cb_sats, op_true.clone()));
     early.header.merkle_root = early.compute_merkle_root().unwrap();
     rbitcoin_log::capture_logs(true);
-    let early_err = hub.check_block_proposal(&early).unwrap_err();
+    let early_err = hub.check_block_proposal(&early).unwrap_err().to_string();
     assert!(
         early_err.contains("premature") || early_err.contains("coinbase"),
         "{early_err}"
@@ -5997,7 +6016,10 @@ fn review_trust_proposal_is_silent() {
     spend.input[0].script_sig = ScriptBuf::from_bytes(vec![0x6a]);
     let script_block = hub.assemble_block_to_script(op_true, vec![spend]).unwrap();
     rbitcoin_log::capture_logs(true);
-    let script_err = hub.check_block_proposal(&script_block).unwrap_err();
+    let script_err = hub
+        .check_block_proposal(&script_block)
+        .unwrap_err()
+        .to_string();
     assert!(
         script_err.contains("script") || script_err.contains("block-script-verify"),
         "{script_err}"
@@ -6362,7 +6384,7 @@ fn bip94_proposal_rejects_a_timewarp() {
     let mut warped = template.clone();
     warped.header.time = tip.time - 601;
     assert_eq!(
-        hub.check_block_proposal(&warped).unwrap_err(),
+        hub.check_block_proposal(&warped).unwrap_err().to_string(),
         "time-timewarp-attack"
     );
     let mut floor = template;

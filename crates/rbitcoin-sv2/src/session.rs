@@ -1039,7 +1039,7 @@ impl Session {
             Verdict::Rejected(code) => {
                 let reply = ProposeTemplateError {
                     request_id,
-                    error_code: Str0255::try_from(code.as_str()).map_err(wire)?,
+                    error_code: Str0255::try_from(job::wire_code(&code)).map_err(wire)?,
                     error_details: B064K::try_from(&[][..]).map_err(wire)?,
                 };
                 self.conn

@@ -1061,6 +1061,15 @@ Three review findings on the hold and the retained ring, one rule each.
   `check_fees` already tolerates), so one failed read is a retry for the JDS.
   Only a `JoinError` (worker panic) still ends the session. The verdict is
   now infallible, so the blocking closure returns it without an `io::Result`.
+  The same holds for a read that fails inside the proposal check:
+  `ChainHub::check_block_proposal` returns `ProposalError::Reject` (Core's
+  reject string) or `ProposalError::Unreadable` (the tip, a header median or
+  a coin's height or maturity could not be read), and the session answers the
+  latter `job-validation-unavailable` instead of sending the store's message
+  as a reject code. The RPC proposal mode still reports the message text as
+  before. A code that would not fit the `Str0255` wire field is cut on a
+  character boundary rather than failing the encode and closing the session;
+  the codes the check produces are short, so this is a guard, not a path.
 - **Red:** `propose_template_tip_read_failure_is_unavailable_and_the_session_survives`.
   No session reaches the reorg window itself; the store's instance-scoped,
   one-shot header-read failure (`Query::fail_next_header_read_cancelled`,
@@ -1070,6 +1079,12 @@ Three review findings on the hold and the retained ring, one rule each.
   (`sv2: tip header: cancelled: header read`). Green: the proposal is
   `job-validation-unavailable`, the earlier job still answers
   `RequestTransactionData`, and the same request id then validates.
+  `propose_template_read_failure_in_the_check_is_unavailable_and_the_session_survives`
+  arms the same failure while the validation waits on the held pool lock,
+  past `next_header`, so the proposal check's own tip header read consumes
+  it. Red was the store's `cancelled: header read` as the `error_code`. The
+  `rbitcoin-net` median-read tests pin `Unreadable`, and a unit test pins the
+  cut.
 - **Retention by the job's parent.** `Templates::retain` used to leave every
   validated job unmarked and `start_grace` marked every retained entry on a
   new prev hash. A job validated on the new tip B before the session handled
