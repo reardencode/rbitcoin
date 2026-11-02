@@ -23,4 +23,7 @@ allow = [
   "ibd_cancellable",
   "pread_batch_on_session_inner",
   "run_p2p",
+  "coalesce_ranges",
+  "prefetch_parent_body_ranges",
+  "rbitcoin_query::confirm_run::lookup::coalesce_ranges",
 ]
