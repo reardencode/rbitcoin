@@ -866,8 +866,9 @@ fn commands(seen: &[NetworkMessage]) -> Vec<&'static str> {
 
 /// Core #29415 `PushNodeVersion` for a private broadcast connection: no
 /// services, time 0, both addresses unset, `/pynode:0.0.1/`, height 0,
-/// relay off. Then VERACK and the tx, with no WTXIDRELAY or SENDADDRV2. An
-/// ordinary outbound handshake still sends this node's own VERSION.
+/// relay off. Then VERACK, INV, the tx once the peer asks with GETDATA, and
+/// PING, with no WTXIDRELAY or SENDADDRV2. An ordinary outbound handshake
+/// still sends this node's own VERSION.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_broadcast_sends_core_private_broadcast_version() {
     use bitcoin::p2p::address::Address;
@@ -990,7 +991,7 @@ async fn isolated_broadcast_needs_getdata_and_pong() {
             NetAddr::Ip(peer_addr),
             Magic::REGTEST,
             dummy_tx(),
-            Duration::from_secs(2),
+            Duration::from_millis(300),
         )
         .await;
         assert!(sent.is_err(), "no receipt must not count as sent");
