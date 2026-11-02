@@ -3022,10 +3022,11 @@ async fn expect_success_for_request_1(c: &mut TpClient, fees: u64) {
     assert_eq!((ok.request_id, ok.fees), (1, fees));
 }
 
-async fn node_wide_validation_bound() {
-    let tc = shared_regtest(1);
-    mock_live_tip(&tc);
-    let tp = run_sv2_tp(Sv2TpConfig {
+/// A listener with the one validation permit the node computes for a
+/// four-thread blocking pool, on a live tip.
+async fn one_permit_tp(tc: &TestChain) -> rbitcoin_sv2::Sv2TpHandle {
+    mock_live_tip(tc);
+    run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
@@ -3041,7 +3042,12 @@ async fn node_wide_validation_bound() {
         validation_permits: 1,
     })
     .await
-    .expect("listen");
+    .expect("listen")
+}
+
+async fn node_wide_validation_bound() {
+    let tc = shared_regtest(1);
+    let tp = one_permit_tp(&tc).await;
     let stats = tp.stats();
     let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
     tc.mempool.accept_tx(&known).expect("mempool accept");
@@ -3092,5 +3098,75 @@ async fn node_wide_validation_bound() {
         expect_success_for_request_1(client, fees).await;
     }
     assert_eq!(stats.validations_running(), 0);
+    tp.shutdown().await;
+}
+
+/// A permit is granted to work, not to a session's loop: session X queues a
+/// proposal behind a running validation, then its loop is parked in a
+/// template build (the template mutex is held), the same state a slow reader
+/// leaves it in inside a send. When the running validation ends and frees the
+/// permit, session Y's proposal gets its verdict while X's loop is still
+/// parked, and X's own verdict follows once it is free.
+#[test]
+fn propose_template_permit_does_not_wait_for_a_parked_session() {
+    blocking_pool_runtime(4).block_on(parked_session_does_not_hold_the_permit());
+}
+
+async fn parked_session_does_not_hold_the_permit() {
+    let tc = shared_regtest(1);
+    let tp = one_permit_tp(&tc).await;
+    let stats = tp.stats();
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+    let mut running = connect_without_template(&tp).await;
+    let mut x = connect_without_template(&tp).await;
+    let mut y = connect_without_template(&tp).await;
+
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut running).await;
+    until("the first validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    job.send(&mut x).await;
+    synced(&mut x).await;
+    let template = TemplateMutexHold::take(&tc.mempool).await;
+    x.coinbase_output_constraints(0, 0).await.unwrap();
+    x.request_transaction_data(u64::MAX).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    job.send(&mut y).await;
+    synced(&mut y).await;
+
+    pool.release();
+    expect_success_for_request_1(&mut y, fees).await;
+    expect_success_for_request_1(&mut running, fees).await;
+
+    template.release();
+    let mut got = Vec::new();
+    while got.len() < 4 {
+        got.push(recv_in_time(&mut x).await.msg_type);
+    }
+    got.sort_unstable();
+    let mut want = vec![
+        MESSAGE_TYPE_NEW_TEMPLATE,
+        MESSAGE_TYPE_SET_NEW_PREV_HASH,
+        MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+        MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want, "X is served once its loop is free");
+    until("every validation to end", || {
+        stats.validations_running() == 0
+    })
+    .await;
     tp.shutdown().await;
 }

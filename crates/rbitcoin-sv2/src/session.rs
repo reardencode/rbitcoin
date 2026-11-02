@@ -24,9 +24,7 @@ use common_messages_sv2::{
 use noise_sv2::Responder;
 use rbitcoin_net::{BlockingRegion, ChainHub};
 use std::collections::{HashSet, VecDeque};
-use std::future::Future;
 use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use template_distribution_sv2::{
@@ -41,7 +39,7 @@ use template_distribution_sv2::{
 };
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{mpsc, AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -86,8 +84,8 @@ pub fn constraints_rebuild_at(
 /// CPU and RAM trade (CONTRIBUTING 9): a `ProposeTemplate` validation is one
 /// full proposal check on a blocking thread holding up to a block of decoded
 /// transactions. How many run at once is a listener-wide permit count
-/// ([`crate::Sv2TpConfig::validation_permits`]); this session's accepted work
-/// waits for a permit in arrival order.
+/// ([`crate::Sv2TpConfig::validation_permits`]); accepted work waits for a
+/// permit in arrival order, across sessions.
 ///
 /// RAM trade (CONTRIBUTING 9): `ProposeTemplate` and
 /// `ProvideMissingTransactions.Success` work a session has accepted and not
@@ -161,8 +159,6 @@ pub struct Retained {
     pub retire_at: Option<Instant>,
 }
 
-type PermitWait = Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
-
 /// A proposal waiting for its `ProvideMissingTransactions.Success`.
 struct Pending {
     proposal: Arc<Proposal>,
@@ -179,7 +175,7 @@ impl Pending {
     }
 }
 
-/// A proposal and what its JDS supplied, waiting for a validation slot.
+/// A proposal and what its JDS supplied, admitted for validation.
 struct Work {
     proposal: Arc<Proposal>,
     supplied: Supplied,
@@ -351,9 +347,7 @@ pub async fn serve(
         fee_check_at: None,
         seen_updates: 0,
         permits,
-        permit_wait: None,
         validations: JoinSet::new(),
-        queued: VecDeque::new(),
         pending: VecDeque::new(),
         ids: HashSet::new(),
         admitted: Admitted::default(),
@@ -406,17 +400,13 @@ pub struct Session {
     pub seen_updates: u64,
     /// Listener-wide validation permits ([`crate::Sv2TpConfig::validation_permits`]).
     permits: Arc<Semaphore>,
-    /// This session's one pending acquire, present while `queued` is not
-    /// empty. It is kept across loop turns so the session holds its place in
-    /// the semaphore's queue.
-    permit_wait: Option<PermitWait>,
-    /// Validations this session started, for their verdicts. Each closure
-    /// owns its permit and returns it only when the blocking work returns, so
-    /// dropping the set with the session discards the verdicts but neither
-    /// stops started work nor frees its permit early.
-    validations: JoinSet<(Arc<Proposal>, Verdict, usize)>,
-    /// Prechecked proposals waiting for a permit, oldest first.
-    queued: VecDeque<Work>,
+    /// Admitted work, from admission to its verdict. Each task waits for a
+    /// permit, then runs the validation on a blocking thread that owns the
+    /// permit until the work returns. The grant therefore never depends on
+    /// this session's loop. Dropping the set with the session discards the
+    /// verdicts and the tasks still waiting; work already started runs on
+    /// and keeps its permit.
+    validations: JoinSet<io::Result<(Arc<Proposal>, Verdict, usize)>>,
     /// Proposals waiting for their missing transactions, oldest first, at
     /// most `MAX_PENDING_PROPOSALS`.
     pending: VecDeque<Pending>,
@@ -470,7 +460,7 @@ impl Session {
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
-                    let (proposal, verdict, cost) = done.map_err(io::Error::other)?;
+                    let (proposal, verdict, cost) = done.map_err(io::Error::other)??;
                     let request_id = proposal.request_id;
                     self.admitted.credit(cost);
                     if let Verdict::Missing(positions) = &verdict {
@@ -479,10 +469,6 @@ impl Session {
                         self.ids.remove(&request_id);
                     }
                     self.reply_propose(request_id, verdict).await?;
-                }
-                permit = next_permit(&mut self.permit_wait), if self.permit_wait.is_some() => {
-                    self.start_validation(permit?);
-                    self.want_permit();
                 }
                 _ = tokio::time::sleep_until(retire_at.unwrap_or_else(Instant::now)),
                     if retire_at.is_some() =>
@@ -607,12 +593,11 @@ impl Session {
                 }
                 self.ids.insert(p.request_id);
                 self.admitted.take(cost);
-                self.queued.push_back(Work {
+                self.start_validation(Work {
                     proposal: Arc::new(p),
                     supplied: Supplied::new(),
                     cost,
                 });
-                self.want_permit();
             }
             MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS if self.job_validation => {
                 let Ok(m) =
@@ -645,12 +630,11 @@ impl Session {
                 match accepted {
                     Ok(supplied) => {
                         self.admitted.take(cost);
-                        self.queued.push_back(Work {
+                        self.start_validation(Work {
                             proposal,
                             supplied,
                             cost,
                         });
-                        self.want_permit();
                     }
                     Err(code) => {
                         self.ids.remove(&m.request_id);
@@ -945,34 +929,29 @@ impl Session {
         Ok(())
     }
 
-    /// Ask for a permit for the oldest queued proposal. The session has at
-    /// most one acquire pending, so it waits its turn in the semaphore's
-    /// queue as one client, however much it has queued. Other frames and the
-    /// loop's timers run meanwhile; the reply comes from the `join_next` arm,
+    /// Admitted work waits for a permit in the semaphore's arrival order,
+    /// across every session, and the reply comes from the `join_next` arm,
     /// paired by `request_id`.
-    fn want_permit(&mut self) {
-        if self.permit_wait.is_none() && !self.queued.is_empty() {
-            self.permit_wait = Some(Box::pin(Arc::clone(&self.permits).acquire_owned()));
-        }
-    }
-
-    fn start_validation(&mut self, permit: OwnedSemaphorePermit) {
-        let Some(Work {
+    fn start_validation(&mut self, work: Work) {
+        let Work {
             proposal,
             supplied,
             cost,
-        }) = self.queued.pop_front()
-        else {
-            return;
-        };
+        } = work;
+        let permits = Arc::clone(&self.permits);
         let c = Arc::clone(&self.chain);
         let stats = Arc::clone(&self.stats);
-        self.validations.spawn_blocking(move || {
-            let _permit = permit;
-            let _running = stats.enter_validation();
-            let _g = BlockingRegion::enter();
-            let verdict = job::validate(&c, &proposal, &supplied);
-            (proposal, verdict, cost)
+        self.validations.spawn(async move {
+            let permit = permits.acquire_owned().await.map_err(io::Error::other)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _running = stats.enter_validation();
+                let _g = BlockingRegion::enter();
+                let verdict = job::validate(&c, &proposal, &supplied);
+                (proposal, verdict, cost)
+            })
+            .await
+            .map_err(io::Error::other)
         });
     }
 
@@ -1054,17 +1033,6 @@ impl Session {
             }
         }
     }
-}
-
-/// The permit the session's pending acquire resolves to; pending forever
-/// while it has none.
-async fn next_permit(wait: &mut Option<PermitWait>) -> io::Result<OwnedSemaphorePermit> {
-    let Some(pending) = wait.as_mut() else {
-        return std::future::pending().await;
-    };
-    let granted = pending.await;
-    *wait = None;
-    granted.map_err(io::Error::other)
 }
 
 /// `true` when `header_time` at `prev`'s child expects compact bits other

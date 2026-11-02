@@ -22,7 +22,9 @@ Added
   connections, at most a quarter of the node's blocking-thread pool (at
   least one) validates at once, and a validation already running keeps its
   share until it finishes even if its connection closes; the blocking work cannot be
-  aborted once started. That reserves threads from proposals but does not stop
+  aborted once started. A waiting proposal takes a freed share in arrival
+  order whatever its own connection is doing, so a client that reads slowly
+  delays only itself. That reserves threads from proposals but does not stop
   other work from using the pool.
   `/metrics` `rbitcoin_sv2_validations_running` and the `tip: perf`
   `sv2_validating` field show how many run. A connection holds at most 16 accepted

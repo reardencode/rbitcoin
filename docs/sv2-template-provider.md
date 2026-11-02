@@ -979,15 +979,19 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 
 - **Contract:** one `tokio::sync::Semaphore` per listener, sized by
   `Sv2TpConfig::validation_permits` (internal, not an operator flag; the
-  listener refuses 0 and anything over `Semaphore::MAX_PERMITS`). A session
-  takes an `OwnedSemaphorePermit` before `spawn_blocking` and moves it into
-  the closure, so the permit is released only when the blocking work
-  returns, even if the session and its `JoinSet` are gone: dropping the
-  `JoinSet` discards verdicts but cannot stop a started blocking closure, so
-  reconnecting does not buy more concurrent validations. A session waits for
-  its permit in its select loop with one pending acquire at a time (no task
-  or thread per waiting proposal), so its queue stays FIFO and sessions are
-  served in the semaphore's FIFO order. The node sets the count to
+  listener refuses 0 and anything over `Semaphore::MAX_PERMITS`). Each
+  admitted proposal becomes a task in its session's `JoinSet` that awaits
+  `acquire_owned` and then moves the `OwnedSemaphorePermit` into a
+  `spawn_blocking` closure, so the permit is released only when the blocking
+  work returns, even if the session and its `JoinSet` are gone: dropping the
+  `JoinSet` aborts tasks still waiting (no permit taken) and discards
+  verdicts, but cannot stop a started blocking closure, so reconnecting does
+  not buy more concurrent validations. The task, not the session loop, takes
+  the grant, so a session whose loop is parked in a slow send or a build
+  does not hold a permit idle: waiters run in the semaphore's arrival order
+  across sessions. The tasks per session are bounded by the D13 admission
+  bound (16, and 16 MiB), and each holds no more than the admission already
+  counted. The node sets the count to
   `max(1, blocking_pool / 4)` from the function that sizes its blocking pool
   (`cli::proposal_validation_permits` over `blocking_pool_size`), so
   proposals use at most a quarter of the pool and a four-thread node runs one
@@ -1006,9 +1010,19 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   the gauge is 0. `proposal_validations_use_a_quarter_of_the_blocking_pool`
   pins the node's count; `out_of_range_timing_refuses_to_start` gains the
   permit bounds; the `sv2_tp_bootstrap` journey reads the metric.
-- **Green:** `Session.permits` and `permit_wait` replace the per-session
-  in-flight count; `start_validation` moves the permit, then an
-  `enter_validation` guard (increment, decrement on drop), into the closure.
+  `propose_template_permit_does_not_wait_for_a_parked_session` (one permit,
+  four blocking threads) holds the permit with a running validation, queues a
+  proposal from session X, parks X's loop in a template build (the held
+  template mutex stands in for a send to a slow reader), and queues a
+  proposal from session Y. When the running validation ends, Y's verdict
+  must arrive while X is still parked. With the permit granted to X's
+  acquire polled only by X's loop, Y waited behind X's undelivered grant and
+  timed out; X's verdict and templates arrive once its loop is free.
+- **Green:** `Session.permits` replaces the per-session in-flight count;
+  `start_validation` spawns the acquire-then-`spawn_blocking` task at
+  admission, which moves the permit, then an `enter_validation` guard
+  (increment, decrement on drop), into the closure. The per-session
+  queue, pending acquire, and `want_permit` are gone: one path.
 - **CPU and thread trade:** a quarter of the blocking pool for proposals
   (16 on a 64-core host, 1 on a 4-thread one). A JDS declaring for many JDCs
   at a tip change queues behind that bound (D13) and sees verdicts one
