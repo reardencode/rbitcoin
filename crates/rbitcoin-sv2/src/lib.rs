@@ -30,8 +30,8 @@ pub use transport::Frame;
 /// up to 64 templates sharing the mempool's tx bodies (about 24 KB of
 /// pointers per full template). Bodies that leave the pool stay alive while
 /// a template holds them: at most 64 × ~4 MB per session if every template's
-/// txs were replaced, ~2 GB across the cap, which costs the replacer
-/// replacement fees on every interval.
+/// txs were replaced, ~2 GB across the cap. Supplied custom-job bodies are
+/// private and can reach the same bound without paying replacement fees.
 pub const MAX_SESSIONS: usize = 8;
 
 /// Default [`Sv2TpConfig::setup_timeout`]. A session holds a slot from TCP

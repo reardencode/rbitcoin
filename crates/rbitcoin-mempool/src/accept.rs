@@ -2698,6 +2698,11 @@ impl ActiveMempool {
         self.bodies.get(txid).map(|a| a.as_ref())
     }
 
+    /// Share a live body with a retained template without copying it.
+    pub fn get_tx_arc(&self, txid: &Txid) -> Option<Arc<Transaction>> {
+        self.bodies.get(txid).cloned()
+    }
+
     /// Packed vin aux for a live tx (SH reindex / purge). Empty if unknown.
     pub fn vin_aux(&self, txid: &Txid) -> &[VinAux] {
         self.vin_aux.get(txid).map_or(&[], Vec::as_slice)

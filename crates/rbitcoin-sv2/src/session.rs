@@ -52,6 +52,7 @@ pub const TDP_VERSION: u16 = 2;
 /// on the same tip and a miner may still be on any of them, so the bound is
 /// a count, oldest (replaced tips first) dropped. Bodies are the mempool's
 /// `Arc`s: a template costs a pointer per tx until its txs leave the pool.
+/// Supplied custom-job bodies are private to that job.
 #[doc(hidden)]
 pub const MAX_RETAINED: usize = 64;
 

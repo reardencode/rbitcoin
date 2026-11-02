@@ -94,7 +94,12 @@ Do not copy them here.
   24 KB of pointers per full template while the txs are still pooled.
   A body that leaves the pool stays alive while a template holds it: at
   most 64 × ~4 MB per session (~2 GB at the default cap of 8) if every
-  template's txs were replaced, which costs replacement fees each time.
+  template's txs were replaced. Custom jobs retain shared mempool bodies,
+  but each job's supplied transactions are private bodies: a client can
+  retain up to the same 64 × ~4 MB per session without replacement fees.
+  Proposal checking also assembles one temporary owned block per validation.
+  Resolution stops once the known transaction weight plus coinbase and
+  block framing exceeds `MAX_BLOCK_WEIGHT`, even if another body is missing.
   Retention is required: the mempool may evict a tx
   before `RequestTransactionData` or `SubmitSolution` arrives. Stale grace
   (default 10 s) after a tip change, then drop (mirrors sv2-tp).

@@ -1629,6 +1629,8 @@ async fn propose_template_prices_and_retains_the_declared_job() {
     let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
     let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+    let pooled = tc.mempool.get_tx_by_wtxid(&a.compute_wtxid()).unwrap();
+    let references_before = Arc::strong_count(&pooled);
 
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
@@ -1637,8 +1639,150 @@ async fn propose_template_prices_and_retains_the_declared_job() {
         .send(&mut c)
         .await;
     expect_job_success(&mut c, &tc, 9, last + 1, 5_000).await;
-    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    assert_eq!(Arc::strong_count(&pooled), references_before + 1);
+    for n in 1..4u32 {
+        Job::declare(&tc, 9 + n, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        expect_job_success(&mut c, &tc, 9 + n, last + 1 + u64::from(n), 5_000).await;
+        assert_eq!(
+            Arc::strong_count(&pooled),
+            references_before + 1 + n as usize
+        );
+    }
+    assert_eq!(tc.mempool.remove_for_block(&[a.compute_txid()]), 1);
+    expect_retained(&mut c, last + 4, &[&a, &b]).await;
 
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overweight_proposal_is_rejected_even_if_another_body_disappears() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    let oversized = spend(
+        tc.coinbases[1],
+        2_000,
+        ScriptBuf::from_bytes(vec![OP_TRUE; 1_000_000]),
+    );
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&known], true).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    let job = Job::declare(&tc, 81, &coinbase, &[&known, &oversized]);
+    job.send(&mut c).await;
+    expect_missing(&mut c, 81, &[1]).await;
+    assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
+    provide(&mut c, 81, &[serialize(&oversized)]).await;
+    expect_job_error(&mut c, 81, "bad-blk-weight").await;
+
+    Job::declare(&tc, 82, &coinbase, &[&oversized])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 82, &[0]).await;
+    provide(&mut c, 82, &[serialize(&oversized)]).await;
+    expect_job_error(&mut c, 82, "bad-blk-weight").await;
+
+    let mut at_limit = spend(tc.coinbases[1], 2_000, ScriptBuf::new());
+    at_limit.output[0].script_pubkey = ScriptBuf::from_bytes(vec![OP_TRUE; 999_000]);
+    let coinbase_at_limit = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&at_limit],
+    );
+    let current = 81 * 4 + coinbase_at_limit.weight().to_wu() + at_limit.weight().to_wu();
+    let extra = (MAX_BLOCK_WEIGHT - current) / 4;
+    at_limit.output[0].script_pubkey =
+        ScriptBuf::from_bytes(vec![OP_TRUE; 999_000 + extra as usize]);
+    let coinbase_at_limit = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&at_limit],
+    );
+    assert_eq!(
+        81 * 4 + coinbase_at_limit.weight().to_wu() + at_limit.weight().to_wu(),
+        MAX_BLOCK_WEIGHT
+    );
+    Job::declare(&tc, 83, &coinbase_at_limit, &[&at_limit])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 83, &[0]).await;
+    provide(&mut c, 83, &[serialize(&at_limit)]).await;
+    expect_job_success(&mut c, &tc, 83, last + 1, 2_000).await;
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pooled_overweight_proposal_is_rejected_before_missing_body_request() {
+    let tc = shared_regtest(1);
+    mock_live_tip(&tc);
+    let count = 14u32;
+    let each = (50_0000_0000 - 10_000) / u64::from(count);
+    let mut fanout = spend(
+        tc.coinbases[0],
+        10_000,
+        ScriptBuf::from_bytes(vec![OP_TRUE]),
+    );
+    fanout.output = vec![
+        TxOut {
+            value: Amount::from_sat(each),
+            script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+        };
+        count as usize
+    ];
+    let tip = tc.chain.tip_header().unwrap();
+    let height = tc.chain.query.tip_height().unwrap().0;
+    let block = mine_regtest_paying(
+        tip.block_hash(),
+        tip.time + 1,
+        height + 1,
+        ScriptBuf::from_bytes(vec![OP_TRUE]),
+        vec![fanout.clone()],
+    );
+    tc.chain.accept_block(block).expect("accept fan-out");
+    mock_live_tip(&tc);
+    let mut pooled = Vec::new();
+    for vout in 0..count {
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout.compute_txid(),
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat((each - 20_000) / 8_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+                };
+                8_000
+            ],
+        };
+        tc.mempool.accept_tx(&tx).expect("mempool accept");
+        pooled.push(tx);
+    }
+    assert!(pooled.iter().map(|tx| tx.weight().to_wu()).sum::<u64>() > MAX_BLOCK_WEIGHT);
+    let FirstTemplate { tp, mut c, .. } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    let mut unknown = pooled[0].clone();
+    unknown.lock_time = LockTime::from_consensus(1);
+    let missing_first: Vec<_> = std::iter::once(&unknown).chain(pooled.iter()).collect();
+    Job::declare(&tc, 92, &coinbase, &missing_first)
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 92, "bad-blk-weight").await;
+    let known: Vec<_> = pooled.iter().collect();
+    Job::declare(&tc, 91, &coinbase, &known).send(&mut c).await;
+    expect_job_error(&mut c, 91, "bad-blk-weight").await;
     tp.shutdown().await;
 }
 

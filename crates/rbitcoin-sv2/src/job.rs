@@ -116,16 +116,24 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
     let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(&raw) else {
         return rejected("bad-cb-decode");
     };
+    let mut weight =
+        (80 + VarInt(1 + p.wtxids.len() as u64).size()) as u64 * 4 + coinbase.weight().to_wu();
+    if weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+        return rejected("bad-blk-weight");
+    }
     let mut txs = Vec::with_capacity(p.wtxids.len());
     let mut missing = Vec::new();
     let mut provided = Vec::new();
     for (pos, w) in p.wtxids.iter().enumerate() {
         let pos = u16::try_from(pos).expect("Seq064K holds at most 65535");
         let tx = match supplied.get(w) {
+            Some(raw) if raw.len() as u64 > rbitcoin_consensus::MAX_BLOCK_WEIGHT - weight => {
+                return rejected("bad-blk-weight");
+            }
             Some(raw) => match bitcoin::consensus::deserialize::<Transaction>(raw) {
                 Ok(tx) => {
                     provided.push(pos);
-                    Some(tx)
+                    Some(Arc::new(tx))
                 }
                 Err(_) => return rejected("bad-missing-tx"),
             },
@@ -134,7 +142,13 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
                 .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(*w))),
         };
         match tx {
-            Some(tx) => txs.push(tx),
+            Some(tx) => {
+                weight = weight.saturating_add(tx.weight().to_wu());
+                if weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+                    return rejected("bad-blk-weight");
+                }
+                txs.push(tx);
+            }
             None => missing.push(pos),
         }
     }
@@ -156,8 +170,8 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
     };
     let mut txdata = Vec::with_capacity(1 + txs.len());
     txdata.push(coinbase);
-    txdata.extend(txs);
-    let mut block = Block { header, txdata };
+    txdata.extend(txs.iter().map(|tx| Transaction::clone(tx)));
+    let block = Block { header, txdata };
     // CPU trade (CONTRIBUTING 9): one full proposal check per request
     // (every spend against the chain, structure, weight, sigops, coinbase
     // value, scripts; no PoW), on the blocking pool. A JDS sends one per
@@ -166,12 +180,6 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
         Ok(fees) => fees,
         Err(code) => return Ok(Verdict::Rejected(code)),
     };
-    let txs = block
-        .txdata
-        .split_off(1)
-        .into_iter()
-        .map(Arc::new)
-        .collect();
     Ok(Verdict::Valid {
         fees,
         job: next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),

@@ -2366,10 +2366,10 @@ impl MempoolHub {
     }
 
     /// Look up a live mempool tx by wtxid (BIP339 / compact v2).
-    pub fn get_tx_by_wtxid(&self, wtxid: &Wtxid) -> Option<Transaction> {
+    pub fn get_tx_by_wtxid(&self, wtxid: &Wtxid) -> Option<Arc<Transaction>> {
         let g = self.lock_read();
         let txid = g.graph.txid_for_wtxid(wtxid)?;
-        g.get_tx(&txid).cloned()
+        g.get_tx_arc(&txid)
     }
 
     pub fn try_get_tx_by_wtxid(&self, wtxid: &Wtxid) -> Option<Transaction> {
