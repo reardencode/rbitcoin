@@ -22,10 +22,11 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-/// Largest client→TP payload for every message but the job-validation
-/// pair: `SubmitSolution`, 20 fixed bytes plus a `B064K` coinbase (2-byte
-/// length, ≤ 65535 bytes). The 24-bit frame length would otherwise let a
-/// client make the session buffer ~16 MB per frame.
+/// Largest client→TP payload for every message but the job-validation pair,
+/// and for every message of a session that has not negotiated
+/// `REQUIRES_JOB_VALIDATION`: `SubmitSolution`, 20 fixed bytes plus a `B064K`
+/// coinbase (2-byte length, ≤ 65535 bytes). The 24-bit frame length would
+/// otherwise let a client make the session buffer ~16 MB per frame.
 pub const MAX_CLIENT_PAYLOAD: usize = 20 + 2 + u16::MAX as usize;
 
 /// `SEQ0_64K` element count.
@@ -39,12 +40,19 @@ pub const MAX_PROPOSE_TEMPLATE_PAYLOAD: usize = 4 + 4 + 3 * (2 + SEQ) + (2 + SEQ
 
 /// Largest `ProvideMissingTransactions.Success` payload: 4 fixed bytes and a
 /// `SEQ0_64K[B016M]` transaction list whose txs together fit a block (weight
-/// is never below serialized size) with a 3-byte length each.
+/// is never below serialized size) with a 3-byte length each (~4.2 MB). The
+/// largest frame any session reads, and only one that negotiated
+/// `REQUIRES_JOB_VALIDATION` (`NoiseReader::allow_job_validation`).
 ///
-/// RAM trade (CONTRIBUTING 9): a session buffers one in-flight client frame
-/// of at most this size (~4.2 MB), so at `MAX_SESSIONS` client frames hold
-/// ≤ ~34 MB on top of template retention (lib.rs).
-pub(crate) const MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD: usize =
+/// RAM trade (CONTRIBUTING 9), in frame-sized buffers per session: while a
+/// frame is read the codec holds its encrypted bytes and their decrypted
+/// copy (two); `Frame.payload` is an owned copy handed to the session
+/// through a one-slot channel (one waiting), and the session handles one.
+/// At most four, so ≤ ~17 MB for a negotiated session and ≤ ~0.26 MB for
+/// any other, ≤ ~134 MB at `MAX_SESSIONS` if all eight negotiated. Admitted
+/// proposal work and template retention (lib.rs) are on top.
+#[doc(hidden)]
+pub const MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD: usize =
     4 + 2 + SEQ * 3 + MAX_BLOCK_WEIGHT as usize;
 
 /// Payload cap by client message type.
@@ -80,10 +88,11 @@ struct FrameCap {
 }
 
 impl FrameCap {
-    /// Client→TP: the largest client message while reading, then
-    /// [`client_payload_cap`] for the type.
+    /// Client→TP before `REQUIRES_JOB_VALIDATION` is negotiated: no frame
+    /// is bigger than the pre-feature [`MAX_CLIENT_PAYLOAD`].
+    /// `NoiseReader::allow_job_validation` lifts it.
     const CLIENT: Self = Self {
-        max_frame: encrypted_frame_len(MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD),
+        max_frame: encrypted_frame_len(MAX_CLIENT_PAYLOAD),
         payload: client_payload_cap,
     };
     /// TP→client: the 24-bit frame length only.
@@ -268,6 +277,13 @@ impl NoiseWriter {
 }
 
 impl NoiseReader {
+    /// `SetupConnection.Success` carried `REQUIRES_JOB_VALIDATION`: frames
+    /// may now be as big as the biggest job-validation message, and
+    /// [`client_payload_cap`] bounds each type.
+    pub fn allow_job_validation(&mut self) {
+        self.cap.max_frame = encrypted_frame_len(MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD);
+    }
+
     pub async fn recv(&mut self) -> io::Result<Frame> {
         loop {
             let state = self

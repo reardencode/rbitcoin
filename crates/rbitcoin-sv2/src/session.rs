@@ -308,12 +308,15 @@ pub async fn serve(
         let frame = conn.recv().await?;
         Ok::<_, io::Error>(on_setup(&mut conn, frame).await?.map(|flags| (conn, flags)))
     };
-    let Some((conn, flags)) = tokio::time::timeout_at(deadline, setup)
+    let Some((mut conn, flags)) = tokio::time::timeout_at(deadline, setup)
         .await
         .map_err(|_| missed_setup_deadline())??
     else {
         return Ok(());
     };
+    if flags & REQUIRES_JOB_VALIDATION != 0 {
+        conn.reader.allow_job_validation();
+    }
     let (mut reader, writer) = conn.into_split();
     let (frames_tx, mut frames) = mpsc::channel(1);
     // Dropping the set aborts the reader when the session ends.
