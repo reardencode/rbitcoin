@@ -159,3 +159,20 @@ fn a_tip_older_than_the_record_is_left_for_the_next_event_to_classify() {
     t.start_grace(tip(MAX_RETIRED_TIPS + 2), next + GRACE);
     assert_eq!(t.get(1).unwrap().retire_at, Some(next + GRACE));
 }
+
+#[test]
+fn a_session_that_starts_on_a_tip_retires_a_late_job_of_that_tip_at_its_first_move() {
+    let now = Instant::now();
+    let mut t = Templates::default();
+    t.seed_tip(A);
+    let deadline = now + GRACE;
+    t.start_grace(B, deadline);
+    t.retain(1, job(A), (0, now));
+    assert_eq!(
+        t.get(1).unwrap().retire_at,
+        Some(deadline),
+        "the tip the session started on is the one its first event left"
+    );
+    t.retire(deadline);
+    assert!(!retains(&t, 1));
+}

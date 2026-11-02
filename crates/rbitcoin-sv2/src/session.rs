@@ -133,8 +133,9 @@ pub struct Templates {
     /// [`Session::send`] moves it, so a session that retires jobs without
     /// ever pushing a template still announces its tip when it first does.
     pub current_prev: Option<[u8; 32]>,
-    /// The tip retention last moved to ([`Self::start_grace`]): the prev hash
-    /// no entry retires for.
+    /// The tip retention last moved to ([`Self::start_grace`]), or the one the
+    /// session started on ([`Self::seed_tip`]): the prev hash no entry
+    /// retires for.
     tip: Option<[u8; 32]>,
     /// `SetNewPrevHash.header_timestamp` sent for `current_prev`, and when.
     pub prev_sent: Option<(u32, Instant)>,
@@ -230,6 +231,13 @@ impl Templates {
             prev_sent,
             retire_at,
         });
+    }
+
+    /// The session starts on `tip`, so its first tip event records the tip
+    /// it leaves even when no template was ever sent.
+    #[doc(hidden)]
+    pub fn seed_tip(&mut self, tip: [u8; 32]) {
+        self.tip = Some(tip);
     }
 
     /// Whether a tip event needs a rebuild: a new prev hash, or any build
@@ -429,6 +437,9 @@ impl Session {
         idle_timeout: Option<Duration>,
     ) -> io::Result<()> {
         let mut tips = self.chain.subscribe_tips();
+        if let Some(tip) = self.chain.tip_hash() {
+            self.templates.seed_tip(tip.to_byte_array());
+        }
         let mut idle_at = idle_timeout.map(|t| Instant::now() + t);
         loop {
             let retire_at = self

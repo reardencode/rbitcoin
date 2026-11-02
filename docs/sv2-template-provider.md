@@ -1084,7 +1084,12 @@ Three review findings on the hold and the retained ring, one rule each.
   `current_prev`, or on a tip with no record (the session's event for it is
   still to come, or the record aged out), is unmarked, and the next
   `start_grace` marks it. A job that outlives the 8-tip record therefore
-  waits for one more tip event, then gets that event's grace.
+  waits for one more tip event, then gets that event's grace. A session
+  starts on the chain tip (`Templates::seed_tip`, read right after it
+  subscribes to tip events), so a validation-only session, which never
+  sends a template, records the tip its first event leaves; before, a job on
+  that tip finishing after the event kept no deadline until the next tip
+  event.
 - **Red:** `crates/rbitcoin-sv2/tests/session.rs` drives the shipped
   `Templates` methods, as `tip_event_rebuilds_a_template_built_before_it`
   does: the window between `ChainHub` publishing the store tip and the
@@ -1096,6 +1101,12 @@ Three review findings on the hold and the retained ring, one rule each.
   and retires B's; a tip older than the record is classified by the next
   event. Red was the compile failure against the one-argument
   `start_grace` and the five tests failing on the old marking.
+  `a_session_that_starts_on_a_tip_retires_a_late_job_of_that_tip_at_its_first_move`
+  drives the seeded start the same way: a verdict and the tip event are
+  ready in one loop turn and `select!` picks between them at random, so no
+  socket orders the late verdict after the event, and a validation that
+  straddles the move is rejected by the proposal check on the new tip anyway.
+  Red was the compile failure against `seed_tip`.
 
 ### D16 — A custom job's solution is rebuilt with the bits its time needs
 
