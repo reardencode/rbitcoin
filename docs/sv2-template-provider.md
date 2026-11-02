@@ -901,7 +901,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `Sv2TpConfig` field like `setup_timeout`) checked when a provide is
   consumed (D15); the retire arm only frees an expired hold early. A
   provide for an id the session does not hold, already consumed, or
-  expired is `ProposeTemplate.Error unknown-request-id`; a proposal under
+  expired is `ProposeTemplate.Error unknown-request-id`, except one for an id
+  still queued or in flight, which is ignored with an info log so the id gets
+  one reply, its verdict; a proposal under
   an id still queued, in flight, or held is `duplicate-request-id`; a
   provide that does not cover every requested position, supplies a tx the
   TP did not ask for, or one that does not decode, is `bad-missing-tx` and

@@ -165,7 +165,10 @@ the server has not yet released the hold. A `ProvideMissingTransactions.Success`
 server does not hold, no longer holds, or has already consumed is answered
 `ProposeTemplate.Error` with `unknown-request-id`; a `ProposeTemplate` whose
 `request_id` the server has accepted and not yet answered, or still holds,
-is answered `duplicate-request-id`.
+is answered `duplicate-request-id`. rbitcoin ignores a
+`ProvideMissingTransactions.Success` for a `request_id` it has accepted and
+not yet answered, or whose validation is running: it has asked for nothing
+yet, and the verdict stays the one reply for that id.
 Once every transaction is known, from the mempool or the provide, the server
 MUST validate the job as a block on top of its current chain tip with the
 following rules, and reply either `ProposeTemplate.Success` or

@@ -1957,8 +1957,10 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
 /// the expired hold's timer. A consume that ignores the deadline validates
 /// the provide in a quarter of the rounds, so 40 fresh sessions miss it with
 /// probability (3/4)^40. The provide is never answered `Success`; each round
-/// ends with the template, one `ProvideMissingTransactions` and one
-/// `unknown-request-id`.
+/// ends with the template and one `ProvideMissingTransactions`, and with one
+/// `unknown-request-id` when the verdict was taken first. A provide taken
+/// while the proposal is still validating is ignored
+/// (`provide_for_a_proposal_that_is_validating_is_ignored`).
 #[tokio::test(flavor = "multi_thread")]
 async fn provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first() {
     let tc = shared_regtest(2);
@@ -2009,10 +2011,12 @@ async fn provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first(
         assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE, "round {round}");
         let f2 = recv_in_time(&mut c).await;
         assert_eq!(f2.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH, "round {round}");
-        let (mut asked, mut refused) = (0, 0);
-        for _ in 0..2 {
+        c.request_transaction_data(u64::MAX).await.unwrap();
+        let (mut asked, mut refused, mut synced) = (0, 0, false);
+        while asked == 0 || !synced {
             f = recv_in_time(&mut c).await;
             match f.msg_type {
+                MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR => synced = true,
                 MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS => asked += 1,
                 MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
                     let e: ProposeTemplateError =
@@ -2027,8 +2031,45 @@ async fn provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first(
                 t => panic!("round {round}: a provide past its hold's deadline got {t:#x}"),
             }
         }
-        assert_eq!((asked, refused), (1, 1), "round {round}");
+        assert!(asked == 1 && refused <= 1, "round {round}");
     }
+
+    tp.shutdown().await;
+}
+
+/// A `ProvideMissingTransactions.Success` for a request id whose proposal is
+/// already queued or validating is not the answer to anything the TP is
+/// waiting for: it is ignored, not answered `unknown-request-id`, so the
+/// client sees one reply for the id, the verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn provide_for_a_proposal_that_is_validating_is_ignored() {
+    let tc = shared_regtest(1);
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    mock_live_tip(&tc);
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut c).await;
+    until("the validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    provide(&mut c, 1, &[serialize(&known)]).await;
+    synced(&mut c).await;
+    pool.release();
+    expect_job_success(&mut c, &tc, 1, 1, fees).await;
+    synced(&mut c).await;
 
     tp.shutdown().await;
 }

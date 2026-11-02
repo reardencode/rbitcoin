@@ -621,6 +621,13 @@ impl Session {
                     proposal, missing, ..
                 }) = self.take_pending(m.request_id)
                 else {
+                    if self.ids.contains(&m.request_id) {
+                        rbitcoin_log::info!(
+                            "sv2: ProvideMissingTransactions.Success for request {} that is being validated; ignoring",
+                            m.request_id
+                        );
+                        return Ok(true);
+                    }
                     self.reply_propose(
                         m.request_id,
                         Verdict::Rejected("unknown-request-id".into()),
