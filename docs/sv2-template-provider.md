@@ -1146,7 +1146,16 @@ Three review findings on the hold and the retained ring, one rule each.
   and is not used for a parent that is no longer the tip. A pushed template's
   drop check asks the same owner (it fails open when the parent is unknown,
   and `accept_block` then decides); there is no second bits path. An unknown
-  parent header drops a custom job's solution like any bad one.
+  parent header drops a custom job's solution like any bad one. The header
+  lookups under `expected_child_bits` (`ChainHub::header_of`,
+  `sync_parent_header`) turn a store read error into "not found", so an
+  unreadable parent is dropped the same way and the log says "unknown or
+  unreadable". Telling the two apart, and retrying, needs those lookups to
+  return the error; they serve header sync too, and no store seam reaches
+  them (`fail_next_header_read_cancelled` fires on `header_at_height` and
+  `slots_around` only), so it is left as a named limitation. Parents are
+  read by hash, which a reorg does not disturb, so the window the active
+  chain reads have does not apply.
   `Template` now owns the announced `n_bits` and `target`; `Job` keeps
   only `Bits`, so a custom job holds no bits it never uses.
 - **Red:** three journeys on the regtest pow-overlay fixture of

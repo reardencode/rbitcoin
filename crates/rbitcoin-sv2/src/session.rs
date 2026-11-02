@@ -872,7 +872,7 @@ impl Session {
             Bits::Consensus => {
                 let Some(bits) = self.child_bits(prev, stamp).await? else {
                     rbitcoin_log::info!(
-                        "sv2: SubmitSolution template {}: parent {prev} unknown; dropping",
+                        "sv2: SubmitSolution template {}: no bits for parent {prev} (unknown or unreadable); dropping",
                         m.template_id
                     );
                     return Ok(());
