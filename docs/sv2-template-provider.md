@@ -815,7 +815,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   sent when the validation completes, paired by `request_id`, and the job
   is retained when that reply is sent (so it takes the template id current
   then). Up to `MAX_INFLIGHT_VALIDATIONS` (4) validations run at once per
-  session; further proposals wait in arrival order and are not refused.
+  session; further proposals wait in arrival order up to the D13 bound.
   Session end aborts the in-flight set. Before D11 `on_frame` awaited the
   validation inline inside the session `select!`, so a JDS multiplexing
   many JDCs over one connection could have a found block's
@@ -851,8 +851,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 - **CPU and RAM trade:** four full proposal checks at once per session,
   each on a blocking thread with up to a block of decoded txs; waiting
   proposals hold their payloads (≤ `MAX_PROPOSE_TEMPLATE_PAYLOAD` each),
-  depth bounded by the client's burst (one job per JDC per tip change for a
-  JDS), not by this TP: see Risks.
+  bounded by D13.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 10 times in
   a loop.
 
@@ -896,12 +895,56 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 - **Green:** `job::Proposal` (owned decode, `precheck`, `accept_supplied`
   with the coverage count) and `job::validate(&Proposal, &Supplied)`;
   `Session.pending` as a `VecDeque<Pending>` with `hold` and expiry folded
-  into the retire timer, `Session.open` for the ids queued or in flight;
+  into the retire timer, `Session.ids` for the ids queued, in flight, or held (D13);
   `Work { proposal, supplied }` through the FIFO and the `JoinSet`; the two
   payload caps in `transport.rs`.
 - **RAM trade:** ≤ 8 × ~2.2 MiB held per session, no transactions; one
   in-flight client frame ≤ ~4.2 MB, ≤ ~34 MB at `MAX_SESSIONS`.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
+
+### D13 — Bounded admission
+
+- **Contract:** per session, the work the TP has accepted and not yet
+  answered, queued and running together, is bounded by a count
+  (`MAX_ADMITTED_PROPOSALS`, 16) and by bytes (`MAX_ADMITTED_BYTES`,
+  16 MiB). The bytes are 32 per wtxid, the coinbase prefix and suffix, and,
+  for a `ProvideMissingTransactions.Success`, the raw transactions it
+  supplies. Both entries are charged: a `ProposeTemplate` and a provide for
+  a held proposal. A frame that would pass either bound is answered
+  `ProposeTemplate.Error job-validation-unavailable` (the code the IBD gate
+  uses; sv2-tp#137 answers the same at its bound). The session stays up and
+  keeps serving `RequestTransactionData`, `SubmitSolution`, and later
+  proposals once work drains. A provide past the bound consumes its hold: the
+  `request_id` is free again and a second provide for it is
+  `unknown-request-id`. The charge returns when the proposal is answered,
+  whether `Success`, `Error`, or `ProvideMissingTransactions` (which moves it
+  to the ≤ 8 held, a separate bound). Request ids in use (queued, running,
+  or held) are a hash set, so a duplicate costs one lookup however deep the
+  queue is.
+- **Red:** `propose_template_admission_is_bounded_by_count` and
+  `propose_template_admission_is_bounded_by_bytes` on a runtime with four
+  blocking threads. A test thread holds the mempool write lock so the first
+  validations block on a pooled wtxid; the session takes its first template
+  before the lock and checks fees only a day later, so nothing else needs the
+  pool. Proposals under fresh ids are sent to the bound, and the next one,
+  and a provide for a held proposal, are refused at once while a
+  `RequestTransactionData` on the same socket is answered. After the lock is
+  released every accepted proposal is answered and fresh ids, including the
+  refused provide's, succeed. Red was a reply timeout: the refused frames
+  were queued.
+- **Green:** `Session.admitted` (count and bytes) checked on both entries
+  before the precheck or any hashing; `Work.cost` carried through the
+  `JoinSet` so every completion path returns its charge; `Session.ids`
+  replaces the `Vec` scan.
+- **RAM trade:** 16 and 16 MiB per session, so ≤ 128 MiB at `MAX_SESSIONS`,
+  on top of the ≤ 8 held proposals. A real JDS sends one job per JDC per tip
+  change, each a few thousand wtxids (~100 KiB), so 16 covers a pool with
+  16 JDCs declaring at once and the bytes bind only for oversized jobs. One
+  worst-case proposal is ~2.2 MiB and one worst-case provide ~6 MiB, so the
+  bytes admit two of the latter. A JDS past the bound sees
+  `job-validation-unavailable` and declares again, the recovery it already
+  runs at the IBD gate.
+- **Verify:** `cargo test -p rbitcoin-sv2 --test suite propose_template_admission`.
 
 ### Test budget
 
@@ -910,7 +953,8 @@ Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
 Journeys in `rbitcoin-sv2`
 `template_tests`: five, each one TP and one session on the shared regtest
 pad; the D11 journey is the heaviest (a fan-out block, then three
-validations of 400 supplied spends). No `rbitcoin-test` node journey yet
+validations of 400 supplied spends); D13 adds two more, each one TP and one
+session with the mempool write lock held. No `rbitcoin-test` node journey yet
 (follow-up with a JDS client).
 
 ### Risks / follow-ups
@@ -918,12 +962,10 @@ validations of 400 supplied spends). No `rbitcoin-test` node journey yet
 - No operator opt-out flag: any client that can reach the port may set
   the flag and cost one proposal check per request. Bind to loopback or
   firewall the port (the same advice as for templates).
-- The waiting-proposal queue (D11) has no depth cap: a client that sends
-  well-formed, expensive proposals faster than four blocking threads
-  validate them grows it by one payload each (≤ ~6.5 MB). A refusal or a
-  flood close would cut off a JDS at a tip change, when every JDC declares
-  at once; the trust model above (who reaches the port) is the bound. A
-  byte cap with an `Error` past it is the follow-up if that model changes.
+- The waiting-proposal queue is bounded per session by D13 (16 proposals,
+  16 MiB). A JDS that declares for more than 16 JDCs at one tip change sees
+  `job-validation-unavailable` on the rest and declares again; raise
+  `MAX_ADMITTED_PROPOSALS` if a pool reports it.
 - A job whose validation straddles a tip change ends one of two ways.
   Past the proposal check's tip read it is retained after the push for the
   new tip, so it misses that tip's stale grace and stays in the ring until

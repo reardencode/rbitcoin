@@ -17,4 +17,7 @@ Added
   undeclared, or malformed input is refused before anything is decoded.
   Validation runs off the session loop, up to four at once per
   connection, so a `SubmitSolution` or a tip push never waits behind
-  another client's proposal.
+  another client's proposal. A connection holds at most 16 accepted
+  proposals and 16 MiB of them (wtxids, coinbase split, supplied
+  transactions) at once; one past either is answered
+  `job-validation-unavailable` and the connection keeps serving.

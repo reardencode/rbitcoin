@@ -21,11 +21,11 @@ use rbitcoin_sv2::messages::{
     MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
     REQUIRES_JOB_VALIDATION,
 };
-use rbitcoin_sv2::session::MAX_PENDING_PROPOSALS;
+use rbitcoin_sv2::session::{MAX_ADMITTED_BYTES, MAX_ADMITTED_PROPOSALS, MAX_PENDING_PROPOSALS};
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
-    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, PROVIDE_TIMEOUT, SETUP_TIMEOUT,
-    TEMPLATE_INTERVAL, WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_TEMPLATE_INTERVAL,
+    PROVIDE_TIMEOUT, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -2124,15 +2124,7 @@ async fn validation_progress() {
     job.request_id = 2;
     job.send(&mut c).await;
     expect_missing(&mut c, 2, &missing).await;
-    let pool = Arc::clone(&tc.mempool);
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = pool.lock_write();
-        locked_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    locked_rx.await.unwrap();
+    let hold = WriteHold::take(&tc.mempool).await;
     provide(&mut c, 2, &supplied).await;
     job.send(&mut c).await;
     c.request_transaction_data(template_id).await.unwrap();
@@ -2142,8 +2134,7 @@ async fn validation_progress() {
         f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
         "the retained data is available while validation waits for the mempool"
     );
-    release_tx.send(()).unwrap();
-    lock_thread.join().unwrap();
+    hold.release();
     expect_job_success(&mut c, &tc, 2, template_id + 2, fees).await;
     assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
 
@@ -2207,4 +2198,238 @@ async fn validation_progress() {
     assert_eq!(ids, want, "ids follow the order the loop replied in");
 
     tp.shutdown().await;
+}
+
+/// The mempool write lock held by a test thread until released or dropped.
+struct WriteHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl WriteHold {
+    async fn take(pool: &Arc<rbitcoin_net::MempoolHub>) -> Self {
+        let pool = Arc::clone(pool);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _guard = pool.lock_write();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.await.unwrap();
+        WriteHold { release, thread }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+fn blocking_pool_runtime(blocking_threads: usize) -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(blocking_threads)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A job-validation session that has its first template, and one pooled
+/// spend a proposal can declare. Nothing is admitted after the template, and
+/// the fee check is a day away, so no template build waits on a held lock.
+struct Admission {
+    tc: TestChain,
+    tp: rbitcoin_sv2::Sv2TpHandle,
+    c: TpClient,
+    template_id: u64,
+    known: Transaction,
+    fees: u64,
+    job: Job,
+}
+
+async fn admission_pad(tc: TestChain) -> Admission {
+    let FirstTemplate {
+        tp, c, template_id, ..
+    } = first_template_every(&tc, REQUIRES_JOB_VALIDATION, MAX_TEMPLATE_INTERVAL).await;
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        0,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+    Admission {
+        tc,
+        tp,
+        c,
+        template_id,
+        known,
+        fees,
+        job,
+    }
+}
+
+impl Admission {
+    /// `known` plus `extra` wtxids no pool holds: valid when `extra` is 0,
+    /// otherwise asked for.
+    fn job_with(&self, request_id: u32, extra: usize) -> Job {
+        let mut j = Job {
+            request_id,
+            version: self.job.version,
+            coinbase_prefix: self.job.coinbase_prefix.clone(),
+            coinbase_suffix: self.job.coinbase_suffix.clone(),
+            wtxids: self.job.wtxids.clone(),
+        };
+        j.wtxids.extend((0..extra).map(|i| {
+            let mut w = [0xee; 32];
+            w[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            w
+        }));
+        j
+    }
+
+    /// Every id in `ids` is answered `Success`, in any order.
+    async fn expect_successes(&mut self, ids: &[u32], first_template_id: u64) {
+        let mut got = Vec::new();
+        let mut templates = Vec::new();
+        for _ in ids {
+            let mut f = recv_in_time(&mut self.c).await;
+            assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS);
+            let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+            assert_eq!(ok.fees, self.fees);
+            got.push(ok.request_id);
+            templates.push(ok.template_id);
+        }
+        got.sort_unstable();
+        templates.sort_unstable();
+        assert_eq!(got, ids);
+        let want: Vec<u64> = (first_template_id..first_template_id + ids.len() as u64).collect();
+        assert_eq!(templates, want);
+    }
+
+    /// The retained spend is still served while the loop answers refusals.
+    async fn expect_template_data_served(&mut self) {
+        self.c
+            .request_transaction_data(self.template_id)
+            .await
+            .unwrap();
+        let f = recv_in_time(&mut self.c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    }
+}
+
+/// Work a session has accepted and not answered is bounded by count: with
+/// the mempool write lock held so nothing finishes, the proposal past
+/// `MAX_ADMITTED_PROPOSALS` and a provide past it are answered
+/// `job-validation-unavailable` while the same socket keeps serving, the
+/// refused provide frees its request id, and when the lock is released every
+/// accepted proposal gets its verdict and a fresh one succeeds.
+#[test]
+fn propose_template_admission_is_bounded_by_count() {
+    blocking_pool_runtime(4).block_on(admission_count_bound());
+}
+
+async fn admission_count_bound() {
+    let mut a = admission_pad(shared_regtest(1)).await;
+    let held = 1;
+    let ghost = a.job_with(held, 1);
+    ghost.send(&mut a.c).await;
+    expect_missing(&mut a.c, held, &[1]).await;
+
+    let hold = WriteHold::take(&a.tc.mempool).await;
+    let ids: Vec<u32> = (100..100 + MAX_ADMITTED_PROPOSALS as u32).collect();
+    for &id in &ids {
+        a.job_with(id, 0).send(&mut a.c).await;
+    }
+    let over = 100 + MAX_ADMITTED_PROPOSALS as u32;
+    a.job_with(over, 0).send(&mut a.c).await;
+    expect_job_error(&mut a.c, over, "job-validation-unavailable").await;
+    a.job_with(ids[0], 0).send(&mut a.c).await;
+    expect_job_error(&mut a.c, ids[0], "duplicate-request-id").await;
+    a.expect_template_data_served().await;
+
+    provide(&mut a.c, held, &[vec![1, 2, 3]]).await;
+    expect_job_error(&mut a.c, held, "job-validation-unavailable").await;
+    provide(&mut a.c, held, &[vec![1, 2, 3]]).await;
+    expect_job_error(&mut a.c, held, "unknown-request-id").await;
+    a.expect_template_data_served().await;
+
+    hold.release();
+    a.expect_successes(&ids, a.template_id + 1).await;
+
+    let next = a.template_id + 1 + ids.len() as u64;
+    for id in [held, over] {
+        a.job_with(id, 0).send(&mut a.c).await;
+        a.expect_successes(&[id], next + u64::from(id != held))
+            .await;
+    }
+    expect_retained(&mut a.c, next, &[&a.known]).await;
+    a.tp.shutdown().await;
+}
+
+/// The same bound in bytes: wtxid-heavy proposals fill `MAX_ADMITTED_BYTES`
+/// long before the count, the next one is refused, and so is a provide whose
+/// supplied bytes do not fit the room left. Work already accepted still
+/// completes (each asks for its unknown wtxids) and a fresh proposal fits.
+#[test]
+fn propose_template_admission_is_bounded_by_bytes() {
+    blocking_pool_runtime(4).block_on(admission_byte_bound());
+}
+
+async fn admission_byte_bound() {
+    let mut a = admission_pad(shared_regtest(1)).await;
+    let extra = 60_000;
+    let big = a.job_with(0, extra);
+    let cost = big.wtxids.len() * 32 + big.coinbase_prefix.len() + big.coinbase_suffix.len();
+    let fits = MAX_ADMITTED_BYTES / cost;
+    assert!(
+        (2..MAX_ADMITTED_PROPOSALS).contains(&fits),
+        "the bytes bind before the count"
+    );
+    let blob = vec![0xab; MAX_ADMITTED_BYTES - fits * cost + 1];
+    let held = 2;
+    let mut ghost = a.job_with(held, 0);
+    ghost
+        .wtxids
+        .push(sha256d::Hash::hash(&blob).to_byte_array());
+    ghost.send(&mut a.c).await;
+    expect_missing(&mut a.c, held, &[1]).await;
+
+    let hold = WriteHold::take(&a.tc.mempool).await;
+    let ids: Vec<u32> = (200..200 + fits as u32).collect();
+    for &id in &ids {
+        a.job_with(id, extra).send(&mut a.c).await;
+    }
+    let over = 200 + fits as u32;
+    a.job_with(over, extra).send(&mut a.c).await;
+    expect_job_error(&mut a.c, over, "job-validation-unavailable").await;
+    a.expect_template_data_served().await;
+    provide(&mut a.c, held, &[blob]).await;
+    expect_job_error(&mut a.c, held, "job-validation-unavailable").await;
+    a.expect_template_data_served().await;
+
+    hold.release();
+    let unknown: Vec<u16> = (1..=extra as u16).collect();
+    let mut asked = Vec::new();
+    for _ in &ids {
+        let mut f = recv_in_time(&mut a.c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS);
+        let m: ProvideMissingTransactions = binary_sv2::from_bytes(&mut f.payload).unwrap();
+        assert_eq!(m.unknown_tx_position_list.into_inner(), unknown);
+        asked.push(m.request_id);
+    }
+    asked.sort_unstable();
+    assert_eq!(asked, ids);
+
+    for id in [held, over] {
+        a.job_with(id, 0).send(&mut a.c).await;
+        a.expect_successes(&[id], a.template_id + 1 + u64::from(id != held))
+            .await;
+    }
+    a.tp.shutdown().await;
 }

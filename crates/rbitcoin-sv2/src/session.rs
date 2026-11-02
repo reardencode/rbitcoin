@@ -1,6 +1,6 @@
 //! One TDP session: Noise handshake, `SetupConnection`, then TDP messages.
 
-use crate::job::{self, Proposal, Supplied, Verdict};
+use crate::job::{self, Proposal, Supplied, Verdict, UNAVAILABLE};
 use crate::messages::{
     ProposeTemplateError, ProposeTemplateSuccess, ProvideMissingTransactions,
     ProvideMissingTransactionsSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE,
@@ -23,7 +23,7 @@ use common_messages_sv2::{
 };
 use noise_sv2::Responder;
 use rbitcoin_net::{BlockingRegion, ChainHub};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,13 +77,31 @@ pub fn constraints_rebuild_at(
 /// CPU and RAM trade (CONTRIBUTING 9): this many `ProposeTemplate`
 /// validations run at once per session, each one full proposal check on a
 /// blocking thread holding up to a block of decoded transactions. Later
-/// proposals wait in arrival order, each holding its wtxids and the
-/// transactions its JDS supplied (at most
-/// `MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD`), and are not refused: a JDS
-/// declares one job per JDC at every tip change, so a burst is the normal
-/// shape. The queue has no cap of its own (docs/sv2-template-provider.md,
-/// Plan D risks).
+/// proposals wait in arrival order up to [`MAX_ADMITTED_PROPOSALS`] and
+/// [`MAX_ADMITTED_BYTES`] for the session; past those a proposal is refused
+/// (docs/sv2-template-provider.md, Plan D).
 const MAX_INFLIGHT_VALIDATIONS: usize = 4;
+
+/// RAM trade (CONTRIBUTING 9): `ProposeTemplate` and
+/// `ProvideMissingTransactions.Success` work a session has accepted and not
+/// yet answered, queued and running together, is bounded by this count and
+/// by [`MAX_ADMITTED_BYTES`]. A frame past either is answered
+/// `job-validation-unavailable` (the IBD gate's code; sv2-tp#137 answers the
+/// same at its bound) and the session keeps serving. A JDS declares one job
+/// per JDC per tip change, each a few thousand wtxids (~100 KiB), so 16
+/// covers a pool fanning out to 16 JDCs at once. Held proposals are bounded
+/// apart by [`MAX_PENDING_PROPOSALS`].
+#[doc(hidden)]
+pub const MAX_ADMITTED_PROPOSALS: usize = 16;
+
+/// RAM trade (CONTRIBUTING 9): the bytes the admitted work holds per
+/// session: 32 per wtxid, the coinbase prefix and suffix, and the raw
+/// transactions a provide supplied. One worst-case proposal is ~2.2 MiB and
+/// one worst-case provide ~6 MiB, so the bound admits two of those. Typical
+/// jobs are ~100 KiB, so the count binds first. At [`crate::MAX_SESSIONS`]
+/// sessions: ≤ 128 MiB.
+#[doc(hidden)]
+pub const MAX_ADMITTED_BYTES: usize = 16 << 20;
 
 /// RAM trade (CONTRIBUTING 9): a proposal the TP answered
 /// `ProvideMissingTransactions` waits here for the `.Success`, holding its
@@ -139,6 +157,32 @@ struct Pending {
 struct Work {
     proposal: Arc<Proposal>,
     supplied: Supplied,
+    /// What it holds against [`Admitted`] until it is answered.
+    cost: usize,
+}
+
+/// Accepted-and-unanswered proposal work of one session, against
+/// [`MAX_ADMITTED_PROPOSALS`] and [`MAX_ADMITTED_BYTES`].
+#[derive(Default)]
+struct Admitted {
+    count: usize,
+    bytes: usize,
+}
+
+impl Admitted {
+    fn fits(&self, cost: usize) -> bool {
+        self.count < MAX_ADMITTED_PROPOSALS && cost <= MAX_ADMITTED_BYTES - self.bytes
+    }
+
+    fn take(&mut self, cost: usize) {
+        self.count += 1;
+        self.bytes += cost;
+    }
+
+    fn credit(&mut self, cost: usize) {
+        self.count -= 1;
+        self.bytes -= cost;
+    }
 }
 
 impl Templates {
@@ -253,7 +297,8 @@ pub async fn serve(
         validations: JoinSet::new(),
         queued: VecDeque::new(),
         pending: VecDeque::new(),
-        open: Vec::new(),
+        ids: HashSet::new(),
+        admitted: Admitted::default(),
     };
     s.run(&mut frames, deadline, idle_timeout).await
 }
@@ -303,14 +348,15 @@ pub struct Session {
     pub seen_updates: u64,
     /// `ProposeTemplate` validations in flight, at most
     /// `MAX_INFLIGHT_VALIDATIONS`. Started blocking work outlives the session.
-    validations: JoinSet<io::Result<(Arc<Proposal>, Verdict)>>,
+    validations: JoinSet<io::Result<(Arc<Proposal>, Verdict, usize)>>,
     /// Prechecked proposals waiting for a validation slot, oldest first.
     queued: VecDeque<Work>,
     /// Proposals waiting for their missing transactions, oldest first, at
     /// most `MAX_PENDING_PROPOSALS`.
     pending: VecDeque<Pending>,
-    /// Request ids accepted and not yet answered: queued or in flight.
-    open: Vec<u32>,
+    /// Request ids in use: queued, in flight, or held in `pending`.
+    ids: HashSet<u32>,
+    admitted: Admitted,
 }
 
 impl Session {
@@ -347,11 +393,13 @@ impl Session {
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
-                    let (proposal, verdict) = done.map_err(io::Error::other)??;
+                    let (proposal, verdict, cost) = done.map_err(io::Error::other)??;
                     let request_id = proposal.request_id;
-                    self.open.retain(|&id| id != request_id);
+                    self.admitted.credit(cost);
                     if let Verdict::Missing(positions) = &verdict {
                         self.hold(proposal, positions.clone());
+                    } else {
+                        self.ids.remove(&request_id);
                     }
                     self.reply_propose(request_id, verdict).await?;
                     self.start_validations();
@@ -361,7 +409,14 @@ impl Session {
                 {
                     let now = Instant::now();
                     self.templates.retire(now);
-                    self.pending.retain(|p| p.expires_at > now);
+                    let ids = &mut self.ids;
+                    self.pending.retain(|p| {
+                        let live = p.expires_at > now;
+                        if !live {
+                            ids.remove(&p.proposal.request_id);
+                        }
+                        live
+                    });
                 }
                 _ = tokio::time::sleep_until(self.rebuild_at.unwrap_or_else(Instant::now)),
                     if self.rebuild_at.is_some() =>
@@ -444,13 +499,11 @@ impl Session {
                     rbitcoin_log::info!("sv2: undecodable ProposeTemplate");
                     return Ok(true);
                 };
-                let held = self.open.contains(&p.request_id)
-                    || self
-                        .pending
-                        .iter()
-                        .any(|w| w.proposal.request_id == p.request_id);
-                let code = if held {
+                let cost = p.cost();
+                let code = if self.ids.contains(&p.request_id) {
                     Err("duplicate-request-id")
+                } else if !self.admitted.fits(cost) {
+                    Err(UNAVAILABLE)
                 } else {
                     p.precheck()
                 };
@@ -459,10 +512,12 @@ impl Session {
                         .await?;
                     return Ok(true);
                 }
-                self.open.push(p.request_id);
+                self.ids.insert(p.request_id);
+                self.admitted.take(cost);
                 self.queued.push_back(Work {
                     proposal: Arc::new(p),
                     supplied: Supplied::new(),
+                    cost,
                 });
                 self.start_validations();
             }
@@ -488,13 +543,28 @@ impl Session {
                     .await?;
                     return Ok(true);
                 };
-                match proposal.accept_supplied(&missing, &m.transaction_list) {
+                let cost = proposal.cost()
+                    + m.transaction_list
+                        .iter()
+                        .map(|t| t.as_ref().len())
+                        .sum::<usize>();
+                let accepted = if self.admitted.fits(cost) {
+                    proposal.accept_supplied(&missing, &m.transaction_list)
+                } else {
+                    Err(UNAVAILABLE)
+                };
+                match accepted {
                     Ok(supplied) => {
-                        self.open.push(m.request_id);
-                        self.queued.push_back(Work { proposal, supplied });
+                        self.admitted.take(cost);
+                        self.queued.push_back(Work {
+                            proposal,
+                            supplied,
+                            cost,
+                        });
                         self.start_validations();
                     }
                     Err(code) => {
+                        self.ids.remove(&m.request_id);
                         self.reply_propose(m.request_id, Verdict::Rejected(code.into()))
                             .await?;
                     }
@@ -765,14 +835,19 @@ impl Session {
     /// comes from the `join_next` arm, paired by `request_id`.
     fn start_validations(&mut self) {
         while self.validations.len() < MAX_INFLIGHT_VALIDATIONS {
-            let Some(Work { proposal, supplied }) = self.queued.pop_front() else {
+            let Some(Work {
+                proposal,
+                supplied,
+                cost,
+            }) = self.queued.pop_front()
+            else {
                 return;
             };
             let c = Arc::clone(&self.chain);
             self.validations.spawn_blocking(move || {
                 let _g = BlockingRegion::enter();
                 let verdict = job::validate(&c, &proposal, &supplied)?;
-                Ok((proposal, verdict))
+                Ok((proposal, verdict, cost))
             });
         }
     }
@@ -781,7 +856,9 @@ impl Session {
     /// `ProvideMissingTransactions.Success`, `provide_timeout` at most.
     fn hold(&mut self, proposal: Arc<Proposal>, missing: Vec<u16>) {
         if self.pending.len() == MAX_PENDING_PROPOSALS {
-            self.pending.pop_front();
+            if let Some(dropped) = self.pending.pop_front() {
+                self.ids.remove(&dropped.proposal.request_id);
+            }
         }
         self.pending.push_back(Pending {
             proposal,

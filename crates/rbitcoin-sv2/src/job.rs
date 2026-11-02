@@ -13,6 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 
+/// `ProposeTemplate.Error.error_code` for a TP that cannot take the job now:
+/// the IBD gate, or a session at its admission bound.
+pub(crate) const UNAVAILABLE: &str = "job-validation-unavailable";
+
 pub(crate) enum Verdict {
     /// 0-indexed positions in `wtxid_list` the mempool does not resolve,
     /// the supplied ones included: the TP holds no transactions across the
@@ -54,6 +58,12 @@ impl Proposal {
                 .map(|w| w.as_ref().try_into().expect("U256 is 32 bytes"))
                 .collect(),
         })
+    }
+
+    /// Bytes the proposal holds while it waits or runs: its wtxids and the
+    /// coinbase split.
+    pub(crate) fn cost(&self) -> usize {
+        self.wtxids.len() * 32 + self.coinbase_prefix.len() + self.coinbase_suffix.len()
     }
 
     /// §4.1: `wtxid_list` has no duplicates. No chain read, so the session
@@ -102,7 +112,7 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
     let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
     // Same gate as the templates: a stale tip validates nothing.
     if chain.in_ibd() {
-        return rejected("job-validation-unavailable");
+        return rejected(UNAVAILABLE);
     }
     let next = template::next_header(chain)?;
     if let Err(code) = p.precheck() {

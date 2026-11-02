@@ -321,6 +321,9 @@ the node checks a Job Declarator Server's declared job as a block on its tip
 (no proof of work; no script checks beyond what mempool admission already
 ran), asks for the transactions it lacks, and retains a valid job under a
 template id that `SubmitSolution` accepts, naming the tip it validated on.
+A session holds at most 16 accepted proposals and 16 MiB of them
+(wtxids, coinbase split, supplied transactions) that are not yet answered; one past
+either bound is answered `job-validation-unavailable` and the session keeps serving.
 Without the flag the messages are ignored. There is
 no operator switch; the flag is per session.
 
