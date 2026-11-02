@@ -131,7 +131,14 @@ Do not copy them here.
   waiting) and the session handles one. That is at most four, ≤ ~17 MB for
   a flagged session and ≤ ~0.26 MB for any other, so ≤ ~134 MB (flagged)
   at `MAX_SESSIONS`, instead of the ~16 MB per frame the 24-bit length
-  allows. Admitted proposal work (D13) and retained templates are
+  allows. The pump reads its next frame only after the previous one is in
+  the channel, so a finished frame blocked in `send` and the codec's two
+  buffers are never held together: with the slot full the count is three
+  (handled, waiting, blocked in `send`), and a fifth does not exist. The
+  codec grows its two `Vec`s a chunk at a time, so their reserved capacity
+  can reach twice the frame, but only the written part is resident
+  (`buffer_sv2::BufferFromSystemMemory`, the `with_buffer_pool` feature is
+  off). Admitted proposal work (D13) and retained templates are
   counted apart from these buffers.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
@@ -142,8 +149,8 @@ Do not copy them here.
   flag; tests drive the shipped Noise path.
 - The only `SetupConnection` flag is `REQUIRES_JOB_VALIDATION` (bit 0,
   Plan D), echoed in `Success.flags`; any other set bit →
-  `SetupConnection.Error` echoing the full set; `protocol != 2` or no
-  version-2 overlap → Error and close.
+  `SetupConnection.Error` naming only the unsupported bits (D19);
+  `protocol != 2` or no version-2 overlap → Error and close.
 - `template_id` strictly increasing per session.
 - Coinbase split (sv2-spec 07 §7.2): `coinbase_prefix` is the BIP34 height
   push (≤ 8 bytes, start of scriptSig); `coinbase_tx_value_remaining` =
@@ -851,34 +858,29 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   validation inline inside the session `select!`, so a JDS multiplexing
   many JDCs over one connection could have a found block's
   `SubmitSolution` sit behind another JDC's validation.
-- **Red:** `propose_template_validation_does_not_delay_other_frames` —
-  400 supplied spends of one confirmed fan-out make the validation the
-  costly frame (about 85 ms on the parent-once proposal check) while every
-  template stays coinbase-only. The proposal alone measures that wall. A
-  `RequestTransactionData` for the empty template is sent right behind a
-  second copy; its reply must arrive before that copy's `Success`, in under
-  a quarter of the validation it overlapped: the request has no blocking
-  work behind it, so a slower answer means the loop waited and the order
-  was luck. A `SubmitSolution` behind a third copy is accepted while it
-  validates and pushes the solved tip's `NewTemplate`; its accept ends in a
-  tip write (an fsync), so the journey does not order it against that
-  copy's reply, which is the straddle named under Risks: `Success` on the
-  tip the validation started on, or the proposal check's reject once the
-  tip moved first. The first shape (1200 inputs, the solution ordered
-  before the reply) owed its margin to the per-input parent decode that
-  #968 removed; on the merged check it failed 10 of 10 runs (`Success`
-  before the solved tip's template, or `inconclusive-not-best-prevblk`
-  when the tip moved first), which was Red for this shape. The original
-  Red was `Success` as the first frame, the solution 527 ms behind a
-  696 ms validation.
-- **Green:** `on_frame` decodes the proposal and runs `job::precheck`
-  (`duplicate-wtxid`; no chain read) on arrival, replying
-  at once on failure; otherwise the payload joins a FIFO and
-  `start_validations` fills a `JoinSet` of `spawn_blocking` +
-  `BlockingRegion` tasks up to the bound. A new `select!` arm takes each
+- **Red:** `propose_template_validation_does_not_delay_other_frames`, on a
+  runtime with four blocking threads. A test thread holds the mempool write
+  lock, so a validation that must resolve a pooled body cannot finish. Behind
+  the proposal the session must still answer a `RequestTransactionData`
+  with the retained template's data and refuse a repeated request id
+  (`duplicate-request-id`); only after the lock is released does the
+  proposal get its `Success`. Nothing is timed: with the validation inline in
+  `on_frame`, the request sent behind the proposal was answered only after
+  the proposal's own reply, so the first frame after it was the `Success`.
+  A `SubmitSolution` behind a later proposal's provide is accepted while that
+  proposal validates and pushes the solved tip's `NewTemplate`; its accept
+  ends in a tip write (an fsync), so the journey does not order it against
+  that proposal's reply, which is the straddle named under Risks: `Success`
+  on the tip the validation started on, or the proposal check's reject once
+  the tip moved first.
+- **Green:** `on_frame` decodes the proposal and runs `Proposal::precheck`
+  (`duplicate-wtxid`; no chain read) on arrival, replying at once on failure;
+  otherwise the work is admitted (D13) and becomes a task in the session's
+  `JoinSet` that takes a permit (D14) and runs `job::validate` on
+  `spawn_blocking` inside a `BlockingRegion`. A `select!` arm takes each
   finished verdict and calls the one `reply_propose` path (retain on
-  `Valid`, then the reply). `job::validate` stays complete on its own
-  (the precheck runs again inside it).
+  `Valid`, then the reply). `job::validate` stays complete on its own (the
+  precheck runs again inside it).
 - **CPU and RAM trade:** full proposal checks on blocking threads, each with
   up to a block of decoded txs, bounded node-wide by D14; waiting proposals
   hold their wtxids and coinbase split, bounded by D13.
@@ -980,7 +982,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   worst-case proposal is ~2.2 MiB and one worst-case provide ~6 MiB, so the
   bytes admit two of the latter. A JDS past the bound sees
   `job-validation-unavailable` and declares again, the recovery it already
-  runs at the IBD gate.
+  runs at the IBD gate. A refused proposal still pays the decode's copy of
+  its wtxids (up to ~2.2 MiB, freed at once): the bound is checked on the
+  decoded cost, which needs the decode.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite propose_template_admission`.
 
 ### D14 — Node-wide validation bound
@@ -1100,7 +1104,7 @@ Three review findings on the hold and the retained ring, one rule each.
   `deadline` in a ring of `MAX_RETIRED_TIPS` (8) pairs. `retain` gives a job
   on a tip with a record that deadline, which may already have passed: the
   job is retired by the next pass, never given a fresh grace. A job on
-  `current_prev`, or on a tip with no record (the session's event for it is
+  `tip`, or on a tip with no record (the session's event for it is
   still to come, or the record aged out), is unmarked, and the next
   `start_grace` marks it. A job that outlives the 8-tip record therefore
   waits for one more tip event, then gets that event's grace. A session
@@ -1253,14 +1257,15 @@ Three review findings on the hold and the retained ring, one rule each.
 
 ### Test budget
 
-Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
-`check_block_proposal_*`, `rbitcoin-rpc` GBT proposal `bad-cb-amount`.
-Journeys in `rbitcoin-sv2`
-`template_tests`: five, each one TP and one session on the shared regtest
-pad; the D11 journey is the heaviest (a fan-out block, then three
-validations of 400 supplied spends); D13 adds two more and D14 one, each with
-the mempool write lock held. No `rbitcoin-test` node journey yet
-(follow-up with a JDS client).
+Units: the messages round trip, `job::extranonce_len` and `job::wire_code`,
+the `Templates` retention methods, `rbitcoin-net` `check_block_proposal_*`,
+`rbitcoin-rpc` GBT proposal `bad-cb-amount`. Journeys in `rbitcoin-sv2`
+`template_tests`: 21 for job validation, each one TP on the shared regtest
+pad, the D13 and D14 ones with several sessions. The D11 journey is the
+heaviest (a fan-out block, then three validations of 400 supplied spends);
+most of the others hold the mempool write lock or the template mutex to order
+what the session does. No `rbitcoin-test` node journey yet (follow-up with a
+JDS client).
 
 ### Risks / follow-ups
 
