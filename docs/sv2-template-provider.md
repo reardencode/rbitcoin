@@ -171,7 +171,11 @@ Do not copy them here.
   the template's `n_bits` target. Only then does it clone the template's
   txs and call `ChainHub::accept_block`, so a spam of cheap bad-nonce
   solutions never takes `connect_lock`, the compact-block prefill slot, or
-  the mempool.
+  the mempool. For a validated job the `nBits` are read first, because they
+  are inside the hash and no proof of work can be checked without them: a
+  header walk of at most one difficulty interval on a min-difficulty
+  network, nothing on mainnet outside a retarget height, and one frame at a
+  time per session on the blocking pool.
 - OPERATOR / COMPAT / NixOS options land in the plan that ships the flag
   (same PR).
 
@@ -1097,18 +1101,22 @@ Three review findings on the hold and the retained ring, one rule each.
 
 - **Contract:** a retained job carries how its `SubmitSolution` header gets
   `nBits` (`template::Bits`): a pushed template `Sent(n_bits)`, the ones its
-  `SetNewPrevHash` announced for that prev hash (unchanged: the pin and the
-  `submit_timestamp_needs_other_bits` drop stay); a validated job
+  `SetNewPrevHash` announced for that prev hash (the pin stays, and a
+  timestamp that needs other bits is dropped on the answer of the one owner
+  below); a validated job
   `Consensus`. A JDC hashes the bits its own TP sent, possibly another TP or
   this one before a min-difficulty gap, and a connection that only
   validates never got a `SetNewPrevHash`, so the validation-time header's
   bits are not what was hashed. For `Consensus` the session asks
   `ChainHub::expected_child_bits(parent, header_timestamp)` in the blocking
   region, builds the header with the answer, and checks proof of work against
-  that header before `accept_block`. The owner is `expected_bits_off_tip`,
-  which walks the parent's own headers; `rbitcoin_query::expected_next_bits`
-  reads active-chain heights and is not used for a parent that is no longer
-  the tip. An unknown parent header drops the solution like any bad one.
+  that header before `accept_block`. The owner is `expected_bits_off_tip`
+  through `ChainHub::expected_child_bits`, which walks the parent's own
+  headers; `rbitcoin_query::expected_next_bits` reads active-chain heights
+  and is not used for a parent that is no longer the tip. A pushed template's
+  drop check asks the same owner (it fails open when the parent is unknown,
+  and `accept_block` then decides); there is no second bits path. An unknown
+  parent header drops a custom job's solution like any bad one.
   `Template` now owns the announced `n_bits` and `target`; `Job` keeps
   only `Bits`, so a custom job holds no bits it never uses.
 - **Red:** three journeys on the regtest pow-overlay fixture of

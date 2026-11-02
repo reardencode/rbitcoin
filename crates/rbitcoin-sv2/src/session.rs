@@ -838,7 +838,10 @@ impl Session {
         // CPU trade: the coinbase is leaf 0 (always the left child), so its
         // txid folded over the template's path is the root the full txid
         // list would give. A miss on the target costs one fold, not a clone
-        // and hash of every template tx plus ChainHub's connect path.
+        // and hash of every template tx plus ChainHub's connect path. A
+        // validated job's bits come first: they are inside the hash, so no
+        // proof of work can be checked before they are read (a header walk on
+        // min-difficulty networks, one frame at a time per session).
         let root = rbitcoin_store::merkle_root_from_branch(
             coinbase.compute_txid().to_byte_array(),
             &r.job.merkle_path,
@@ -849,14 +852,7 @@ impl Session {
         let bits = match r.job.bits {
             Bits::Sent(n_bits) => CompactTarget::from_consensus(n_bits),
             Bits::Consensus => {
-                let bits_chain = Arc::clone(&self.chain);
-                let expected = tokio::task::spawn_blocking(move || {
-                    let _g = BlockingRegion::enter();
-                    bits_chain.expected_child_bits(&prev, stamp)
-                })
-                .await
-                .map_err(io::Error::other)?;
-                let Some(bits) = expected else {
+                let Some(bits) = self.child_bits(prev, stamp).await? else {
                     rbitcoin_log::info!(
                         "sv2: SubmitSolution template {}: parent {prev} unknown; dropping",
                         m.template_id
@@ -885,14 +881,10 @@ impl Session {
         // timestamp past the min-difficulty gap needs the pow-limit bits
         // instead, and rewriting them would change the hash the miner found.
         if let Bits::Sent(_) = r.job.bits {
-            let bits_chain = Arc::clone(&self.chain);
-            let pinned = header.bits;
-            let other_bits = tokio::task::spawn_blocking(move || {
-                let _g = BlockingRegion::enter();
-                submit_timestamp_needs_other_bits(&bits_chain, prev, stamp, pinned)
-            })
-            .await
-            .map_err(io::Error::other)?;
+            let other_bits = self
+                .child_bits(prev, stamp)
+                .await?
+                .is_some_and(|bits| bits != header.bits);
             if other_bits {
                 rbitcoin_log::info!(
                     "sv2: SubmitSolution {} timestamp needs different bits; dropping",
@@ -927,6 +919,18 @@ impl Session {
             Err(e) => rbitcoin_log::info!("sv2: SubmitSolution {hash} rejected: {e}"),
         }
         Ok(())
+    }
+
+    /// The `nBits` consensus requires of `prev`'s child stamped `stamp`, read
+    /// on the blocking pool; `None`: unknown to the chain.
+    async fn child_bits(&self, prev: BlockHash, stamp: u32) -> io::Result<Option<CompactTarget>> {
+        let chain = Arc::clone(&self.chain);
+        tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            chain.expected_child_bits(&prev, stamp)
+        })
+        .await
+        .map_err(io::Error::other)
     }
 
     /// Admitted work waits for a permit in the semaphore's arrival order,
@@ -1033,31 +1037,6 @@ impl Session {
             }
         }
     }
-}
-
-/// `true` when `header_time` at `prev`'s child expects compact bits other
-/// than the ones pinned on the template.
-fn submit_timestamp_needs_other_bits(
-    chain: &ChainHub,
-    prev: BlockHash,
-    header_time: u32,
-    pinned: CompactTarget,
-) -> bool {
-    let Ok(Some(parent)) = chain.query.height_of_hash(&prev.to_byte_array()) else {
-        return false;
-    };
-    let Some(next) = parent.0.checked_add(1) else {
-        return false;
-    };
-    let Ok(bits) = rbitcoin_query::expected_next_bits(
-        chain.query.as_ref(),
-        &chain.params,
-        rbitcoin_primitives::Height(next),
-        header_time,
-    ) else {
-        return false;
-    };
-    bits != pinned
 }
 
 #[doc(hidden)]
