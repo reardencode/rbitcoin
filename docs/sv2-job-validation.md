@@ -188,11 +188,13 @@ following rules, and reply either `ProposeTemplate.Success` or
   entry of `ProvideMissingTransactions.Success.transaction_list` MUST hash to
   a `wtxid` at a position the server asked for (`bad-missing-tx`). Both
   checks MUST run before any transaction is decoded or copied.
-- The server MAY answer `bad-blk-weight` as soon as the transactions it
-  already holds, with the coinbase and block framing, exceed the block
-  weight limit, without asking for the rest. A supplied byte string longer
-  than the remaining weight budget is rejected the same way before it is
-  decoded, even when it is also malformed.
+- The server MAY answer as soon as the transactions it already holds, with
+  the coinbase and block framing, exceed a block size limit, without asking
+  for the rest. It gives the reason a received block would get from Core's
+  `CheckBlock`: `bad-blk-length` when the stripped size times four exceeds
+  the weight limit, otherwise `bad-blk-weight`. A supplied byte string is
+  decoded and charged like a pooled body, so one that is also malformed is
+  `bad-missing-tx`.
 - The server MUST apply every consensus check it would apply to a received
   block except the proof-of-work check and the merkle-root check. This
   includes: transaction validity and input availability against the UTXO set

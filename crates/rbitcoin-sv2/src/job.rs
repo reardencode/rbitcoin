@@ -139,10 +139,9 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
     let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(&raw) else {
         return rejected("bad-cb-decode");
     };
-    let mut weight =
-        (80 + VarInt(1 + p.wtxids.len() as u64).size()) as u64 * 4 + coinbase.weight().to_wu();
-    if weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
-        return rejected("bad-blk-weight");
+    let mut size = BlockSize::of_header(1 + p.wtxids.len() as u64);
+    if let Err(code) = size.add(&coinbase) {
+        return rejected(code);
     }
     let mut txs = Vec::with_capacity(p.wtxids.len());
     let mut missing = Vec::new();
@@ -150,9 +149,6 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
     for (pos, w) in p.wtxids.iter().enumerate() {
         let pos = u16::try_from(pos).expect("Seq064K holds at most 65535");
         let tx = match supplied.get(w) {
-            Some(raw) if raw.len() as u64 > rbitcoin_consensus::MAX_BLOCK_WEIGHT - weight => {
-                return rejected("bad-blk-weight");
-            }
             Some(raw) => match bitcoin::consensus::deserialize::<Transaction>(raw) {
                 Ok(tx) => {
                     provided.push(pos);
@@ -166,9 +162,8 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
         };
         match tx {
             Some(tx) => {
-                weight = weight.saturating_add(tx.weight().to_wu());
-                if weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
-                    return rejected("bad-blk-weight");
+                if let Err(code) = size.add(&tx) {
+                    return rejected(code);
                 }
                 txs.push(tx);
             }
@@ -214,6 +209,38 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
             txs,
             Bits::Consensus,
         ),
+    }
+}
+
+/// What the block a proposal declares has used of the size limits, charged as
+/// the list resolves so an overweight job stops before the rest is fetched
+/// or decoded. Core's `CheckBlock` tests the stripped size first
+/// (`bad-blk-length`: it times the witness scale factor over the weight
+/// limit), then `GetBlockWeight` (`bad-blk-weight`).
+struct BlockSize {
+    base: u64,
+    weight: u64,
+}
+
+impl BlockSize {
+    fn of_header(tx_count: u64) -> Self {
+        let base = (80 + VarInt(tx_count).size()) as u64;
+        Self {
+            base,
+            weight: base * 4,
+        }
+    }
+
+    fn add(&mut self, tx: &Transaction) -> Result<(), &'static str> {
+        self.base = self.base.saturating_add(tx.base_size() as u64);
+        self.weight = self.weight.saturating_add(tx.weight().to_wu());
+        if self.base.saturating_mul(4) > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+            Err("bad-blk-length")
+        } else if self.weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+            Err("bad-blk-weight")
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -98,8 +98,9 @@ Do not copy them here.
   but each job's supplied transactions are private bodies: a client can
   retain up to the same 64 × ~4 MB per session without replacement fees.
   Proposal checking also assembles one temporary owned block per validation.
-  Resolution stops once the known transaction weight plus coinbase and
-  block framing exceeds `MAX_BLOCK_WEIGHT`, even if another body is missing.
+  Resolution stops once the known transactions plus coinbase and block
+  framing exceed the stripped-size limit (`bad-blk-length`) or
+  `MAX_BLOCK_WEIGHT` (`bad-blk-weight`), even if another body is missing.
   Retention is required: the mempool may evict a tx
   before `RequestTransactionData` or `SubmitSolution` arrives. Stale grace
   (default 10 s) after a tip change, then drop (mirrors sv2-tp).
@@ -729,8 +730,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   bound, and `duplicate-wtxid`. Then, on the blocking thread:
   `job-validation-unavailable` while `in_ibd()` (the template gate) or when
   the tip cannot be read (D15), `bad-cb-decode` (this TP's code; the draft
-  has none for an undecodable coinbase), while resolving `bad-blk-weight`
-  past the block limit and `bad-missing-tx` for a supplied blob that does not
+  has none for an undecodable coinbase), while resolving `bad-blk-length`
+  (stripped size times four over the weight limit) or `bad-blk-weight` past
+  the block limits and `bad-missing-tx` for a supplied blob that does not
   decode, then the proposal check's reject string (`bad-cb-amount` for an
   overpaying coinbase). `stale-prevhash` was dropped in D9. Only
   `duplicate-wtxid` and the admission refusals are decided before a node

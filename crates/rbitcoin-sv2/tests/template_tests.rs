@@ -1722,14 +1722,14 @@ async fn overweight_proposal_is_rejected_even_if_another_body_disappears() {
     expect_missing(&mut c, 81, &[1]).await;
     assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
     provide(&mut c, 81, &[serialize(&oversized)]).await;
-    expect_job_error(&mut c, 81, "bad-blk-weight").await;
+    expect_job_error(&mut c, 81, "bad-blk-length").await;
 
     Job::declare(&tc, 82, &coinbase, &[&oversized])
         .send(&mut c)
         .await;
     expect_missing(&mut c, 82, &[0]).await;
     provide(&mut c, 82, &[serialize(&oversized)]).await;
-    expect_job_error(&mut c, 82, "bad-blk-weight").await;
+    expect_job_error(&mut c, 82, "bad-blk-length").await;
 
     let mut at_limit = spend(tc.coinbases[1], 2_000, ScriptBuf::new());
     at_limit.output[0].script_pubkey = ScriptBuf::from_bytes(vec![OP_TRUE; 999_000]);
@@ -1757,6 +1757,35 @@ async fn overweight_proposal_is_rejected_even_if_another_body_disappears() {
     expect_missing(&mut c, 83, &[0]).await;
     provide(&mut c, 83, &[serialize(&at_limit)]).await;
     expect_job_success(&mut c, &tc, 83, last + 1, 2_000).await;
+
+    // One weight unit over the limit through witness bytes alone: the stripped
+    // size is far under its limit, so only the weight rule fires.
+    let mut heavy = spend(tc.coinbases[1], 2_000, ScriptBuf::new());
+    heavy.input[0].witness = Witness::from_slice(&[vec![0u8; 3_900_000]]);
+    let coinbase_heavy = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&heavy],
+    );
+    let fixed = 81 * 4 + coinbase_heavy.weight().to_wu() + heavy.weight().to_wu();
+    let pad = (MAX_BLOCK_WEIGHT + 1 - fixed) as usize;
+    heavy.input[0].witness = Witness::from_slice(&[vec![0u8; 3_900_000 + pad]]);
+    let coinbase_heavy = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&heavy],
+    );
+    assert_eq!(
+        81 * 4 + coinbase_heavy.weight().to_wu() + heavy.weight().to_wu(),
+        MAX_BLOCK_WEIGHT + 1
+    );
+    assert!(heavy.base_size() < 1_000);
+    Job::declare(&tc, 84, &coinbase_heavy, &[&heavy])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 84, &[0]).await;
+    provide(&mut c, 84, &[serialize(&heavy)]).await;
+    expect_job_error(&mut c, 84, "bad-blk-weight").await;
     tp.shutdown().await;
 }
 
@@ -1824,10 +1853,10 @@ async fn pooled_overweight_proposal_is_rejected_before_missing_body_request() {
     Job::declare(&tc, 92, &coinbase, &missing_first)
         .send(&mut c)
         .await;
-    expect_job_error(&mut c, 92, "bad-blk-weight").await;
+    expect_job_error(&mut c, 92, "bad-blk-length").await;
     let known: Vec<_> = pooled.iter().collect();
     Job::declare(&tc, 91, &coinbase, &known).send(&mut c).await;
-    expect_job_error(&mut c, 91, "bad-blk-weight").await;
+    expect_job_error(&mut c, 91, "bad-blk-length").await;
     tp.shutdown().await;
 }
 
