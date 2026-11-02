@@ -895,9 +895,10 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   an id still queued, in flight, or held is `duplicate-request-id`; a
   provide that does not cover every requested position, supplies a tx the
   TP did not ask for, or one that does not decode, is `bad-missing-tx` and
-  ends that exchange (the first two before any decode). These edge rules
-  match sv2-tp #137. A validation still short of a tx asks again for every position
-  the mempool lacks, the supplied ones included, since nothing is held
+  ends that exchange (the first two before any decode or owned copy).
+  These edge rules match sv2-tp #137. A validation still short of a tx
+  asks again for every position the mempool lacks, the supplied ones
+  included, since nothing is held
   across the round trip but the proposal. The block-sized client frame cap
   moves to `ProvideMissingTransactions.Success` (~4.2 MB);
   `ProposeTemplate` is wtxids plus coinbase (~2.3 MB).

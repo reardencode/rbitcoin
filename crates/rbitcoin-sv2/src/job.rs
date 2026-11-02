@@ -79,9 +79,10 @@ impl Proposal {
 
     /// §4.3: every supplied transaction hashes to a wtxid at one of the
     /// positions the TP asked for, and every asked position is covered,
-    /// before any of them is decoded or copied, so a transaction nobody
-    /// asked for costs one hash and a short provide costs none. `Err` is
-    /// the `Error.error_code`.
+    /// before any of them is decoded or copied. A bad provide costs one
+    /// hash per transaction it supplied up to the first bad one, or all of
+    /// them if it is short, and no owned copy. `Err` is the
+    /// `Error.error_code`.
     pub(crate) fn accept_supplied(
         &self,
         missing: &[u16],
@@ -91,18 +92,22 @@ impl Proposal {
             .iter()
             .filter_map(|&pos| self.wtxids.get(usize::from(pos)))
             .collect();
-        let mut supplied = Supplied::with_capacity(transaction_list.len());
+        let mut hashed: HashMap<[u8; 32], &[u8]> = HashMap::with_capacity(transaction_list.len());
         for raw in transaction_list.iter() {
-            let w = sha256d::Hash::hash(raw.as_ref()).to_byte_array();
+            let raw = raw.as_ref();
+            let w = sha256d::Hash::hash(raw).to_byte_array();
             if !asked.contains(&w) {
                 return Err("bad-missing-tx");
             }
-            supplied.insert(w, raw.as_ref().to_vec());
+            hashed.insert(w, raw);
         }
-        if supplied.len() != asked.len() {
+        if hashed.len() != asked.len() {
             return Err("bad-missing-tx");
         }
-        Ok(supplied)
+        Ok(hashed
+            .into_iter()
+            .map(|(w, raw)| (w, raw.to_vec()))
+            .collect())
     }
 }
 
