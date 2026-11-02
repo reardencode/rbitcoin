@@ -58,6 +58,13 @@ pub const TDP_VERSION: u16 = 2;
 #[doc(hidden)]
 pub const MAX_RETAINED: usize = 64;
 
+/// The tips this session moved off whose retirement deadline it remembers,
+/// so a job that finishes on one of them after the move retires with the
+/// templates that were on it. A validation spans a few tip changes at most;
+/// an older tip is left for the next tip event to classify.
+#[doc(hidden)]
+pub const MAX_RETIRED_TIPS: usize = 8;
+
 /// Budgets that replace a still-queued one before it is built. A real client
 /// changes its budget minutes apart; past this many inside one cooldown the
 /// session is closed so the slot goes back to a real client.
@@ -134,6 +141,9 @@ pub struct Templates {
     /// Fee delta is measured against the last pushed template.
     pub last_value_remaining: Option<u64>,
     pub retained: VecDeque<Retained>,
+    /// `(prev hash, deadline)` for the tips this session moved off, oldest
+    /// first, at most [`MAX_RETIRED_TIPS`]. Never holds `current_prev`.
+    retired: VecDeque<([u8; 32], Instant)>,
 }
 
 #[doc(hidden)]
@@ -141,7 +151,7 @@ pub struct Retained {
     pub id: u64,
     pub job: template::Job,
     pub prev_sent: (u32, Instant),
-    /// Set once the tip moves on.
+    /// Set once the job's own parent is no longer the tip.
     pub retire_at: Option<Instant>,
 }
 
@@ -196,16 +206,27 @@ impl Admitted {
 }
 
 impl Templates {
+    /// A job validated while the session is on another tip carries that
+    /// tip's recorded deadline, which may already have passed: it is never
+    /// given a fresh grace. A job on `current_prev`, or on a tip the session
+    /// has not moved off yet (a validation can read the store tip before this
+    /// session handles its event), has none, and the next [`Self::start_grace`]
+    /// classifies it.
     #[doc(hidden)]
     pub fn retain(&mut self, id: u64, job: template::Job, prev_sent: (u32, Instant)) {
         if self.retained.len() == MAX_RETAINED {
             self.retained.pop_front();
         }
+        let retire_at = self
+            .retired
+            .iter()
+            .find(|(prev, _)| *prev == job.prev_hash)
+            .map(|&(_, deadline)| deadline);
         self.retained.push_back(Retained {
             id,
             job,
             prev_sent,
-            retire_at: None,
+            retire_at,
         });
     }
 
@@ -224,11 +245,26 @@ impl Templates {
         self.retained.iter().find(|r| r.id == id)
     }
 
-    /// Every retained template predates the new prev hash.
+    /// The session moves to `new_prev`. Entries on any other prev hash retire
+    /// at `deadline` unless they already have one; entries on `new_prev` are
+    /// current, including ones from before an earlier move off it. The tip
+    /// left behind records `deadline` for jobs that finish on it later.
     #[doc(hidden)]
-    pub fn start_grace(&mut self, deadline: Instant) {
+    pub fn start_grace(&mut self, new_prev: [u8; 32], deadline: Instant) {
+        self.retired.retain(|(prev, _)| *prev != new_prev);
+        if let Some(left) = self.current_prev.filter(|prev| *prev != new_prev) {
+            if self.retired.len() == MAX_RETIRED_TIPS {
+                self.retired.pop_front();
+            }
+            self.retired.push_back((left, deadline));
+        }
+        self.current_prev = Some(new_prev);
         for r in &mut self.retained {
-            r.retire_at.get_or_insert(deadline);
+            if r.job.prev_hash == new_prev {
+                r.retire_at = None;
+            } else {
+                r.retire_at.get_or_insert(deadline);
+            }
         }
     }
 
@@ -735,10 +771,10 @@ impl Session {
                 .send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
                 .await?;
             let now = Instant::now();
-            self.templates.current_prev = Some(t.job.prev_hash);
             self.templates.prev_sent = Some((t.job.header_timestamp, now));
             self.templates.sent_bits = Some((t.job.n_bits, t.job.target));
-            self.templates.start_grace(now + self.stale_grace);
+            self.templates
+                .start_grace(t.job.prev_hash, now + self.stale_grace);
         }
         let prev_sent = self
             .templates

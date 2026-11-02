@@ -25,4 +25,5 @@ Added
   `sv2_validating` field show how many run. A connection holds at most 16 accepted
   proposals and 16 MiB of them (wtxids, coinbase split, supplied
   transactions) at once; one past either is answered
-  `job-validation-unavailable` and the connection keeps serving.
+  `job-validation-unavailable` and the connection keeps serving, as it
+  does for a proposal whose validation cannot read the chain tip.

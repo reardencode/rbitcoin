@@ -1028,6 +1028,32 @@ Three review findings on the hold and the retained ring, one rule each.
   (`sv2: tip header: cancelled: header read`). Green: the proposal is
   `job-validation-unavailable`, the earlier job still answers
   `RequestTransactionData`, and the same request id then validates.
+- **Retention by the job's parent.** `Templates::retain` used to leave every
+  validated job unmarked and `start_grace` marked every retained entry on a
+  new prev hash. A job validated on the new tip B before the session handled
+  B's event was then retired by B's own grace while B was the tip; a job on
+  the old tip A that finished after the session moved to B kept no deadline
+  and outlived A's grace. Now `start_grace(new_prev, deadline)` marks only
+  entries whose parent is another tip, clears the mark on entries of
+  `new_prev` (a return to a tip, A→B→A), and records the tip it left with
+  `deadline` in a ring of `MAX_RETIRED_TIPS` (8) pairs. `retain` gives a job
+  on a tip with a record that deadline, which may already have passed: the
+  job is retired by the next pass, never given a fresh grace. A job on
+  `current_prev`, or on a tip with no record (the session's event for it is
+  still to come, or the record aged out), is unmarked, and the next
+  `start_grace` marks it. A job that outlives the 8-tip record therefore
+  waits for one more tip event, then gets that event's grace.
+- **Red:** `crates/rbitcoin-sv2/tests/session.rs` drives the shipped
+  `Templates` methods, as `tip_event_rebuilds_a_template_built_before_it`
+  does: the window between `ChainHub` publishing the store tip and the
+  session's tip event (`Templates::on_tip`) is not reachable
+  deterministically from a socket, so a small test on the `#[doc(hidden)]`
+  methods is the witness (TESTING.md "True journeys"). The B job before B's
+  event survives past the deadline; the A job after B's push retires at A's
+  original deadline, including a deadline already past; A→B→A keeps A's jobs
+  and retires B's; a tip older than the record is classified by the next
+  event. Red was the compile failure against the one-argument
+  `start_grace` and the five tests failing on the old marking.
 
 ### Test budget
 
@@ -1050,17 +1076,18 @@ the mempool write lock held. No `rbitcoin-test` node journey yet
   `job-validation-unavailable` on the rest and declares again; raise
   `MAX_ADMITTED_PROPOSALS` if a pool reports it.
 - A job whose validation straddles a tip change ends one of two ways.
-  Past the proposal check's tip read it is retained after the push for the
-  new tip, so it misses that tip's stale grace and stays in the ring until
-  pushed out; `Success.prev_hash` names the old tip, so the JDS discards
-  it, and a solution on it is a side block, not the tip. Before that read
-  the check rejects it (`inconclusive-not-best-prevblk`, or
-  `bad-cb-height` when the header was read after the move). The D11
-  journey accepts either.
+  Past the proposal check's tip read it is retained under its own parent
+  (D15): current when the session has not moved off that tip yet, or retired
+  at the deadline recorded when it did. `Success.prev_hash` names the
+  validated tip, so the JDS discards a stale one, and a solution on it is a
+  side block, not the tip. Before that read the check rejects it
+  (`inconclusive-not-best-prevblk`, or `bad-cb-height` when the header was
+  read after the move). The D11 journey accepts either.
 - `SetupConnection.Success.flags` echoes the request flags verbatim.
 - Retention is the template rule (D10): a validated job shares the
-  session's `MAX_RETAINED` (64) ring with templates and the same stale
-  grace. Past 64 same-tip pushes and validations the oldest goes; a
+  session's `MAX_RETAINED` (64) ring with templates and retires with the
+  same stale grace after its parent stops being the tip (D15). Past 64
+  same-tip pushes and validations the oldest goes; a
   `SubmitSolution` for it is dropped and JDC's own propagation (JDP 6.4.9)
   covers the block.
 - A job is retained with the nBits its validation header used. On

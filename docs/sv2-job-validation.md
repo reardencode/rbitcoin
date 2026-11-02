@@ -246,7 +246,10 @@ the job and will accept a `SubmitSolution` for it.
 The server MUST retain the validated job (its transactions in block order
 and the header fields a `SubmitSolution` is assembled with) under the same
 rules as its own templates: it is retired after the stale grace that follows
-a tip change, and it MAY be evicted oldest-first by a per-connection cap on
+the tip moving off the job's own parent, so a job validated on the new tip
+before the server announces it stays current, and one that finishes after the
+server has moved off its parent retires with the templates that were on that
+parent, not after a new grace. It MAY be evicted oldest-first by a per-connection cap on
 retained templates and jobs, which SHOULD be at least 64. A JDS multiplexes
 many JDCs over one connection, so no single job is "the latest"; a
 `SubmitSolution` for an id the server no longer retains is dropped (Section
