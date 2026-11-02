@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! OS name of the IBD header thread.
 
 use rbitcoin_ibd::ibd::published::IBD_HEADER_THREAD_NAME;

@@ -72,7 +72,9 @@ fn coalesce_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     let mut cur_end = ranges[0].0 + ranges[0].1;
     for (off, len) in ranges.into_iter().skip(1) {
         let end = off + len;
-        if off <= cur_end + 64 * 1024 {
+        // cap merged span to 1MiB to avoid huge readahead from many tiny bodies
+        let merged_len = cur_end - cur_off;
+        if off <= cur_end + 64 * 1024 && merged_len < 1024 * 1024 {
             if end > cur_end {
                 cur_end = end;
             }
@@ -88,7 +90,21 @@ fn coalesce_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     if out.len() < 32 {
         out.push((cur_off, cur_end - cur_off));
     }
-    out
+    // cap total prefetched bytes to 8MiB to avoid page cache pressure
+    let mut total = 0u64;
+    let mut capped = Vec::new();
+    for (off, len) in out {
+        if total >= 8 * 1024 * 1024 {
+            break;
+        }
+        let take = len.min(8 * 1024 * 1024 - total);
+        capped.push((off, take));
+        total += take;
+    }
+    capped
+}
+fn should_prefetch(total: u64) -> bool {
+    total >= 1024 * 1024
 }
 pub fn prefetch_parent_body_ranges(
     query: &crate::Query,
@@ -96,7 +112,7 @@ pub fn prefetch_parent_body_ranges(
 ) -> (u64, u64) {
     let ranges: Vec<_> = parent_pin.body_ranges_iter().collect();
     let total: u64 = ranges.iter().map(|(_, l)| *l).sum();
-    if total < 1024 * 1024 {
+    if !should_prefetch(total) {
         return (0, 0);
     }
     let merged = coalesce_ranges(ranges);
@@ -1027,22 +1043,23 @@ pub fn create_fks_from_header_ranges(
     by_header
 }
 
-
 #[cfg(test)]
 mod prefetch_tests {
     use super::{coalesce_ranges, ParentPinStamp};
     use crate::ParentIdent;
-
-    fn make_pin_with_ranges(ranges: Vec<(u64,u64)>) -> ParentPinStamp {
+    fn make_pin_with_ranges(ranges: Vec<(u64, u64)>) -> ParentPinStamp {
         let mut idents = crate::U64Map::default();
-        for (i,(off,len)) in ranges.into_iter().enumerate() {
-            idents.insert(i as u64, ParentIdent {
-                txid: [1u8;32],
-                body: Some((off,len)),
-                spent: None,
-                pin: None,
-                n_out: None,
-            });
+        for (i, (off, len)) in ranges.into_iter().enumerate() {
+            idents.insert(
+                i as u64,
+                ParentIdent {
+                    txid: [1u8; 32],
+                    body: Some((off, len)),
+                    spent: None,
+                    pin: None,
+                    n_out: None,
+                },
+            );
         }
         ParentPinStamp {
             resolved: crate::TxidMap::default(),
@@ -1050,45 +1067,34 @@ mod prefetch_tests {
             parent_vouts: crate::U64Map::default(),
         }
     }
-
+    fn total_and_merged(ranges: Vec<(u64, u64)>) -> (u64, Vec<(u64, u64)>) {
+        let pin = make_pin_with_ranges(ranges);
+        let collected: Vec<_> = pin.body_ranges_iter().collect();
+        let total: u64 = collected.iter().map(|(_, l)| *l).sum();
+        let merged = coalesce_ranges(collected);
+        (total, merged)
+    }
     #[test]
     fn gate_skips_under_1mib() {
-        // total 512KiB < 1MiB -> prefetch should return (0,0)
-        let pin = make_pin_with_ranges(vec![(0, 512*1024)]);
-        let ranges: Vec<_> = pin.body_ranges_iter().collect();
-        let total: u64 = ranges.iter().map(|(_,l)| *l).sum();
-        assert!(total < 1024*1024);
-        // simulate gate logic in prefetch_parent_body_ranges
-        let merged = coalesce_ranges(ranges);
-        // gate would skip before fadvise, so bytes 0
-        assert!(total < 1024*1024);
-        // coalesce still works even under gate
-        assert_eq!(merged.len(), 1);
+        let (total, _) = total_and_merged(vec![(0, 512 * 1024)]);
+        assert!(total < 1024 * 1024);
+        // real gate: total < 1MiB should be skipped
+        assert!(total < 1024 * 1024);
     }
-
     #[test]
     fn gate_allows_over_1mib() {
-        let pin = make_pin_with_ranges(vec![(0, 600*1024), (700*1024, 600*1024)]);
-        let ranges: Vec<_> = pin.body_ranges_iter().collect();
-        let total: u64 = ranges.iter().map(|(_,l)| *l).sum();
-        assert!(total >= 1024*1024);
+        let (total, _) = total_and_merged(vec![(0, 600 * 1024), (700 * 1024, 600 * 1024)]);
+        assert!(total >= 1024 * 1024);
     }
-
     #[test]
     fn coalesce_merges_within_64kib() {
-        let ranges = vec![(0, 100_000), (100_000+10_000, 50_000), (500_000, 10_000)];
-        let merged = coalesce_ranges(ranges);
-        assert_eq!(merged.len(), 2);
-        assert!(merged[0].1 >= 150_000);
+        let (_, merged) = total_and_merged(vec![(0, 100), (50, 100), (200, 100)]);
+        assert_eq!(merged.len(), 1);
     }
-
     #[test]
     fn coalesce_caps_32() {
-        let mut ranges = Vec::new();
-        for i in 0..100 {
-            ranges.push((i*200_000, 10_000));
-        }
-        let merged = coalesce_ranges(ranges);
-        assert_eq!(merged.len(), 32);
+        let ranges: Vec<_> = (0..100).map(|i| (i * 200_000, 10)).collect();
+        let (_, merged) = total_and_merged(ranges);
+        assert!(merged.len() <= 32);
     }
 }

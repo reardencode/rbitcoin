@@ -918,8 +918,12 @@ impl TableFile {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
-            let file = self.file.lock().unwrap();
-            let fd = file.as_raw_fd();
+            // Avoid holding the grow lock while issuing the syscall.
+            let fd = {
+                let file = self.file.lock().unwrap();
+                file.as_raw_fd()
+            };
+            // SAFETY: fd is valid from self.file, offset/len are u64, posix_fadvise is safe to call.
             let rc = unsafe {
                 libc::posix_fadvise(
                     fd,

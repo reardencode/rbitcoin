@@ -1063,7 +1063,7 @@ pub fn sample(
         load_pin_plan: w.pin_plan,
         load_pin_new: w.pin_new,
         prefetch_bytes: w.prefetch_bytes,
-        prefetch_ns: ns_ms(w.prefetch_ns),
+        prefetch_ns: w.prefetch_ns,
         load_pin_body_ms: ns_ms(w.pin_body_ns),
         load_plan_pin_ms: ns_ms(w.plan_pin_ns),
         load_pin_range_fill_ms: ns_ms(w.pin_range_fill_ns),
