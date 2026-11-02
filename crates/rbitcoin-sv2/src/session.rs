@@ -1101,10 +1101,11 @@ pub fn setup_error(m: &SetupConnection) -> Option<(u32, &'static str)> {
         return Some((0, ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH));
     }
     // docs/sv2-job-validation.md §3 defines bit 0; every other set bit is
-    // unsupported.
-    if m.flags & !REQUIRES_JOB_VALIDATION != 0 {
+    // unsupported, and the error names only those.
+    let unsupported = m.flags & !REQUIRES_JOB_VALIDATION;
+    if unsupported != 0 {
         return Some((
-            m.flags,
+            unsupported,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
         ));
     }

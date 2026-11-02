@@ -115,6 +115,11 @@ Flags in `SetupConnection.Success.flags` (Server -> Client):
 A client MUST NOT send `ProposeTemplate` on a connection where this flag was
 not set and accepted.
 
+`SetupConnection.Error.flags` carries only the requested bits the server does
+not support. A request for bits `0b101` of a server that supports bit 0 is
+answered `unsupported-feature-flags` with `0b100`; a request for `0b1` is
+accepted and echoed.
+
 ## 4. Messages
 
 ### 4.1 `ProposeTemplate` (Client -> Server)

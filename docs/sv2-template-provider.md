@@ -638,7 +638,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `.MissingTransactions` (the `ProvideMissingTransactions` pair since D12),
   `.Success`, `.Error` (0x77–0x7a) as binary_sv2
   structs, and `REQUIRES_JOB_VALIDATION`. Setup accepts bit 0 and echoes
-  it; any other set bit is still `unsupported-feature-flags`.
+  it; any other set bit is `unsupported-feature-flags`, and `Error.flags`
+  names those bits only (`0b101` is answered `0b100`; D19).
 - **Red:** `job_validation_messages_round_trip`;
   `setup_connection_success_errors_and_session_cap` gains the flag case.
 - **Green:** the structs and the mask in `setup_error`.
@@ -1171,6 +1172,17 @@ Three review findings on the hold and the retained ring, one rule each.
   `NoiseReader::allow_job_validation` raises `max_frame`, called from
   `serve` before `into_split`. No second Noise reader.
 
+### D19 — SetupConnection.Error names only the unsupported bits
+
+- **Contract:** `setup_error` returns `m.flags & !REQUIRES_JOB_VALIDATION`
+  as `Error.flags`, the bits the TP cannot serve (sv2-spec#239 thread 3
+  reads `Error.flags` as the unsupported features). A flagged request that
+  also sets an unknown bit no longer names the supported bit 0.
+- **Red:** `setup_connection_success_errors_and_session_cap`: `0b101` is
+  answered `unsupported-feature-flags` with `0b100` (red: `0b101`); `0b1` is
+  accepted and echoed.
+- **Green:** the mask in `setup_error`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -1199,7 +1211,8 @@ the mempool write lock held. No `rbitcoin-test` node journey yet
   side block, not the tip. Before that read the check rejects it
   (`inconclusive-not-best-prevblk`, or `bad-cb-height` when the header was
   read after the move). The D11 journey accepts either.
-- `SetupConnection.Success.flags` echoes the request flags verbatim.
+- `SetupConnection.Success.flags` echoes the request flags, which are only
+  ever `0` or `REQUIRES_JOB_VALIDATION` (any other bit is an `Error`).
 - Retention is the template rule (D10): a validated job shares the
   session's `MAX_RETAINED` (64) ring with templates and retires with the
   same stale grace after its parent stops being the tip (D15). Past 64

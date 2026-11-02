@@ -120,7 +120,7 @@ async fn setup_connection_success_errors_and_session_cap() {
 
     let mut c = connect_when_free(addr, pk).await;
     c.setup_connection(TDP, 2, 2, 0b101).await.unwrap();
-    expect_error(&mut c, 0b101, "unsupported-feature-flags").await;
+    expect_error(&mut c, 0b100, "unsupported-feature-flags").await;
 
     let mut c = connect_when_free(addr, pk).await;
     c.setup_connection(0, 2, 2, 0).await.unwrap();
