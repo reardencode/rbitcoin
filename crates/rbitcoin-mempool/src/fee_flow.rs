@@ -18,7 +18,10 @@ pub struct FeeFlowMeter {
     pub admit_wu_s: Vec<f64>,
     /// Decayed admitted weight (WU). Not the per-bucket time-gap alpha.
     pub admitted_wu: f64,
+    /// Decay clock. Reads move it too.
     pub last: Instant,
+    /// Previous admit. The sample is weight over the gap since this one.
+    last_admit: Instant,
 }
 
 impl Default for FeeFlowMeter {
@@ -34,6 +37,7 @@ impl FeeFlowMeter {
             admit_wu_s: vec![0.0; n],
             admitted_wu: 0.0,
             last: now,
+            last_admit: now,
         }
     }
 
@@ -57,13 +61,15 @@ impl FeeFlowMeter {
     }
 
     pub fn note_admit(&mut self, weight_wu: u64, rate_sat_per_kvb: u64, now: Instant) {
-        let dt = now.duration_since(self.last).as_secs_f64().max(1e-3);
+        let dt = now.duration_since(self.last_admit).as_secs_f64().max(1e-3);
+        // Every bucket has decayed by `1 - alpha` since `last_admit`, reads included.
         self.decay_to(now);
         let i = bucket_index(rate_sat_per_kvb).min(self.admit_wu_s.len().saturating_sub(1));
         let sample = weight_wu as f64 / dt;
         let alpha = 1.0 - (-std::f64::consts::LN_2 * dt / ADMIT_HALF_LIFE_SECS).exp();
-        self.admit_wu_s[i] = self.admit_wu_s[i] * (1.0 - alpha) + sample * alpha;
+        self.admit_wu_s[i] += sample * alpha;
         self.admitted_wu += weight_wu as f64;
+        self.last_admit = now;
     }
 
     #[doc(hidden)]
