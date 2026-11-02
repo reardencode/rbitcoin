@@ -4014,6 +4014,7 @@ pub fn on_inv_txid(
         if let Some(s) = session {
             let _ = mp.add_orphan_announcer(txid, s.id);
         }
+        end_private_broadcast_on_echo(hub, session, *txid);
         return None;
     }
     if let Some(s) = session {
@@ -4030,6 +4031,28 @@ pub fn on_inv_txid(
         }
     }
     Some(Inventory::WitnessTransaction(*txid))
+}
+
+fn end_private_broadcast_on_echo(
+    hub: &ChainHub,
+    session: Option<&crate::peers::LivePeer>,
+    txid: bitcoin::Txid,
+) {
+    let Some(mp) = hub.mempool() else {
+        return;
+    };
+    if !mp.note_echo(&txid) {
+        return;
+    }
+    let Some(s) = session else {
+        return;
+    };
+    if let Some(tx) = mp.try_get_tx(&txid) {
+        s.note_announced_wtx(tx.compute_wtxid());
+    }
+    if let Some(ph) = s.peer_hub() {
+        force_announce_txid(hub, ph.as_ref(), txid);
+    }
 }
 
 #[doc(hidden)]
@@ -4064,6 +4087,9 @@ pub fn on_inv_wtxid(
             }
         }
         return Some(Inventory::WTx(*wtxid));
+    }
+    if let Some(tx) = mp.try_get_tx_by_wtxid(wtxid) {
+        end_private_broadcast_on_echo(hub, session, tx.compute_txid());
     }
     let s = session?;
     let _ = mp.add_orphan_announcer_wtxid(wtxid, s.id);
