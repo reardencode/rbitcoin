@@ -1461,7 +1461,9 @@ async fn connect_tp_timed(
 }
 
 /// [`connect_tp_timed`] on a TP that keeps a replaced tip's jobs for
-/// `stale_grace`.
+/// `stale_grace`. Its listener has the one validation permit the node
+/// computes for a four-thread blocking pool, which the journeys that run on
+/// such a pool depend on.
 async fn connect_tp_graced(
     tc: &TestChain,
     flags: u32,
@@ -1483,7 +1485,7 @@ async fn connect_tp_graced(
         fee_delta: FEE_DELTA,
         template_interval,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
-        validation_permits: 4,
+        validation_permits: 1,
     })
     .await
     .expect("listen");
@@ -2877,6 +2879,40 @@ impl TemplateMutexHold {
     }
 }
 
+/// The largest `validations_running` a test thread saw while it sampled.
+/// The gauge holds for as long as a validation is stuck, so a validation
+/// that started when it should have waited stays visible to the sampler.
+struct PeakRunning {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    peak: Arc<std::sync::atomic::AtomicU64>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl PeakRunning {
+    fn sample(stats: Arc<rbitcoin_sv2::Sv2TpStats>) -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let thread = std::thread::spawn({
+            let (stop, peak) = (Arc::clone(&stop), Arc::clone(&peak));
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak.fetch_max(stats.validations_running(), Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+            }
+        });
+        PeakRunning { stop, peak, thread }
+    }
+
+    fn finish(self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.join().unwrap();
+        self.peak.load(Ordering::Relaxed)
+    }
+}
+
 fn blocking_pool_runtime(blocking_threads: usize) -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -3160,24 +3196,44 @@ async fn one_permit_tp(tc: &TestChain) -> rbitcoin_sv2::Sv2TpHandle {
     .expect("listen")
 }
 
-async fn node_wide_validation_bound() {
-    let tc = shared_regtest(1);
-    let tp = one_permit_tp(&tc).await;
-    let stats = tp.stats();
+/// A job declaring one pooled spend, and the fees it pays.
+fn pooled_job(tc: &TestChain) -> (Job, u64) {
     let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
     tc.mempool.accept_tx(&known).expect("mempool accept");
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let fees = 3_000;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
     let job = Job::declare(
-        &tc,
+        tc,
         1,
         &job_coinbase(height, subsidy + fees, &[&known]),
         &[&known],
     );
+    (job, fees)
+}
+
+async fn synced_all(clients: [&mut TpClient; 3]) {
+    for client in clients {
+        synced(client).await;
+    }
+}
+
+async fn expect_every_success_for_request_1(clients: [&mut TpClient; 3], fees: u64) {
+    for client in clients {
+        expect_success_for_request_1(client, fees).await;
+    }
+}
+
+#[allow(clippy::cognitive_complexity)] // One socket journey covers the node-wide bound.
+async fn node_wide_validation_bound() {
+    let tc = shared_regtest(1);
+    let tp = one_permit_tp(&tc).await;
+    let stats = tp.stats();
+    let (job, fees) = pooled_job(&tc);
     let mut running = connect_without_template(&tp).await;
     let mut b = connect_without_template(&tp).await;
     let mut c = connect_without_template(&tp).await;
+    let peak = PeakRunning::sample(Arc::clone(&stats));
     let hold = WriteHold::take(&tc.mempool).await;
 
     job.send(&mut running).await;
@@ -3207,12 +3263,12 @@ async fn node_wide_validation_bound() {
         1,
         "the permit stays with the started work"
     );
+    synced_all([&mut b, &mut c, &mut d]).await;
 
     hold.release();
-    for client in [&mut b, &mut c, &mut d] {
-        expect_success_for_request_1(client, fees).await;
-    }
+    expect_every_success_for_request_1([&mut b, &mut c, &mut d], fees).await;
     assert_eq!(stats.validations_running(), 0);
+    assert_eq!(peak.finish(), 1, "never more than one validation node-wide");
     tp.shutdown().await;
 }
 
@@ -3231,21 +3287,12 @@ async fn parked_session_does_not_hold_the_permit() {
     let tc = shared_regtest(1);
     let tp = one_permit_tp(&tc).await;
     let stats = tp.stats();
-    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
-    tc.mempool.accept_tx(&known).expect("mempool accept");
-    let height = tc.chain.query.tip_height().unwrap().0 + 1;
-    let fees = 3_000;
-    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
-    let job = Job::declare(
-        &tc,
-        1,
-        &job_coinbase(height, subsidy + fees, &[&known]),
-        &[&known],
-    );
+    let (job, fees) = pooled_job(&tc);
     let mut running = connect_without_template(&tp).await;
     let mut x = connect_without_template(&tp).await;
     let mut y = connect_without_template(&tp).await;
 
+    let peak = PeakRunning::sample(Arc::clone(&stats));
     let pool = WriteHold::take(&tc.mempool).await;
     job.send(&mut running).await;
     until("the first validation to start", || {
@@ -3283,5 +3330,6 @@ async fn parked_session_does_not_hold_the_permit() {
         stats.validations_running() == 0
     })
     .await;
+    assert_eq!(peak.finish(), 1, "one permit, one validation at a time");
     tp.shutdown().await;
 }
