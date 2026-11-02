@@ -1892,26 +1892,21 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     tp.shutdown().await;
 }
 
-/// A proposal's validation runs off the session loop. The proposal declares
-/// a few hundred spends of one confirmed fan-out that the mempool lacks, so
-/// each copy is asked for all of them and the costly frame (tens of
-/// milliseconds) is the `ProvideMissingTransactions.Success` that completes
-/// it, while every template stays coinbase-only; the first copy measures
-/// that wall. A `RequestTransactionData` sent right behind the second copy's
-/// provide is answered before that copy's `Success`, in a small fraction of
-/// the validation it overlapped: the request has no blocking work behind
-/// it, so a slower answer would mean the loop waited on the validation and
-/// the order was luck; a `ProposeTemplate` under the id in flight is refused
-/// `duplicate-request-id` on arrival the same way. A `SubmitSolution` sent
-/// behind the third copy's
-/// provide is accepted while that copy validates and pushes the solved
-/// tip's `NewTemplate`. Its accept ends in a tip write, so it is not ordered
-/// against the copy's reply, which is the straddle the plan names:
-/// `Success` on the tip the validation started on, or the proposal check's
-/// own reject once the tip moved first.
-#[tokio::test(flavor = "multi_thread")]
-async fn propose_template_validation_does_not_delay_other_frames() {
-    let tc = shared_regtest(1);
+/// A stalled mempool lookup must not stop the same socket serving retained data.
+#[test]
+fn propose_template_validation_does_not_delay_other_frames() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(validation_progress());
+}
+
+#[allow(clippy::cognitive_complexity)] // One socket journey covers progress and tip races.
+async fn validation_progress() {
+    let tc = shared_regtest(2);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let outs = 400u64;
     let each = (50_0000_0000 - 10_000) / outs;
@@ -1953,8 +1948,6 @@ async fn propose_template_validation_does_not_delay_other_frames() {
             }],
         })
         .collect();
-    let declared: Vec<&Transaction> = spends.iter().collect();
-
     let FirstTemplate {
         tp,
         mut c,
@@ -1963,54 +1956,63 @@ async fn propose_template_validation_does_not_delay_other_frames() {
         mut header,
         coinbase,
     } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let known = spend(tc.coinbases[1], 3_000, cheap);
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let declared: Vec<&Transaction> = std::iter::once(&known).chain(spends.iter()).collect();
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
-    let fees = outs * 1_000;
+    let fees = outs * 1_000 + 3_000;
     let mut job = Job::declare(
         &tc,
         1,
         &job_coinbase(height, subsidy + fees, &declared),
         &declared,
     );
-    // Provided, not pooled: the templates stay coinbase-only.
+    // The fan-out spends are supplied rather than pooled.
     let supplied: Vec<Vec<u8>> = spends.iter().map(serialize).collect();
-    let all: Vec<u16> = (0..outs as u16).collect();
+    let missing: Vec<u16> = (1..=outs as u16).collect();
 
     job.send(&mut c).await;
-    expect_missing(&mut c, 1, &all).await;
-    let asked = tokio::time::Instant::now();
+    expect_missing(&mut c, 1, &missing).await;
     provide(&mut c, 1, &supplied).await;
     expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
-    let alone = asked.elapsed();
 
     job.request_id = 2;
     job.send(&mut c).await;
-    expect_missing(&mut c, 2, &all).await;
-    let proposed = tokio::time::Instant::now();
+    expect_missing(&mut c, 2, &missing).await;
+    let pool = Arc::clone(&tc.mempool);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = pool.lock_write();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.await.unwrap();
     provide(&mut c, 2, &supplied).await;
     job.send(&mut c).await;
     c.request_transaction_data(template_id).await.unwrap();
     expect_job_error(&mut c, 2, "duplicate-request-id").await;
     let f = recv_in_time(&mut c).await;
-    let requested = proposed.elapsed();
     assert_eq!(
         f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
-        "the request's reply must precede the proposal's (validation alone {alone:?})"
+        "the retained data is available while validation waits for the mempool"
     );
+    release_tx.send(()).unwrap();
+    lock_thread.join().unwrap();
     expect_job_success(&mut c, &tc, 2, template_id + 2, fees).await;
-    let replied = proposed.elapsed();
-    assert!(
-        requested * 4 < replied,
-        "request answered in {requested:?} against a validation of {replied:?}"
-    );
+    assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
 
     while header.validate_pow(header.target()).is_err() {
         header.nonce += 1;
     }
     job.request_id = 3;
     job.send(&mut c).await;
+    let all: Vec<u16> = (0..=outs as u16).collect();
     expect_missing(&mut c, 3, &all).await;
-    provide(&mut c, 3, &supplied).await;
+    let mut all_supplied = vec![serialize(&known)];
+    all_supplied.extend(supplied);
+    provide(&mut c, 3, &all_supplied).await;
     c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
         .await
         .unwrap();
