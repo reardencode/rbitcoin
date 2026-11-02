@@ -1011,6 +1011,23 @@ Three review findings on the hold and the retained ring, one rule each.
   ready in one loop turn. The old consume validated the late provide in
   about a quarter of the rounds (5 of 5 runs failed within five rounds); a test that sleeps past the timeout and lets the timer run
   could not reach it.
+- **Unreadable tip (unavailable, not fatal).** `job::validate` answers
+  `job-validation-unavailable` when `next_header` fails, as it does in IBD;
+  it used to return the `io::Error`, and the join arm's `?` closed the
+  session, dropping every retained job and held proposal. A reorg pops the
+  tip block by block and signals once the new branch connects (the window
+  `check_fees` already tolerates), so one failed read is a retry for the JDS.
+  Only a `JoinError` (worker panic) still ends the session. The verdict is
+  now infallible, so the blocking closure returns it without an `io::Result`.
+- **Red:** `propose_template_tip_read_failure_is_unavailable_and_the_session_survives`.
+  No session reaches the reorg window itself; the store's instance-scoped,
+  one-shot header-read failure (`Query::fail_next_header_read_cancelled`,
+  debug builds, the same seam the `rbitcoin-net` and `rbitcoin-rpc` journeys
+  use) is armed right before a proposal, and `next_header`'s header read is
+  the first to consume it. Red was the session's disconnect
+  (`sv2: tip header: cancelled: header read`). Green: the proposal is
+  `job-validation-unavailable`, the earlier job still answers
+  `RequestTransactionData`, and the same request id then validates.
 
 ### Test budget
 

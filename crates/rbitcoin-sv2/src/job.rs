@@ -10,11 +10,10 @@ use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
 use rbitcoin_net::ChainHub;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::sync::Arc;
 
 /// `ProposeTemplate.Error.error_code` for a TP that cannot take the job now:
-/// the IBD gate, or a session at its admission bound.
+/// the IBD gate, a tip read that failed, or a session at its admission bound.
 pub(crate) const UNAVAILABLE: &str = "job-validation-unavailable";
 
 pub(crate) enum Verdict {
@@ -107,14 +106,23 @@ impl Proposal {
     }
 }
 
-/// Reads the store and the mempool: blocking region only.
-pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> io::Result<Verdict> {
-    let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
+/// Reads the store and the mempool: blocking region only. A tip that cannot
+/// be read is [`UNAVAILABLE`], as a stale one is: a reorg pops the tip block
+/// by block (`Session::check_fees`), and the JDS asks again. Only a worker
+/// panic ends the session.
+pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> Verdict {
+    let rejected = |code: &str| Verdict::Rejected(code.into());
     // Same gate as the templates: a stale tip validates nothing.
     if chain.in_ibd() {
         return rejected(UNAVAILABLE);
     }
-    let next = template::next_header(chain)?;
+    let next = match template::next_header(chain) {
+        Ok(next) => next,
+        Err(e) => {
+            rbitcoin_log::info!("sv2: proposal not validated ({e})");
+            return rejected(UNAVAILABLE);
+        }
+    };
     if let Err(code) = p.precheck() {
         return rejected(code);
     }
@@ -165,7 +173,7 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
     if !missing.is_empty() {
         missing.extend(provided);
         missing.sort_unstable();
-        return Ok(Verdict::Missing(missing));
+        return Verdict::Missing(missing);
     }
     let mut leaves = Vec::with_capacity(1 + txs.len());
     leaves.push(coinbase.compute_txid().to_byte_array());
@@ -188,12 +196,12 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> i
     // declaration; a flood costs blocking threads, not the reactor.
     let fees = match chain.check_block_proposal(&block) {
         Ok(fees) => fees,
-        Err(code) => return Ok(Verdict::Rejected(code)),
+        Err(code) => return Verdict::Rejected(code),
     };
-    Ok(Verdict::Valid {
+    Verdict::Valid {
         fees,
         job: next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),
-    })
+    }
 }
 
 /// §4.1: `coinbase_tx_prefix` ends inside the scriptSig and

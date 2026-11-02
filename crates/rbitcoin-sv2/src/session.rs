@@ -369,7 +369,7 @@ pub struct Session {
     /// owns its permit and returns it only when the blocking work returns, so
     /// dropping the set with the session discards the verdicts but neither
     /// stops started work nor frees its permit early.
-    validations: JoinSet<io::Result<(Arc<Proposal>, Verdict, usize)>>,
+    validations: JoinSet<(Arc<Proposal>, Verdict, usize)>,
     /// Prechecked proposals waiting for a permit, oldest first.
     queued: VecDeque<Work>,
     /// Proposals waiting for their missing transactions, oldest first, at
@@ -414,7 +414,7 @@ impl Session {
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
-                    let (proposal, verdict, cost) = done.map_err(io::Error::other)??;
+                    let (proposal, verdict, cost) = done.map_err(io::Error::other)?;
                     let request_id = proposal.request_id;
                     self.admitted.credit(cost);
                     if let Verdict::Missing(positions) = &verdict {
@@ -876,8 +876,8 @@ impl Session {
             let _permit = permit;
             let _running = stats.enter_validation();
             let _g = BlockingRegion::enter();
-            let verdict = job::validate(&c, &proposal, &supplied)?;
-            Ok((proposal, verdict, cost))
+            let verdict = job::validate(&c, &proposal, &supplied);
+            (proposal, verdict, cost)
         });
     }
 

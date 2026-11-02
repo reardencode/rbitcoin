@@ -2078,6 +2078,48 @@ async fn propose_template_rejects_untrusted_input_in_order() {
     tp.shutdown().await;
 }
 
+/// A tip read that fails while a proposal validates is a refusal of that
+/// proposal, not the end of the session: the store's one-shot header-read
+/// failure, armed right before the proposal, is the read `next_header` makes
+/// first (the node is past IBD by then, and nothing else on this pad reads a
+/// header until the reply). The proposal is answered
+/// `job-validation-unavailable`, its request id is free, the templates the
+/// session retained still answer `RequestTransactionData`, and the next
+/// proposal validates.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_tip_read_failure_is_unavailable_and_the_session_survives() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let job = Job::declare(&tc, 1, &coinbase, &[&a, &b]);
+
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    tc.chain.query.fail_next_header_read_cancelled();
+    job.send(&mut c).await;
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 2, 5_000).await;
+
+    tp.shutdown().await;
+}
+
 /// §4.5: a `SubmitSolution` on a validated job's template id is assembled
 /// from the retained job and the JDS's final coinbase (extranonce in place
 /// of the placeholder) and accepted like one for a pushed template.
