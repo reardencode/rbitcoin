@@ -6178,6 +6178,10 @@ impl MempoolHub {
         }
     }
 
+    pub fn note_echo(&self, txid: &Txid) -> bool {
+        self.isolated_broadcast() && self.local_origin.lock().unwrap().txs.remove(txid).is_some()
+    }
+
     pub fn is_local_origin(&self, txid: &Txid) -> bool {
         self.local_origin.lock().unwrap().txs.contains_key(txid)
     }

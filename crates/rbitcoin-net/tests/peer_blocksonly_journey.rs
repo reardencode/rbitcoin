@@ -496,6 +496,48 @@ fn force_announce_picks_peers(
     }
 }
 
+async fn standing_echo_ends_the_private_broadcast(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    heights: [u32; 2],
+) {
+    use rbitcoin_net::peers::PeerConnType::OutboundFullRelay;
+    let mp = hub.mempool().unwrap();
+    mp.set_isolated_broadcast(true);
+    for (height, by_txid) in heights.into_iter().zip([false, true]) {
+        let local = spend_coinbase(hub, height);
+        let (txid, wtxid) = (local.compute_txid(), local.compute_wtxid());
+        let echo = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+        let mut echo_rx = writer_of(&echo);
+        let other = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+        let mut other_rx = writer_of(&other);
+        mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
+            .expect("local");
+        assert!(mp.skip_standing_inv(&txid));
+
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut follow = PeerFollowState::new();
+        let item = if by_txid {
+            Inventory::WitnessTransaction(txid)
+        } else {
+            Inventory::WTx(wtxid)
+        };
+        push(hub, &out_tx, &mut follow, Some(echo.as_ref()), NetworkMessage::Inv(vec![item])).await;
+        assert!(
+            !mp.is_local_origin(&txid),
+            "a standing peer's inv must end the private broadcast ({item:?})"
+        );
+        assert_eq!(tx_invs(&mut other_rx), vec![wtxid]);
+        assert!(
+            tx_invs(&mut echo_rx).is_empty(),
+            "the peer that announced it must not get it back ({item:?})"
+        );
+        for s in [echo, other] {
+            peers.unregister(s.id);
+        }
+    }
+}
+
 /// Relay on: inbound waits 30s even for an unbroadcast tx, never gets a tx
 /// accepted before it connected, and idle ticks neither clone bodies nor
 /// rescan live wtxids once the age cursor caught up (`mempool_reorg.py:71`,
@@ -804,6 +846,7 @@ fn peer_blocksonly_and_orphan_tx() {
         relay_on_inbound_age_gate(&hub, &peers, t0 + 100, 6..=21);
         getdata_until_announced_or_reorg(&hub, &peers, t0 + 200, [22, 23, 24, 25]).await;
         orphan_parks_then_asks_missing_parent(&hub, &peers, t0 + 600, 26).await;
+        standing_echo_ends_the_private_broadcast(&hub, &peers, [27, 28]).await;
 
         let _ = std::fs::remove_dir_all(dir);
     });
