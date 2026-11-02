@@ -81,10 +81,19 @@ JDC                      JDS                             TP
 - `ProposeTemplate.Success` assigns a `template_id` from the same namespace as
   `NewTemplate.template_id`. The solution is then sent with the existing
   `SubmitSolution` message (Section 7.8). No new submission message is needed.
-- A JDS connection is an ordinary TDP client. It MUST still open with
-  `CoinbaseOutputConstraints` (Section 7.2) and will receive `NewTemplate` and
-  `SetNewPrevHash` messages, which it MAY ignore or use to prefetch
-  transaction data for its own cache.
+- A JDS connection is an ordinary TDP client unless it only validates. A
+  JDS that wants templates opens with `CoinbaseOutputConstraints` (Section
+  7.2) and receives `NewTemplate` and `SetNewPrevHash` messages, which it
+  MAY ignore or use to prefetch transaction data for its own cache. A JDS
+  that sets `REQUIRES_JOB_VALIDATION` MAY send no `CoinbaseOutputConstraints`
+  at all (validation-only mode, discussion #239): the server then sends it
+  no `NewTemplate` and no `SetNewPrevHash`, answers `ProposeTemplate`,
+  `RequestTransactionData` and `SubmitSolution` as above, and starts the
+  template stream if and when it does send constraints. Such a connection is
+  set up once `SetupConnection.Success` is sent. A server MUST NOT close it
+  for lacking constraints, and MAY close it for silence only under an idle
+  timeout it applies to every connection from that point (rbitcoin: off by
+  default).
 
 ## 3. `SetupConnection` Flags for Template Distribution Protocol
 
@@ -312,7 +321,8 @@ a nonce that met only some other target misses and is dropped. A solution
 for a template the server pushed keeps the `nBits` it sent with
 `SetNewPrevHash` for that `prev_hash`. `SubmitSolution.ntime` MUST satisfy the `ntime_start`
 rule of Section 7.8 relative to the latest `SetNewPrevHash` the server sent on
-this connection.
+this connection, when it has sent one; a connection that was sent none has
+no such bound beyond the consensus time rules.
 
 A server MAY also answer `RequestTransactionData` for a validated job's
 `template_id`, returning the full transaction set in block order.
@@ -355,6 +365,15 @@ The names repeat the Job Declaration Protocol's on purpose, as
   server validates on its own tip and names it in `Success` (discussion #239).
   A declaration from before a tip change is caught by the BIP34 height push,
   not by a dedicated code.
+- **Validation-only connections and idle timeouts.** A connection that sets
+  `REQUIRES_JOB_VALIDATION` is set up at `SetupConnection.Success` and may
+  never send `CoinbaseOutputConstraints`, so a server cannot use "no
+  constraints yet" as its setup deadline for it. Whether to drop a quiet one
+  is the server's idle policy, applied from `SetupConnection.Success`. A JDS
+  waits quietly for its JDC while a `ProvideMissingTransactions` is out
+  (rbitcoin holds the proposal 30 s), so an idle timeout shorter than that
+  hold closes a connection mid-exchange; rbitcoin's idle timeout is off by
+  default.
 - **Coinbase-only mode.** Out of scope. In Coinbase-only mode neither Pool nor
   JDS learns the transaction set, so a node has nothing to validate beyond the
   coinbase, which `SetCustomMiningJob` already carries to the Pool.

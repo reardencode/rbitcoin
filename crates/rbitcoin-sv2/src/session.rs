@@ -418,9 +418,11 @@ pub struct Session {
 
 impl Session {
     /// `setup_deadline` covers the handshake through the first
-    /// `CoinbaseOutputConstraints`. After that, `idle_timeout` (`None`: no
-    /// deadline) is refreshed only when a frame is handled, so tip and
-    /// fee-check wakes do not keep a silent client.
+    /// `CoinbaseOutputConstraints`, or through `SetupConnection.Success` for
+    /// a session that negotiated `REQUIRES_JOB_VALIDATION`: it validates
+    /// jobs and may never send constraints. After that, `idle_timeout`
+    /// (`None`: no deadline) is refreshed only when a frame is handled, so
+    /// tip and fee-check wakes do not keep a silent client.
     pub async fn run(
         &mut self,
         frames: &mut mpsc::Receiver<io::Result<Frame>>,
@@ -500,16 +502,22 @@ impl Session {
                 {
                     self.publish().await?;
                 }
-                _ = tokio::time::sleep_until(setup_deadline), if self.constraints.is_none() => {
+                _ = tokio::time::sleep_until(setup_deadline), if !self.set_up() => {
                     return Err(missed_setup_deadline());
                 }
                 _ = tokio::time::sleep_until(idle_at.unwrap_or_else(Instant::now)),
-                    if idle_at.is_some() && self.constraints.is_some() =>
+                    if idle_at.is_some() && self.set_up() =>
                 {
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "sv2: idle deadline"));
                 }
             }
         }
+    }
+
+    /// Past the setup deadline's reach: constraints arrived, or the session
+    /// negotiated job validation and needs none.
+    fn set_up(&self) -> bool {
+        self.job_validation || self.constraints.is_some()
     }
 
     /// `false`: close the session.

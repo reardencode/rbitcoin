@@ -1438,13 +1438,24 @@ async fn connect_tp_with(
     template_interval: Duration,
     provide_timeout: Duration,
 ) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_timed(tc, flags, template_interval, provide_timeout, SETUP_TIMEOUT).await
+}
+
+/// [`connect_tp_with`] on a TP whose setup deadline is `setup_timeout`.
+async fn connect_tp_timed(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+    setup_timeout: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
-        setup_timeout: SETUP_TIMEOUT,
+        setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         provide_timeout,
@@ -2402,6 +2413,44 @@ async fn custom_job_solution_on_a_parent_that_is_no_longer_the_tip_becomes_the_t
         header.block_hash()
     );
     assert_ne!(header.block_hash(), weaker.block_hash());
+
+    tp.shutdown().await;
+}
+
+/// sv2-spec#239 thread 3: a connection that only validates sets
+/// `REQUIRES_JOB_VALIDATION` and sends no `CoinbaseOutputConstraints`. It is
+/// set up once `SetupConnection.Success` is sent, so the setup deadline does
+/// not close it, and it validates a job, serves its transactions, and takes
+/// the solution with no template or `SetNewPrevHash` ever pushed.
+#[tokio::test(flavor = "multi_thread")]
+async fn validation_only_session_validates_and_solves_past_the_setup_timeout() {
+    let tc = shared_regtest(0);
+    mock_live_tip(&tc);
+    let setup_timeout = Duration::from_millis(300);
+    let (tp, mut c) = connect_tp_timed(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        PROVIDE_TIMEOUT,
+        setup_timeout,
+    )
+    .await;
+    tokio::time::sleep(setup_timeout * 3).await;
+
+    let job = Declared::validate(&tc, &mut c, 1, 1).await;
+    expect_retained(&mut c, job.template_id, &[]).await;
+    let prev = tc.chain.tip_header().unwrap().block_hash();
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let time = tc.chain.tip_header().unwrap().time + 1;
+    let header = ground(job.header(prev, time, limit));
+    job.submit(&mut c, &header).await;
+    until("the solution to become the tip", || {
+        tc.chain.tip_header().unwrap().block_hash() == header.block_hash()
+    })
+    .await;
+
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[], true).await;
 
     tp.shutdown().await;
 }

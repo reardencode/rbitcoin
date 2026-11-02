@@ -36,3 +36,14 @@ Added
   submitted time, and checks proof of work against that exact header before
   the block is submitted. A solution for a pushed template keeps the `nBits`
   its `SetNewPrevHash` announced.
+- **SV2 TP: a job-validation-only connection needs no constraints.** A TDP
+  client that sets `REQUIRES_JOB_VALIDATION` is set up once
+  `SetupConnection.Success` is sent. It may never send
+  `CoinbaseOutputConstraints`, is then sent no `NewTemplate` or
+  `SetNewPrevHash`, and is no longer closed at the 10 s setup deadline; it
+  proposes jobs, reads their transactions, and submits solutions, and
+  constraints sent later start the template stream. A session without the flag
+  keeps the deadline. `--sv2-tp-idle-timeout`, off by default, starts at
+  `SetupConnection.Success` for such a connection; a value under the 30 s
+  provide hold closes a Job Declarator Server that is quietly waiting for its
+  client.

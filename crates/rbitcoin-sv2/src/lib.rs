@@ -93,9 +93,13 @@ pub struct Sv2TpConfig {
     /// How long a template on a replaced prev hash still answers requests.
     pub stale_grace: Duration,
     /// Deadline from TCP accept through the Noise handshake,
-    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`.
+    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`; for a
+    /// session that set `REQUIRES_JOB_VALIDATION`, through
+    /// `SetupConnection.Success`.
     pub setup_timeout: Duration,
-    /// After the first `CoinbaseOutputConstraints`, a session that handles no
+    /// After the first `CoinbaseOutputConstraints` (after
+    /// `SetupConnection.Success` for a session that set
+    /// `REQUIRES_JOB_VALIDATION`), a session that handles no
     /// frame for this long is dropped. It moves only when a frame arrives;
     /// tip and fee pushes do not refresh it. `None`: no idle deadline.
     pub idle_timeout: Option<Duration>,

@@ -1094,6 +1094,32 @@ Three review findings on the hold and the retained ring, one rule each.
   bits for it.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite custom_job_solution`.
 
+### D17 — Validation-only sessions need no constraints
+
+- **Contract:** sv2-spec#239 thread 3: a JDS that only validates sets
+  `REQUIRES_JOB_VALIDATION`, sends no `CoinbaseOutputConstraints`, and is
+  sent no `NewTemplate` or `SetNewPrevHash`. A session that negotiated the
+  flag is set up once `SetupConnection.Success` is sent: the setup-deadline
+  arm of `Session::run` no longer applies to it (`Session::set_up`), and the
+  opt-in `--sv2-tp-idle-timeout` (default off, #1311) starts there instead
+  of at the first constraints. Constraints stay optional: sent later, they
+  start the template stream as they always did. A session without the flag
+  keeps the setup deadline (`session_without_constraints_is_dropped_at_the_setup_deadline`).
+  The handshake deadline in `serve` is unchanged. No flag, no message, no
+  wire field. A configured idle timeout shorter than the 30 s provide hold
+  closes a quiet JDS that is waiting for its JDC to answer a
+  `ProvideMissingTransactions`; the operator doc says so.
+- **Red:** `validation_only_session_validates_and_solves_past_the_setup_timeout`:
+  a flagged session with a 300 ms setup timeout sends nothing for three of
+  them, then `ProposeTemplate` is answered `Success` under template id 1,
+  `RequestTransactionData` returns the job, and the solution becomes the
+  tip (red was `early eof` at the setup deadline); constraints sent after
+  that start the stream. `validation_only_session_silent_is_dropped_at_the_idle_deadline`:
+  a flagged session with the default 10 s setup timeout and a 300 ms idle timeout
+  that sends nothing is closed (red: it stayed open, as the idle arm waited
+  for constraints).
+- **Verify:** `cargo test -p rbitcoin-sv2 --test suite validation_only`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -1129,6 +1155,11 @@ the mempool write lock held. No `rbitcoin-test` node journey yet
   same-tip pushes and validations the oldest goes; a
   `SubmitSolution` for it is dropped and JDC's own propagation (JDP 6.4.9)
   covers the block.
+- A validation-only session (D17) never starts a template stream, so its
+  tip events never open a stale grace and its retained jobs leave only
+  through the 64-slot ring, not on a timer. A solution on a job of an old
+  tip is a side block, as before; the RAM bound is the ring (D10), which a
+  JDS can already fill at one tip.
 - A validated job's solution is hashed by a JDC with the nBits its own TP
   sent, which this session may never have sent (D16). The header is rebuilt
   with the consensus nBits of a child of the job's parent at the submitted
