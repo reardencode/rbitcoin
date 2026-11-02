@@ -167,10 +167,15 @@ following rules, and reply either `ProposeTemplate.Success` or
 `ProposeTemplate.Error`:
 
 - The server validates against its own current tip and reports that tip in
-  `ProposeTemplate.Success.prev_hash`. There is no stale-tip error code: a
-  job declared for a tip the server has since left fails the checks below on
-  its own, normally the BIP34 height push (`bad-cb-height`) or an input the
-  new tip spent; a job that still passes on the new tip is valid there.
+  `ProposeTemplate.Success.prev_hash`. There is no stale-tip error code and
+  no check that a declaration was built on that tip. A job declared for a
+  tip the server has since left usually fails the checks below on its own,
+  by the BIP34 height push (`bad-cb-height`) or an input the new tip spent,
+  but not always: after a same-height reorg the height is the same and the
+  inputs may still be unspent, so the job is valid on the new tip and is
+  answered `Success`. A job that passes on the tip the server names is valid
+  there; whether it is the tip the JDC built on is for the client to compare,
+  against `Success.prev_hash`.
 - `wtxid_list` MUST contain no duplicates (`duplicate-wtxid`), and every
   entry of `ProvideMissingTransactions.Success.transaction_list` MUST hash to
   a `wtxid` at a position the server asked for (`bad-missing-tx`). Both
@@ -363,8 +368,10 @@ The names repeat the Job Declaration Protocol's on purpose, as
 - **No `prev_hash` in the request.** `DeclareMiningJob` carries none, so a
   JDS would have to guess one; the request would also go stale in flight. The
   server validates on its own tip and names it in `Success` (discussion #239).
-  A declaration from before a tip change is caught by the BIP34 height push,
-  not by a dedicated code.
+  A declaration from before a tip change usually fails the BIP34 height push
+  or a spent input, with no dedicated code; one from before a same-height
+  reorg can pass, so the client compares `Success.prev_hash` with the
+  `prev_hash` of the JDC's `PushSolution`.
 - **Validation-only connections and idle timeouts.** A connection that sets
   `REQUIRES_JOB_VALIDATION` is set up at `SetupConnection.Success` and may
   never send `CoinbaseOutputConstraints`, so a server cannot use "no

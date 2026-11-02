@@ -765,8 +765,11 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   prevout, scriptSig length `L`, `P` bytes present; `2 ≤ L ≤ 100`,
   `P ≤ L`), coinbase = prefix ‖ zeros(E) ‖ suffix. A prefix that does not
   parse, or a result that does not decode, is `bad-cb-decode`.
-  `stale-prevhash` is gone: a declaration from before the tip moved fails
-  the proposal check on its own (`bad-cb-height` for its BIP34 push).
+  `stale-prevhash` is gone. A declaration from before the tip moved usually
+  fails the proposal check on its own (`bad-cb-height` for its BIP34 push, or
+  a spent input), but a same-height reorg keeps the height valid and the
+  inputs may still be unspent, so such a declaration is answered `Success`;
+  the JDS compares `Success.prev_hash` with `PushSolution.prev_hash`.
 - **Red:** the four journeys send prefix/suffix and `expect_job_success`
   asserts `Success.prev_hash == tip`;
   `propose_template_rejects_untrusted_input_in_order` swaps the stale case
