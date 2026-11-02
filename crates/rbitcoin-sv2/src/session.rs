@@ -155,6 +155,14 @@ struct Pending {
     expires_at: Instant,
 }
 
+impl Pending {
+    /// The one expiry rule: taking a hold and the cleanup timer both ask it,
+    /// so a provide that is handled before the timer still finds it expired.
+    fn live(&self, now: Instant) -> bool {
+        self.expires_at > now
+    }
+}
+
 /// A proposal and what its JDS supplied, waiting for a validation slot.
 struct Work {
     proposal: Arc<Proposal>,
@@ -427,7 +435,7 @@ impl Session {
                     self.templates.retire(now);
                     let ids = &mut self.ids;
                     self.pending.retain(|p| {
-                        let live = p.expires_at > now;
+                        let live = p.live(now);
                         if !live {
                             ids.remove(&p.proposal.request_id);
                         }
@@ -544,13 +552,9 @@ impl Session {
                     rbitcoin_log::info!("sv2: undecodable ProvideMissingTransactions.Success");
                     return Ok(true);
                 };
-                let at = self
-                    .pending
-                    .iter()
-                    .position(|w| w.proposal.request_id == m.request_id);
                 let Some(Pending {
                     proposal, missing, ..
-                }) = at.and_then(|at| self.pending.remove(at))
+                }) = self.take_pending(m.request_id)
                 else {
                     self.reply_propose(
                         m.request_id,
@@ -875,6 +879,23 @@ impl Session {
             let verdict = job::validate(&c, &proposal, &supplied)?;
             Ok((proposal, verdict, cost))
         });
+    }
+
+    /// The live hold for `request_id`, removed. One past its deadline is
+    /// absent whether or not the cleanup timer has run yet, and its id is
+    /// free again: the timer only returns that memory earlier.
+    fn take_pending(&mut self, request_id: u32) -> Option<Pending> {
+        let at = self
+            .pending
+            .iter()
+            .position(|p| p.proposal.request_id == request_id)?;
+        let held = self.pending.remove(at)?;
+        if held.live(Instant::now()) {
+            Some(held)
+        } else {
+            self.ids.remove(&request_id);
+            None
+        }
     }
 
     /// docs/sv2-job-validation.md §4.2: keep the proposal for its

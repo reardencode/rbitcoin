@@ -871,7 +871,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   about under its `request_id`: `job::Proposal` (wtxids and the coinbase
   split, no txs), at most `MAX_PENDING_PROPOSALS` (8) per session with the
   oldest dropped, for `provide_timeout` (`PROVIDE_TIMEOUT` 30 s, a
-  `Sv2TpConfig` field like `setup_timeout`) checked in the retire arm. A
+  `Sv2TpConfig` field like `setup_timeout`) checked when a provide is
+  consumed (D15); the retire arm only frees an expired hold early. A
   provide for an id the session does not hold, already consumed, or
   expired is `ProposeTemplate.Error unknown-request-id`; a proposal under
   an id still queued, in flight, or held is `duplicate-request-id`; a
@@ -990,6 +991,26 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   validation at a time on a small node; validation speed, not safety, is
   what a small node gives up.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite propose_template_validations`.
+
+### D15 — Hold expiry and retention at the tip boundary
+
+Three review findings on the hold and the retained ring, one rule each.
+
+- **Hold expiry (consume is the authority).** A hold is live while
+  `expires_at > now`, asked of one function by both the retire arm and the
+  consume path (`Pending::live`). A `ProvideMissingTransactions.Success`
+  handled at or after the deadline finds no hold: `unknown-request-id`, the
+  id freed, whether or not the retire arm has run. Before, a provide that
+  won the select race against the timer started a validation after the
+  deadline. The arm stays because it returns the memory and the id before
+  anything else touches them.
+- **Red:** `provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first`.
+  With a zero `provide_timeout` and the session loop parked in a template
+  build on the held template mutex (a proposal validating on the held pool
+  write lock, the provide already sent), the verdict and the provide are
+  ready in one loop turn. The old consume validated the late provide in
+  about a quarter of the rounds (5 of 5 runs failed within five rounds); a test that sleeps past the timeout and lets the timer run
+  could not reach it.
 
 ### Test budget
 

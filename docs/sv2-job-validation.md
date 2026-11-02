@@ -145,7 +145,9 @@ unknown, it MUST reply `ProvideMissingTransactions` (Section 4.2) and hold
 the proposal under its `request_id`: it MUST keep the proposal available for
 a `ProvideMissingTransactions.Success` (Section 4.3) for at least N seconds
 (RECOMMENDED 30) and MAY bound the proposals held per connection, dropping
-the oldest. A `ProvideMissingTransactions.Success` for a `request_id` the
+the oldest. The deadline is checked when the `ProvideMissingTransactions.Success`
+is handled: one that arrives at or after it is `unknown-request-id` even if
+the server has not yet released the hold. A `ProvideMissingTransactions.Success` for a `request_id` the
 server does not hold, no longer holds, or has already consumed is answered
 `ProposeTemplate.Error` with `unknown-request-id`; a `ProposeTemplate` whose
 `request_id` the server has accepted and not yet answered, or still holds,

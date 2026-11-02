@@ -1910,6 +1910,97 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
     tp.shutdown().await;
 }
 
+/// A hold's deadline is checked when its `.Success` is consumed, not only by
+/// the cleanup timer. A zero `provide_timeout` makes every hold expired the
+/// moment it exists. To have the late provide and that hold's timer ready in
+/// the same loop turn, the session loop is parked: the first
+/// `CoinbaseOutputConstraints` builds a template, and the build waits on the
+/// mempool's template mutex, which the test holds. The proposal is already
+/// validating (held on the pool's write lock) and the provide is already sent
+/// behind the constraints, so by the time the loop resumes the verdict is
+/// ready and the provide sits in its frame channel (the pause before the pool
+/// lock is released lets both frames cross loopback and the loop take the
+/// first; a longer path only makes the round pass without the race). The loop picks between
+/// the two at random, and then, if the verdict won, between the provide and
+/// the expired hold's timer. A consume that ignores the deadline validates
+/// the provide in a quarter of the rounds, so 40 fresh sessions miss it with
+/// probability (3/4)^40. The provide is never answered `Success`; each round
+/// ends with the template, one `ProvideMissingTransactions` and one
+/// `unknown-request-id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    tc.mempool.accept_tx(&a).expect("mempool accept");
+    let (tp, first) = connect_tp_with(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        MAX_TEMPLATE_INTERVAL,
+        Duration::ZERO,
+    )
+    .await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let raw_b = serialize(&b);
+
+    let mut client = Some(first);
+    for round in 0..40 {
+        let mut c = match client.take() {
+            Some(c) => c,
+            None => connect_without_template(&tp).await,
+        };
+        let pool = WriteHold::take(&tc.mempool).await;
+        let template = TemplateMutexHold::take(&tc.mempool).await;
+        Job::declare(&tc, 1, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        until("the validation to start", || {
+            stats.validations_running() == 1
+        })
+        .await;
+        c.coinbase_output_constraints(0, 0).await.unwrap();
+        provide(&mut c, 1, std::slice::from_ref(&raw_b)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pool.release();
+        until("the validation to finish", || {
+            stats.validations_running() == 0
+        })
+        .await;
+        template.release();
+
+        let mut f = recv_in_time(&mut c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE, "round {round}");
+        let f2 = recv_in_time(&mut c).await;
+        assert_eq!(f2.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH, "round {round}");
+        let (mut asked, mut refused) = (0, 0);
+        for _ in 0..2 {
+            f = recv_in_time(&mut c).await;
+            match f.msg_type {
+                MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS => asked += 1,
+                MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
+                    let e: ProposeTemplateError =
+                        binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                    assert_eq!(
+                        (e.request_id, e.error_code.as_utf8_or_hex().as_str()),
+                        (1, "unknown-request-id"),
+                        "round {round}"
+                    );
+                    refused += 1;
+                }
+                t => panic!("round {round}: a provide past its hold's deadline got {t:#x}"),
+            }
+        }
+        assert_eq!((asked, refused), (1, 1), "round {round}");
+    }
+
+    tp.shutdown().await;
+}
+
 /// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
 /// order before any mempool lookup or transaction decode: a repeated wtxid
 /// is refused on arrival, even while the tip is stale (IBD) and every other
@@ -2231,6 +2322,33 @@ impl WriteHold {
         });
         locked_rx.await.unwrap();
         WriteHold { release, thread }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+/// The mempool's template mutex held by a test thread until released: a
+/// template build waits on it, a proposal validation does not.
+struct TemplateMutexHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl TemplateMutexHold {
+    async fn take(pool: &Arc<rbitcoin_net::MempoolHub>) -> Self {
+        let pool = Arc::clone(pool);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _guard = pool.template_hold();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.await.unwrap();
+        TemplateMutexHold { release, thread }
     }
 
     fn release(self) {
