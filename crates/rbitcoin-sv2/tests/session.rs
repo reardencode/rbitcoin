@@ -1,5 +1,5 @@
 use rbitcoin_sv2::session::{constraints_rebuild_at, Templates, MAX_RETIRED_TIPS};
-use rbitcoin_sv2::template::Job;
+use rbitcoin_sv2::template::{Bits, Job};
 use rbitcoin_sv2::CONSTRAINTS_COOLDOWN;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -47,8 +47,7 @@ fn job(prev: [u8; 32]) -> Job {
         merkle_path: Vec::new(),
         prev_hash: prev,
         header_timestamp: 0,
-        n_bits: 0,
-        target: [0; 32],
+        bits: Bits::Sent(0),
         txs: Vec::new(),
     }
 }

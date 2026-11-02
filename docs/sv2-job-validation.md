@@ -297,7 +297,20 @@ from the solution.
 The server MUST treat such a `SubmitSolution` as it treats one for its own
 templates: assemble the block from the retained job and the submitted
 coinbase, validate it fully, including proof of work and merkle root, and
-attempt to propagate it. `SubmitSolution.ntime` MUST satisfy the `ntime_start`
+attempt to propagate it. The one difference is `nBits`. The JDC hashed the
+`nBits` of the `SetNewPrevHash` its own template provider sent, which may be
+another TP, or this TP's before a min-difficulty gap, and a connection that
+only validates never received one. `nBits` is inside the hash, so the server
+MUST NOT build the header with the `nBits` it validated the job with. For a
+validated job it uses the `nBits` consensus requires of a child of the job's
+parent (the tip it validated on, the `prev_hash` of `Success`) stamped
+`SubmitSolution.ntime`, read along that parent's own ancestry, and checks
+proof of work against that exact header before it propagates it. For every
+consensus-valid header on that parent and time the required `nBits` is
+unique, so a valid block is reconstructed exactly as the miner hashed it;
+a nonce that met only some other target misses and is dropped. A solution
+for a template the server pushed keeps the `nBits` it sent with
+`SetNewPrevHash` for that `prev_hash`. `SubmitSolution.ntime` MUST satisfy the `ntime_start`
 rule of Section 7.8 relative to the latest `SetNewPrevHash` the server sent on
 this connection.
 

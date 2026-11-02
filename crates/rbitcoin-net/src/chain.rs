@@ -2157,6 +2157,22 @@ impl ChainHub {
         ))
     }
 
+    /// The `nBits` consensus requires of a child of `parent` stamped `time`,
+    /// read along `parent`'s own ancestry: a parent off the best chain gets
+    /// its branch's answer, not the active chain's at that height. `None`:
+    /// the parent, or an ancestor the rule reads, is unknown.
+    pub fn expected_child_bits(&self, parent: &BlockHash, time: u32) -> Option<CompactTarget> {
+        let parent_header = self.header_of(parent)?;
+        let parent_height = self.stored_header_height(parent)?;
+        let child = Header {
+            prev_blockhash: *parent,
+            time,
+            ..parent_header
+        };
+        self.expected_bits_off_tip(&child, &parent_header, parent_height, &HashMap::new())
+            .ok()
+    }
+
     fn expected_bits_off_tip_base(
         &self,
         header: &Header,

@@ -2182,6 +2182,230 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     tp.shutdown().await;
 }
 
+const OVERLAY_BITS: u32 = 0x200f_ffff;
+
+fn overlay_params() -> ChainParams {
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(OVERLAY_BITS).unwrap();
+    params
+}
+
+/// A validated empty custom job: the retained id and the coinbase a JDS
+/// finishes it with (extranonce in place), over which a JDC grinds headers.
+struct Declared {
+    template_id: u64,
+    version: u32,
+    coinbase: Transaction,
+}
+
+impl Declared {
+    async fn validate(tc: &TestChain, c: &mut TpClient, request_id: u32, template_id: u64) -> Self {
+        let height = tc.chain.query.tip_height().unwrap().0 + 1;
+        let mut coinbase =
+            job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+        let job = Job::declare(tc, request_id, &coinbase, &[]);
+        job.send(c).await;
+        expect_job_success(c, tc, request_id, template_id, 0).await;
+        let mut script_sig = bip34_height_script(height);
+        script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
+        coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        Declared {
+            template_id,
+            version: job.version,
+            coinbase,
+        }
+    }
+
+    fn header(&self, prev: bitcoin::BlockHash, time: u32, bits: u32) -> bitcoin::block::Header {
+        bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(self.version as i32),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root_from_txids(&[self
+                .coinbase
+                .compute_txid()
+                .to_byte_array()])),
+            time,
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        }
+    }
+
+    async fn submit(&self, c: &mut TpClient, header: &bitcoin::block::Header) {
+        c.submit_solution(
+            self.template_id,
+            self.version,
+            header.time,
+            header.nonce,
+            &serialize(&self.coinbase),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+fn ground(mut header: bitcoin::block::Header) -> bitcoin::block::Header {
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    header
+}
+
+/// The session answers a `RequestTransactionData` after the solution, so the
+/// solution was handled (and dropped) before the reply.
+async fn expect_solution_handled(c: &mut TpClient, template_id: u64) {
+    c.request_transaction_data(template_id).await.unwrap();
+    let f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+}
+
+/// A JDC hashed the bits its own TP sent before the min-difficulty gap. The
+/// JDS validated the job after the gap, so its own header would carry the
+/// pow-limit bits. The solution is reconstructed with the bits consensus
+/// requires for its time and becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_before_the_gap_uses_the_bits_its_time_needs() {
+    let tc = padded_chain_with("sv2-custom-before-gap", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    assert_eq!(sent.bits.to_consensus(), OVERLAY_BITS);
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    tc.chain
+        .clock
+        .set_mock(i64::from(tc.tip_time + 2 * spacing + 1));
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let header = ground(job.header(sent.prev_blockhash, sent.time, OVERLAY_BITS));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// A JDC stamped its solution past the gap and hashed the pow-limit bits the
+/// consensus rule gives that time. The JDS validated the job before the gap.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_past_the_gap_uses_the_bits_its_time_needs() {
+    let tc = padded_chain_with("sv2-custom-past-gap", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let header = ground(job.header(sent.prev_blockhash, sent.time + 2 * spacing + 1, limit));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// The nonce meets only the easier pow-limit target; the time before the gap
+/// requires the overlay bits. The header is rebuilt with those bits, misses
+/// its target, and never reaches `accept_block`, nor does the header the
+/// retained bits would have given.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_that_misses_the_consensus_target_is_dropped() {
+    let tc = padded_chain_with("sv2-custom-misses", 0, overlay_params());
+    tc.chain.set_prefill_compact(true);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    tc.chain
+        .clock
+        .set_mock(i64::from(tc.tip_time + 2 * spacing + 1));
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let easy = job.header(sent.prev_blockhash, sent.time, limit);
+    let mut hard = job.header(sent.prev_blockhash, sent.time, OVERLAY_BITS);
+    let mut nonce = 0;
+    loop {
+        let (e, h) = (
+            bitcoin::block::Header { nonce, ..easy },
+            bitcoin::block::Header { nonce, ..hard },
+        );
+        if e.validate_pow(e.target()).is_ok() && h.validate_pow(h.target()).is_err() {
+            hard = h;
+            break;
+        }
+        nonce += 1;
+    }
+    let easy = bitcoin::block::Header { nonce, ..easy };
+    job.submit(&mut c, &easy).await;
+    expect_solution_handled(&mut c, job.template_id).await;
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        sent.prev_blockhash
+    );
+    for h in [easy, hard] {
+        assert_eq!(tc.chain.cmpct_prefill_indexes(&h.block_hash()), None);
+    }
+    tc.chain.set_prefill_compact(false);
+    tp.shutdown().await;
+}
+
+/// The job's parent stops being the tip when a block lands on it, but its
+/// grace has not run out. The solution is a heavier sibling of that block:
+/// the bits are the ones the parent's child needs at the solution's time.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_on_a_parent_that_is_no_longer_the_tip_becomes_the_tip() {
+    let tc = padded_chain_with("sv2-custom-old-parent", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let weaker = mine_empty_regtest(sent.prev_blockhash, sent.time + 2 * spacing + 100, height);
+    assert_eq!(
+        tc.chain.accept_block(weaker.clone()).unwrap(),
+        rbitcoin_net::AcceptOutcome::Accepted { height }
+    );
+    expect_template(&mut c, &tc, &[], true).await;
+
+    let header = ground(job.header(sent.prev_blockhash, sent.time + 100, OVERLAY_BITS));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    assert_ne!(header.block_hash(), weaker.block_hash());
+
+    tp.shutdown().await;
+}
+
 /// A stalled mempool lookup must not stop the same socket serving retained data.
 #[test]
 fn propose_template_validation_does_not_delay_other_frames() {

@@ -1055,6 +1055,45 @@ Three review findings on the hold and the retained ring, one rule each.
   event. Red was the compile failure against the one-argument
   `start_grace` and the five tests failing on the old marking.
 
+### D16 — A custom job's solution is rebuilt with the bits its time needs
+
+- **Contract:** a retained job carries how its `SubmitSolution` header gets
+  `nBits` (`template::Bits`): a pushed template `Sent(n_bits)`, the ones its
+  `SetNewPrevHash` announced for that prev hash (unchanged: the pin and the
+  `submit_timestamp_needs_other_bits` drop stay); a validated job
+  `Consensus`. A JDC hashes the bits its own TP sent, possibly another TP or
+  this one before a min-difficulty gap, and a connection that only
+  validates never got a `SetNewPrevHash`, so the validation-time header's
+  bits are not what was hashed. For `Consensus` the session asks
+  `ChainHub::expected_child_bits(parent, header_timestamp)` in the blocking
+  region, builds the header with the answer, and checks proof of work against
+  that header before `accept_block`. The owner is `expected_bits_off_tip`,
+  which walks the parent's own headers; `rbitcoin_query::expected_next_bits`
+  reads active-chain heights and is not used for a parent that is no longer
+  the tip. An unknown parent header drops the solution like any bad one.
+  `Template` now owns the announced `n_bits` and `target`; `Job` keeps
+  only `Bits`, so a custom job holds no bits it never uses.
+- **Red:** three journeys on the regtest pow-overlay fixture of
+  `template_target_follows_the_regtest_pow_overlay`.
+  `custom_job_solution_before_the_gap_uses_the_bits_its_time_needs`: the
+  node clock moves past prev + 2 × spacing, the job is validated (its header
+  carries the pow-limit bits), and the solution is stamped before the gap and
+  hashed with the overlay bits the JDC was sent; red was `timestamp needs
+  different bits; dropping`. `custom_job_solution_past_the_gap_uses_the_bits_its_time_needs`:
+  validated before the gap, stamped past it, hashed at the pow limit; red was
+  `misses the template target`. Both become the tip.
+  `custom_job_solution_that_misses_the_consensus_target_is_dropped` is a
+  guard that passed before (the old path dropped it as well): a nonce that
+  meets only the easier target never reaches `accept_block`, under neither
+  the retained nor the consensus header.
+  `custom_job_solution_on_a_parent_that_is_no_longer_the_tip_becomes_the_tip`
+  is a guard too: a block lands on the job's parent, and a heavier sibling
+  of it from the job becomes the tip. A parent that a reorg took off the best
+  chain cannot be reached end to end: `accept_block` finds a parent only on
+  the best chain (`UnknownParent`), so no journey can show the branch-aware
+  bits for it.
+- **Verify:** `cargo test -p rbitcoin-sv2 --test suite custom_job_solution`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -1090,10 +1129,10 @@ the mempool write lock held. No `rbitcoin-test` node journey yet
   same-tip pushes and validations the oldest goes; a
   `SubmitSolution` for it is dropped and JDC's own propagation (JDP 6.4.9)
   covers the block.
-- A job is retained with the nBits its validation header used. On
-  min-difficulty networks that can differ from the sent
-  `SetNewPrevHash.n_bits` (the Plan B risk); mainnet and signet bits
-  depend only on the prev hash.
+- A validated job's solution is hashed by a JDC with the nBits its own TP
+  sent, which this session may never have sent (D16). The header is rebuilt
+  with the consensus nBits of a child of the job's parent at the submitted
+  time; a parent whose header the node does not have drops the solution.
 - `ProvideMissingTransactions.Success` matching hashes the bytes as sent:
   a legacy tx relayed in segwit-marker form hashes differently from its
   wtxid and is `bad-missing-tx`. The draft requires the bytes exactly as

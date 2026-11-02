@@ -27,3 +27,12 @@ Added
   transactions) at once; one past either is answered
   `job-validation-unavailable` and the connection keeps serving, as it
   does for a proposal whose validation cannot read the chain tip.
+- **SV2 TP: a validated job's solution is rebuilt with the `nBits` its
+  timestamp needs.** A JDC hashes the `nBits` its own template provider
+  sent, which can differ from the ones this node validated the job with on a
+  min-difficulty network, and a validating connection never receives a
+  `SetNewPrevHash`. `SubmitSolution` for a validated job now takes the
+  `nBits` consensus requires of a child of the job's parent at the
+  submitted time, and checks proof of work against that exact header before
+  the block is submitted. A solution for a pushed template keeps the `nBits`
+  its `SetNewPrevHash` announced.

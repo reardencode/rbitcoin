@@ -36,6 +36,10 @@ pub struct Template {
     pub value_remaining: u64,
     /// The witness commitment output, serialized with no count prefix.
     pub coinbase_outputs: Vec<u8>,
+    /// `SetNewPrevHash.n_bits` and `target` (`n_bits` expanded,
+    /// little-endian, no weak-block target) for this template's prev hash.
+    pub n_bits: u32,
+    pub target: [u8; 32],
     pub job: Job,
 }
 
@@ -48,12 +52,25 @@ pub struct Job {
     pub merkle_path: Vec<[u8; 32]>,
     pub prev_hash: [u8; 32],
     pub header_timestamp: u32,
-    pub n_bits: u32,
-    /// `n_bits` expanded, little-endian (no weak-block target).
-    pub target: [u8; 32],
+    pub bits: Bits,
     /// Non-coinbase txs in block order: the mempool's own bodies, kept alive
     /// past eviction.
     pub txs: Vec<Arc<Transaction>>,
+}
+
+/// Where a `SubmitSolution` gets the `nBits` of the header it assembles. The
+/// bits are inside the hash, so a header built with other bits than the
+/// miner hashed misses its target or is a different block.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bits {
+    /// A pushed template: the bits `SetNewPrevHash` sent for its prev hash,
+    /// which the client hashed.
+    Sent(u32),
+    /// A validated custom job: the JDC hashed what its own TP sent, which
+    /// this session never saw. Consensus fixes the bits of a child of the
+    /// job's parent at the solution's time, so that is what is hashed.
+    Consensus,
 }
 
 impl Template {
@@ -84,8 +101,8 @@ impl Template {
             template_id,
             prev_hash: U256::from(&self.job.prev_hash),
             header_timestamp: self.job.header_timestamp,
-            n_bits: self.job.n_bits,
-            target: U256::from(&self.job.target),
+            n_bits: self.n_bits,
+            target: U256::from(&self.target),
         }
     }
 }
@@ -102,13 +119,12 @@ pub(crate) struct NextHeader {
 }
 
 impl NextHeader {
-    pub fn job(&self, merkle_path: Vec<[u8; 32]>, txs: Vec<Arc<Transaction>>) -> Job {
+    pub fn job(&self, merkle_path: Vec<[u8; 32]>, txs: Vec<Arc<Transaction>>, bits: Bits) -> Job {
         Job {
             merkle_path,
             prev_hash: self.prev_hash,
             header_timestamp: self.time,
-            n_bits: self.bits.to_consensus(),
-            target: Target::from_compact(self.bits).to_le_bytes(),
+            bits,
             txs,
         }
     }
@@ -228,14 +244,18 @@ pub(crate) fn build_next(
     };
     let mut leaves = vec![[0u8; 32]];
     leaves.extend(selected.iter().map(|(_, s)| s.txid.to_byte_array()));
+    let n_bits = next.bits.to_consensus();
     Ok(Some(Template {
         version: chain.gbt_block_version(testdummy) as u32,
         coinbase_prefix: bip34_height_script(height),
         value_remaining: (block_subsidy(height, &chain.params) as u64).saturating_add(fees),
         coinbase_outputs: serialize(&commitment),
+        n_bits,
+        target: Target::from_compact(next.bits).to_le_bytes(),
         job: next.job(
             rbitcoin_store::merkle_branch(&leaves, 0),
             selected.into_iter().map(|(tx, _)| tx).collect(),
+            Bits::Sent(n_bits),
         ),
     }))
 }
@@ -278,7 +298,7 @@ impl Default for TemplateFlight {
 fn template_matches(key: &TemplateKey, t: &Template) -> bool {
     t.job.prev_hash == key.prev_hash
         && t.job.header_timestamp == key.header_timestamp
-        && t.job.n_bits == key.n_bits
+        && t.n_bits == key.n_bits
 }
 
 impl TemplateFlight {

@@ -3,7 +3,7 @@
 //! job as a block proposal on the tip, and shape it for retention.
 
 use crate::messages::ProposeTemplate;
-use crate::template::{self, Job};
+use crate::template::{self, Bits, Job};
 use binary_sv2::{Seq064K, B016M};
 use bitcoin::consensus::encode::{deserialize_partial, VarInt};
 use bitcoin::hashes::{sha256d, Hash};
@@ -200,7 +200,11 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
     };
     Verdict::Valid {
         fees,
-        job: next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),
+        job: next.job(
+            rbitcoin_store::merkle_branch(&leaves, 0),
+            txs,
+            Bits::Consensus,
+        ),
     }
 }
 

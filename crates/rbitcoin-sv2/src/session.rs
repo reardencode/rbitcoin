@@ -8,7 +8,7 @@ use crate::messages::{
     MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
     REQUIRES_JOB_VALIDATION,
 };
-use crate::template;
+use crate::template::{self, Bits};
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use crate::Sv2TpStats;
 use binary_sv2::{Seq064K, Str0255, B016M, B064K, U256};
@@ -754,8 +754,9 @@ impl Session {
         // build's bits follow the clock; a solution on this template is hashed
         // with the bits the client was sent.
         if let Some((n_bits, target)) = self.templates.sent_bits.filter(|_| !new_prev) {
-            t.job.n_bits = n_bits;
-            t.job.target = target;
+            t.n_bits = n_bits;
+            t.target = target;
+            t.job.bits = Bits::Sent(n_bits);
         }
         let msg = t
             .to_message(template_id, new_prev)
@@ -772,7 +773,7 @@ impl Session {
                 .await?;
             let now = Instant::now();
             self.templates.prev_sent = Some((t.job.header_timestamp, now));
-            self.templates.sent_bits = Some((t.job.n_bits, t.job.target));
+            self.templates.sent_bits = Some((t.n_bits, t.target));
             self.templates
                 .start_grace(t.job.prev_hash, now + self.stale_grace);
         }
@@ -785,9 +786,11 @@ impl Session {
     }
 
     /// A bad solution is logged and dropped. A decodable one on a retained
-    /// template that meets its target goes to `ChainHub::accept_block`,
-    /// unless that timestamp needs different `nBits` than the template
-    /// pinned for this prev hash. Those bits are inside the hash.
+    /// template that meets its target goes to `ChainHub::accept_block`.
+    /// The header's `nBits` are inside the hash ([`Bits`]): a pushed
+    /// template uses the ones pinned for its prev hash and drops a timestamp
+    /// that needs others; a custom job uses the ones consensus requires of
+    /// its parent's child at that timestamp.
     pub async fn on_submit_solution(&mut self, mut frame: Frame) -> io::Result<()> {
         let Ok(m) = binary_sv2::from_bytes::<SubmitSolution>(&mut frame.payload) else {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution");
@@ -823,12 +826,34 @@ impl Session {
             &r.job.merkle_path,
             0,
         );
+        let prev = BlockHash::from_byte_array(r.job.prev_hash);
+        let stamp = m.header_timestamp;
+        let bits = match r.job.bits {
+            Bits::Sent(n_bits) => CompactTarget::from_consensus(n_bits),
+            Bits::Consensus => {
+                let bits_chain = Arc::clone(&self.chain);
+                let expected = tokio::task::spawn_blocking(move || {
+                    let _g = BlockingRegion::enter();
+                    bits_chain.expected_child_bits(&prev, stamp)
+                })
+                .await
+                .map_err(io::Error::other)?;
+                let Some(bits) = expected else {
+                    rbitcoin_log::info!(
+                        "sv2: SubmitSolution template {}: parent {prev} unknown; dropping",
+                        m.template_id
+                    );
+                    return Ok(());
+                };
+                bits
+            }
+        };
         let header = block::Header {
             version: block::Version::from_consensus(m.version as i32),
-            prev_blockhash: BlockHash::from_byte_array(r.job.prev_hash),
+            prev_blockhash: prev,
             merkle_root: TxMerkleNode::from_byte_array(root),
-            time: m.header_timestamp,
-            bits: CompactTarget::from_consensus(r.job.n_bits),
+            time: stamp,
+            bits,
             nonce: m.header_nonce,
         };
         if header.validate_pow(header.target()).is_err() {
@@ -838,25 +863,25 @@ impl Session {
             );
             return Ok(());
         }
-        // nBits was pinned when this prev hash was sent. A timestamp past the
-        // min-difficulty gap needs the pow-limit bits instead, and rewriting
-        // them would change the hash the miner found.
-        let bits_chain = Arc::clone(&self.chain);
-        let prev = header.prev_blockhash;
-        let stamp = header.time;
-        let pinned = header.bits;
-        let other_bits = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            submit_timestamp_needs_other_bits(&bits_chain, prev, stamp, pinned)
-        })
-        .await
-        .map_err(io::Error::other)?;
-        if other_bits {
-            rbitcoin_log::info!(
-                "sv2: SubmitSolution {} timestamp needs different bits; dropping",
-                header.block_hash()
-            );
-            return Ok(());
+        // A pushed template pinned its nBits when this prev hash was sent. A
+        // timestamp past the min-difficulty gap needs the pow-limit bits
+        // instead, and rewriting them would change the hash the miner found.
+        if let Bits::Sent(_) = r.job.bits {
+            let bits_chain = Arc::clone(&self.chain);
+            let pinned = header.bits;
+            let other_bits = tokio::task::spawn_blocking(move || {
+                let _g = BlockingRegion::enter();
+                submit_timestamp_needs_other_bits(&bits_chain, prev, stamp, pinned)
+            })
+            .await
+            .map_err(io::Error::other)?;
+            if other_bits {
+                rbitcoin_log::info!(
+                    "sv2: SubmitSolution {} timestamp needs different bits; dropping",
+                    header.block_hash()
+                );
+                return Ok(());
+            }
         }
         // Diagnostic only: a miner clock ahead of ours rolls past the wall
         // time since SetNewPrevHash. accept_block enforces the consensus
