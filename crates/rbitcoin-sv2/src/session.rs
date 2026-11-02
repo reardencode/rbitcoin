@@ -52,7 +52,7 @@ pub const TDP_VERSION: u16 = 2;
 /// templates, so `RequestTransactionData` and `SubmitSolution` do not depend
 /// on the mempool still holding their txs. Fee pushes add one per interval
 /// on the same tip and a miner may still be on any of them, so the bound is
-/// a count, oldest (replaced tips first) dropped. Bodies are the mempool's
+/// a count, oldest dropped. Bodies are the mempool's
 /// `Arc`s: a template costs a pointer per tx until its txs leave the pool.
 /// Supplied custom-job bodies are private to that job.
 #[doc(hidden)]

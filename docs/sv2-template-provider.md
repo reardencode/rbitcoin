@@ -667,8 +667,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `prev_hash`): `template_id` is the next id in the session's counter. The
   job is retained exactly like a template, so
   `RequestTransactionData` returns the declared txs in block order and
-  `SubmitSolution` finds it. Without the flag the message is ignored (the
-  D3 journey already pins that).
+  `SubmitSolution` finds it. Without the flag the message is ignored
+  (`unflagged_session_reads_frames_up_to_the_pre_feature_cap`, D18, pins
+  that the session stays open for one under the old cap).
 - **Red:** `propose_template_prices_and_retains_the_declared_job` —
   two legacy spends with known fees in the mempool, a JDS-shaped coinbase
   (BIP34 push + 8 placeholder bytes, payout = subsidy + fees, witness
@@ -717,20 +718,26 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 
 ### D5b — Untrusted-input rejections
 
-- **Contract:** `Error.error_code` in this order, before any mempool
-  lookup or transaction decode: `duplicate-wtxid` and `bad-missing-tx` (a
-  supplied tx whose hash is not in `wtxid_list`) on arrival, with no chain
-  read (D11 moved them ahead of the gate); then, on the blocking thread,
-  `job-validation-unavailable` while `in_ibd()` (the template gate),
-  `stale-prevhash` (dropped in D9), `bad-missing-tx` for a declared blob
-  that does not decode, `bad-cb-decode` (this TP's code; the draft has none
-  for an undecodable coinbase), then the proposal check's reject string
-  (`bad-cb-amount` for an overpaying coinbase). Nothing is retained and no
-  id is taken on an error.
+- **Contract:** `Error.error_code`, in the order the code runs (D5b first
+  put the supplied-transaction checks ahead of resolution; D11, D12, D13
+  and D14 moved them). On arrival, with no chain read and no mempool
+  lookup: `duplicate-request-id`, `job-validation-unavailable` past the D13
+  bound, and `duplicate-wtxid`. Then, on the blocking thread:
+  `job-validation-unavailable` while `in_ibd()` (the template gate) or when
+  the tip cannot be read (D15), `bad-cb-decode` (this TP's code; the draft
+  has none for an undecodable coinbase), while resolving `bad-blk-weight`
+  past the block limit and `bad-missing-tx` for a supplied blob that does not
+  decode, then the proposal check's reject string (`bad-cb-amount` for an
+  overpaying coinbase). `stale-prevhash` was dropped in D9. Only
+  `duplicate-wtxid` and the admission refusals are decided before a node
+  read; the IBD gate, the tip read and `bad-cb-decode` are not. Nothing is
+  retained and no id is held on an error. A provide's `bad-missing-tx` for a
+  short or unasked-for transaction is D12.
 - **Red:** `propose_template_rejects_untrusted_input_in_order` — seven
   sends on one session, then `RequestTransactionData(last + 1)` answers
   `template-id-not-found`. Red was `Success` for the first send.
-- **Green:** the checks in `job::check`, ahead of resolution.
+- **Green:** the arrival checks in `on_frame` (`Proposal::precheck`) and the
+  rest in `job::validate`.
 - **Verify:** same filter.
 
 ### D6 — SubmitSolution against a validated job
@@ -748,8 +755,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 
 ### D7 — Docs and tidy
 
-- `messages` is crate-private (no other crate reads it yet; the
-  `rbitcoin-test` journey that will needs the re-export then). The draft
+- `messages` is `pub` and `#[doc(hidden)]` (the socket journeys and the
+  listener tests build the wire messages from it). The draft
   is copied unchanged as [`sv2-job-validation.md`](./sv2-job-validation.md)
   and owns the wire contract until it lands upstream. Operator lines in
   `docs/operator/interfaces.md`, the COMPAT row, and a `changelog.d`
@@ -859,17 +866,16 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   Red was `Success` as the first frame, the solution 527 ms behind a
   696 ms validation.
 - **Green:** `on_frame` decodes the proposal and runs `job::precheck`
-  (`duplicate-wtxid`, `bad-missing-tx`; no chain read) on arrival, replying
+  (`duplicate-wtxid`; no chain read) on arrival, replying
   at once on failure; otherwise the payload joins a FIFO and
   `start_validations` fills a `JoinSet` of `spawn_blocking` +
   `BlockingRegion` tasks up to the bound. A new `select!` arm takes each
   finished verdict and calls the one `reply_propose` path (retain on
   `Valid`, then the reply). `job::validate` stays complete on its own
   (the precheck runs again inside it).
-- **CPU and RAM trade:** four full proposal checks at once per session,
-  each on a blocking thread with up to a block of decoded txs; waiting
-  proposals hold their payloads (≤ `MAX_PROPOSE_TEMPLATE_PAYLOAD` each),
-  bounded by D13.
+- **CPU and RAM trade:** full proposal checks on blocking threads, each with
+  up to a block of decoded txs, bounded node-wide by D14; waiting proposals
+  hold their wtxids and coinbase split, bounded by D13.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 10 times in
   a loop.
 - **Superseded in part:** D11 first ran four validations per session

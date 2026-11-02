@@ -33,6 +33,8 @@ pub use transport::Frame;
 /// a template holds them: at most 64 × ~4 MB per session if every template's
 /// txs were replaced, ~2 GB across the cap. Supplied custom-job bodies are
 /// private and can reach the same bound without paying replacement fees.
+/// Client frame buffers (transport.rs) and admitted proposal work
+/// (session.rs) are on top of that.
 pub const MAX_SESSIONS: usize = 8;
 
 /// Default [`Sv2TpConfig::setup_timeout`]. A session holds a slot from TCP
@@ -101,7 +103,9 @@ pub struct Sv2TpConfig {
     /// `SetupConnection.Success` for a session that set
     /// `REQUIRES_JOB_VALIDATION`), a session that handles no
     /// frame for this long is dropped. It moves only when a frame arrives;
-    /// tip and fee pushes do not refresh it. `None`: no idle deadline.
+    /// tip and fee pushes do not refresh it. `None`: no idle deadline. A
+    /// value under [`PROVIDE_TIMEOUT`] also closes a session that is quietly
+    /// waiting for its client to answer a `ProvideMissingTransactions`.
     pub idle_timeout: Option<Duration>,
     /// A socket write that makes no progress this long closes the session,
     /// so a client that stops reading cannot hold a slot.

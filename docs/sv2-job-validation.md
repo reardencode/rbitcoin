@@ -268,7 +268,9 @@ rules as its own templates: it is retired after the stale grace that follows
 the tip moving off the job's own parent, so a job validated on the new tip
 before the server announces it stays current, and one that finishes after the
 server has moved off its parent retires with the templates that were on that
-parent, not after a new grace. It MAY be evicted oldest-first by a per-connection cap on
+parent, not after a new grace. A connection that was sent no
+`SetNewPrevHash` (it only validates) starts that grace when the server's tip
+changes, since no announcement exists to start it from. It MAY be evicted oldest-first by a per-connection cap on
 retained templates and jobs, which SHOULD be at least 64. A JDS multiplexes
 many JDCs over one connection, so no single job is "the latest"; a
 `SubmitSolution` for an id the server no longer retains is dropped (Section
@@ -397,20 +399,27 @@ The names repeat the Job Declaration Protocol's on purpose, as
   SHOULD run a dedicated TP for job validation. A client SHOULD apply a
   timeout before falling back. A server SHOULD NOT let a validation delay
   the other messages on the connection, `SubmitSolution` above all
-  (rbitcoin validates off the session loop, four at a time per connection,
-  the rest queued in arrival order).
+  (rbitcoin validates off the session loop; across all connections at most
+  a quarter of its blocking-thread pool, at least one, validates at once, and a
+  started validation runs to the end holding its share even if its connection
+  closes).
 - **At the in-flight bound: queue or refuse (open).** A server that runs a
   bounded number of validations at once has two choices for the next
-  proposal: rbitcoin queues it in arrival order with no depth cap (four in
-  flight per connection), sv2-tp refuses it with
-  `job-validation-unavailable`. A JDS should cope with both, a refusal as
-  a retry after a backoff and a queue as a longer wait under its own
-  timeout, but the thread should settle which the text recommends.
+  proposal. rbitcoin queues up to 16 accepted proposals (16 MiB with their
+  supplied transactions) per connection in arrival order and refuses the next
+  with `job-validation-unavailable`; sv2-tp refuses at its in-flight bound
+  with the same code. A JDS should cope with both, a refusal as a retry after
+  a backoff and a queue as a longer wait under its own timeout, but the
+  thread should settle which the text recommends.
 - **Untrusted input.** Everything in `ProposeTemplate` originates from a
   JDC. The server MUST enforce the `duplicate-wtxid` and `bad-missing-tx`
   checks and the block weight limit before decoding or storing transactions,
   so that a 32-byte `wtxid` cannot be amplified into a large allocation
-  (`sv2-apps#796`, `#795`).
+  (`sv2-apps#796`, `#795`). rbitcoin refuses a repeated wtxid as the request
+  arrives, before any chain read; the weight budget is charged while the
+  list is resolved, so an overweight job is refused before the rest of it is
+  fetched or decoded; the other checks of Section 4.1 (the initial-block-download
+  gate, the tip read, `bad-cb-decode`) run in the validation after that.
 - **Why `fees` is in `Success`.** The fee total (sum of inputs minus sum of
   outputs per transaction) needs the UTXO set, so only the validating node
   can derive it, and it computes it anyway for `bad-cb-amount`. Without it
