@@ -1024,13 +1024,14 @@ impl Session {
                     .send(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, reply)
                     .await
             }
-            Verdict::Valid { fees, job } => {
+            Verdict::Valid {
+                fees,
+                job,
+                validated_at,
+            } => {
                 self.templates.last_id += 1;
                 let template_id = self.templates.last_id;
-                let prev_sent = self
-                    .templates
-                    .prev_sent
-                    .unwrap_or((job.header_timestamp, Instant::now()));
+                let prev_sent = (job.header_timestamp, validated_at);
                 let prev_hash = job.prev_hash;
                 self.templates.retain(template_id, job, prev_sent);
                 let reply = ProposeTemplateSuccess {

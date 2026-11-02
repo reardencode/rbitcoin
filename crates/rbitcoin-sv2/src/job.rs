@@ -11,6 +11,7 @@ use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
 use rbitcoin_net::{ChainHub, ProposalError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::time::Instant;
 
 /// `ProposeTemplate.Error.error_code` for a TP that cannot take the job now:
 /// the IBD gate, a tip read that failed, or a session at its admission bound.
@@ -21,8 +22,13 @@ pub(crate) enum Verdict {
     /// the supplied ones included: the TP holds no transactions across the
     /// round trip, so what it was given once it asks for again.
     Missing(Vec<u16>),
-    /// Consensus-valid on the tip: the fee total and the job to retain.
-    Valid { fees: u64, job: Job },
+    /// Consensus-valid on the tip: the fee total, the job to retain, and
+    /// when its header timestamp was fixed.
+    Valid {
+        fees: u64,
+        job: Job,
+        validated_at: Instant,
+    },
     /// `ProposeTemplate.Error.error_code`: a Core reject string or one of
     /// the draft's own codes.
     Rejected(String),
@@ -128,6 +134,7 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
             return rejected(UNAVAILABLE);
         }
     };
+    let validated_at = Instant::now();
     if let Err(code) = p.precheck() {
         return rejected(code);
     }
@@ -209,6 +216,7 @@ pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> V
             txs,
             Bits::Consensus,
         ),
+        validated_at,
     }
 }
 
