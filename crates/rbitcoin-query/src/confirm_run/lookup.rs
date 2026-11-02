@@ -106,23 +106,16 @@ fn coalesce_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 fn should_prefetch(total: u64) -> bool {
     total >= 1024 * 1024
 }
-pub fn prefetch_parent_body_ranges(
-    query: &crate::Query,
-    parent_pin: &ParentPinStamp,
-) -> (u64, u64) {
+pub fn prefetch_parent_body_ranges(parent_pin: &ParentPinStamp) -> (Vec<(u64, u64)>, u64, u64) {
     let ranges: Vec<_> = parent_pin.body_ranges_iter().collect();
     let total: u64 = ranges.iter().map(|(_, l)| *l).sum();
     if !should_prefetch(total) {
-        return (0, 0);
+        return (Vec::new(), 0, 0);
     }
     let merged = coalesce_ranges(ranges);
     let start = std::time::Instant::now();
-    let mut bytes = 0u64;
-    for (off, len) in &merged {
-        query.store().advise_tx_body_will_need(*off, *len);
-        bytes += *len;
-    }
-    (bytes, start.elapsed().as_nanos() as u64)
+    let bytes: u64 = merged.iter().map(|(_, l)| *l).sum();
+    (merged, bytes, start.elapsed().as_nanos() as u64)
 }
 pub type WireBlockIn = (Height, Arc<Block>, Option<Arc<[crate::TxPrecompute]>>);
 #[doc(hidden)]
@@ -145,6 +138,7 @@ pub struct PlanStampOutcome {
     pub work_ns: u64,
     pub metas: Vec<BodyMeta>,
     pub wire_blocks: Vec<Arc<Block>>,
+    pub prefetch_ranges: Vec<(u64, u64)>,
     pub archived_pairs: Vec<([u8; 32], rbitcoin_primitives::Fk)>,
     /// Warn-and-apply faults from this lookup. Load carries them. Not logged yet.
     pub trust_warns: Vec<(u32, rbitcoin_consensus::ConsensusError)>,
@@ -241,7 +235,7 @@ fn lookup_stamp_work(
             (pin, pairs)
         }
     };
-    let (pref_bytes, pref_ns) = prefetch_parent_body_ranges(query, &parent_pin);
+    let (pref_ranges, pref_bytes, pref_ns) = prefetch_parent_body_ranges(&parent_pin);
     if pref_bytes > 0 {
         crate::note_confirm(&query.confirm_stats().prefetch_bytes, pref_bytes);
         crate::note_confirm(&query.confirm_stats().prefetch_ns, pref_ns);
@@ -256,6 +250,7 @@ fn lookup_stamp_work(
         work_ns,
         metas,
         wire_blocks,
+        prefetch_ranges: pref_ranges,
         archived_pairs,
         trust_warns: Vec::new(),
     })
