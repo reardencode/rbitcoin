@@ -423,9 +423,18 @@ impl DecodeQueue {
     /// Queue one frame already taken off the socket. `heavy` matches the
     /// spawn decision (`block`, `headers`, `notfound`). `true` when the peer
     /// has now passed a cap and must be disconnected after a drain.
-    fn push(&mut self, rx: DecodeRx, n: usize, heavy: bool) -> bool {
+    fn push(
+        &mut self,
+        rx: DecodeRx,
+        n: usize,
+        heavy: bool,
+        session: Option<&crate::peers::LivePeer>,
+    ) -> bool {
         self.q.push_back(QueuedDecode { rx, n, heavy });
         self.account(n, heavy);
+        if let Some(session) = session {
+            session.note_decode_enqueued();
+        }
         decode_queue_over_cap(
             self.heavy_frames,
             self.heavy_bytes,
@@ -474,41 +483,41 @@ mod decode_queue_cap {
         let mut heavy = DecodeQueue::new();
         for i in 0..(MAX_SERVE_BLOCKS + 1) {
             assert!(
-                !heavy.push(parked(), one, true),
+                !heavy.push(parked(), one, true, None),
                 "heavy message {i} of a serve window overflowed the decode queue"
             );
         }
         assert!(
-            heavy.push(parked(), 1, true),
+            heavy.push(parked(), 1, true, None),
             "one heavy byte past the serve window must disconnect"
         );
 
         let mut cheap = DecodeQueue::new();
         for _ in 0..DECODE_Q_MAX_FRAMES {
             assert!(
-                !cheap.push(parked(), 1, false),
+                !cheap.push(parked(), 1, false, None),
                 "a cheap frame under the heavy frame cap must stay"
             );
         }
         assert!(
-            !cheap.push(parked(), 1, false),
+            !cheap.push(parked(), 1, false, None),
             "one more cheap frame still fits"
         );
         let mut cheap_cap = DecodeQueue::new();
         for _ in 0..DECODE_Q_MAX_CHEAP_FRAMES {
-            assert!(!cheap_cap.push(parked(), 1, false));
+            assert!(!cheap_cap.push(parked(), 1, false, None));
         }
         assert!(
-            cheap_cap.push(parked(), 1, false),
+            cheap_cap.push(parked(), 1, false, None),
             "past the cheap frame cap must disconnect"
         );
 
         let mut heavy_frames = DecodeQueue::new();
         for _ in 0..DECODE_Q_MAX_FRAMES {
-            assert!(!heavy_frames.push(parked(), 1, true));
+            assert!(!heavy_frames.push(parked(), 1, true, None));
         }
         assert!(
-            heavy_frames.push(parked(), 1, true),
+            heavy_frames.push(parked(), 1, true, None),
             "past the heavy frame cap must disconnect"
         );
 
@@ -3481,7 +3490,7 @@ async fn push_decode_frame(
     heavy: bool,
     drain: DecodeDrain<'_>,
 ) -> Result<(), NetError> {
-    if !decode_q.push(rx, n, heavy) {
+    if !decode_q.push(rx, n, heavy, drain.session) {
         return Ok(());
     }
     finish_decode_queue_full(
