@@ -148,6 +148,17 @@ pub use parent_req::{DueParent, ParentNote};
 #[doc(hidden)]
 pub const FEE_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// Dirty, older than `max_age`, or computed after `now`. Shared by the fee
+/// and tx snapshot gates.
+#[doc(hidden)]
+pub fn is_stale(computed_at: Instant, now: Instant, dirty: bool, max_age: Duration) -> bool {
+    dirty
+        || now
+            .checked_duration_since(computed_at)
+            .map(|age| age >= max_age)
+            .unwrap_or(true)
+}
+
 #[doc(hidden)]
 pub fn load_unbroadcast_file(dir: &Path) -> HashSet<Txid> {
     let Ok(bytes) = std::fs::read(dir.join("unbroadcast")) else {
@@ -883,6 +894,12 @@ pub struct MempoolHub {
     pub isolated_broadcast: AtomicBool,
     /// Wakes the isolated loop when a local tx is queued for it.
     isolated_wake: tokio::sync::Notify,
+    /// One isolated-broadcast lap: skipped an unknown tx, blocked on a write,
+    /// or found no dial targets. The wait; the send or the skip is the assert.
+    isolated_skipped_unknown: AtomicU64,
+    isolated_lagged: AtomicU64,
+    isolated_no_targets: AtomicU64,
+    isolated_lap: tokio::sync::Notify,
     /// Wtxids re-admitted from a disconnected block. Core serves these
     /// even if this peer has not been INV'd yet (`mempool_reorg`).
     pub reorg_servable: Mutex<HashSet<Wtxid>>,
@@ -896,9 +913,14 @@ pub struct MempoolHub {
     pub fee_deltas: Mutex<HashMap<Txid, i64>>,
     /// Monotonic template generation (admit / remove / prioritise). GBT longpoll.
     template_updates: AtomicU64,
+    /// Same generation as [`Self::template_updates`]. Long-poll subscribes.
+    template_watch: tokio::sync::watch::Sender<u64>,
     /// Tip whose mempool strip has finished. Block templates build on this.
     /// The query tip is visible earlier, before `remove_for_block_spent`.
     template_prev: Mutex<Option<[u8; 32]>>,
+    /// Hash the active [`TemplateHold`] will publish on drop. Nested holds
+    /// write this; only the outer hold sends it.
+    template_commit: Mutex<Option<[u8; 32]>>,
     /// Odd while a [`TemplateHold`] is out, so the pool may not match the tip.
     pool_settle: AtomicU64,
     /// INV immediately instead of waiting on mocktime.
@@ -981,30 +1003,97 @@ pub struct CommitOutcome {
     pub prevouts: Vec<TxOut>,
 }
 
+std::thread_local! {
+    /// Holds taken on this thread. A nested hold does not lock again and
+    /// does not publish. The outer drop sends the committed tip, or a
+    /// generation that moved while the hold was out and nothing committed.
+    static TEMPLATE_HOLD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn template_hold_enter() {
+    TEMPLATE_HOLD_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+fn template_hold_leave() {
+    TEMPLATE_HOLD_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
 /// Lock held for the whole of a block connect. `commit` records the hash
-/// whose pool strip has finished; the drop writes it.
+/// whose pool strip has finished. The outer drop writes that hash, and
+/// publishes when the generation moved while the hold was out.
 #[doc(hidden)]
 pub struct TemplateHold<'a> {
     updates: &'a AtomicU64,
+    watch: &'a tokio::sync::watch::Sender<u64>,
     settle: &'a AtomicU64,
-    slot: std::sync::MutexGuard<'a, Option<[u8; 32]>>,
-    commit: Option<[u8; 32]>,
+    slot: Option<std::sync::MutexGuard<'a, Option<[u8; 32]>>>,
+    commit: &'a std::sync::Mutex<Option<[u8; 32]>>,
+    /// `template_updates` at enter, before `pool_settle` goes odd. A note
+    /// that races in before that increment still sends itself.
+    updates_at_enter: u64,
+    /// This thread already holds the mark. Drop does not publish.
+    nested: bool,
 }
 
 impl TemplateHold<'_> {
     pub(crate) fn commit(&mut self, hash: [u8; 32]) {
-        self.commit = Some(hash);
+        *self.commit.lock().unwrap() = Some(hash);
+    }
+
+    /// True when an outer hold on this thread owns the publish.
+    pub(crate) fn is_nested(&self) -> bool {
+        self.nested
     }
 }
 
 impl Drop for TemplateHold<'_> {
     fn drop(&mut self) {
-        if let Some(hash) = self.commit {
-            *self.slot = Some(hash);
-            self.updates.fetch_add(1, Ordering::Relaxed);
+        if !self.nested {
+            if let Some(hash) = self.commit.lock().unwrap().take() {
+                if let Some(slot) = self.slot.as_mut() {
+                    **slot = Some(hash);
+                }
+                // Before any send. A waiter blocked on this slot must read
+                // the committed tip, not the stump.
+                self.updates.fetch_add(1, Ordering::SeqCst);
+            }
+            // Settle stays odd across the first send. A concurrent note
+            // skips its own send, and this drop covers that generation.
+            let now = self.updates.load(Ordering::SeqCst);
+            if now != self.updates_at_enter {
+                self.watch.send_replace(now);
+            }
+            self.settle.fetch_add(1, Ordering::SeqCst);
+            let after = self.updates.load(Ordering::SeqCst);
+            if after != now {
+                self.watch.send_replace(after);
+            }
         }
-        self.settle.fetch_add(1, Ordering::SeqCst);
+        // After the publish, so a re-entrant hold sees this one and does not
+        // lock `template_prev` again.
+        template_hold_leave();
     }
+}
+
+/// One isolated-broadcast lap the loop can name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum IsolatedLap {
+    /// `get_tx` missed: the txid was never admitted, or it left before its turn.
+    SkippedUnknown,
+    /// The queue was past the backlog warn, or the live read blocked on a write.
+    Lagged,
+    /// AddrMan had no onion or IP target.
+    NoTargets,
+}
+
+/// [`MempoolHub::isolated_laps`] snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct IsolatedLapCounts {
+    pub skipped_unknown: u64,
+    pub lagged: u64,
+    pub no_targets: u64,
 }
 
 impl MempoolHub {
@@ -1132,6 +1221,10 @@ impl MempoolHub {
             local_origin: Mutex::new(LocalOrigin::default()),
             isolated_broadcast: AtomicBool::new(false),
             isolated_wake: tokio::sync::Notify::new(),
+            isolated_skipped_unknown: AtomicU64::new(0),
+            isolated_lagged: AtomicU64::new(0),
+            isolated_no_targets: AtomicU64::new(0),
+            isolated_lap: tokio::sync::Notify::new(),
             reorg_servable: Mutex::new(HashSet::new()),
             relay_seq: Mutex::new(HashMap::new()),
             wtxid_by_txid: Mutex::new(HashMap::new()),
@@ -1151,7 +1244,9 @@ impl MempoolHub {
             ),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
+            template_watch: tokio::sync::watch::channel(0).0,
             template_prev: Mutex::new(None),
+            template_commit: Mutex::new(None),
             pool_settle: AtomicU64::new(0),
             age_inv: Mutex::new(BTreeMap::new()),
             min_live_accept_at: AtomicU64::new(u64::MAX),
@@ -2124,6 +2219,22 @@ impl MempoolHub {
 
     pub fn get_tx(&self, txid: &Txid) -> Option<Transaction> {
         self.lock_read().get_tx(txid).cloned()
+    }
+
+    /// The isolated loop's read. A held write is one lagged lap, then this
+    /// waits. A successful `try_read` keeps that guard: dropping it and
+    /// calling [`Self::get_tx`] lets a writer arrive in the gap and block
+    /// the wait with no lap.
+    #[doc(hidden)]
+    pub fn read_tx_for_isolated(&self, txid: &Txid) -> Option<Transaction> {
+        let guard = match self.inner.try_read() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.note_isolated_lap(IsolatedLap::Lagged);
+                self.lock_read()
+            }
+        };
+        guard.get_tx(txid).cloned()
     }
 
     /// Session getdata: never parks. Busy write → `None` (notfound this round).
@@ -3134,11 +3245,7 @@ impl MempoolHub {
         refreshing: &AtomicBool,
         refresh: fn(&Self),
     ) {
-        let stale = Instant::now()
-            .checked_duration_since(computed_at)
-            .map(|d| d >= FEE_SNAPSHOT_MAX_AGE)
-            .unwrap_or(true);
-        if !dirty && !stale {
+        if !is_stale(computed_at, Instant::now(), dirty, FEE_SNAPSHOT_MAX_AGE) {
             return;
         }
         if refreshing
@@ -3987,7 +4094,21 @@ impl MempoolHub {
 
     #[doc(hidden)]
     pub fn note_template_update(&self) {
-        self.template_updates.fetch_add(1, Ordering::Relaxed);
+        // SeqCst pairs with the loads in `TemplateHold::drop`, so a note
+        // that skips its send is visible to that drop.
+        let next = self.template_updates.fetch_add(1, Ordering::SeqCst) + 1;
+        // A hold publishes once, on drop, for the tip it commits. Sending
+        // here would wake a one-shot wait on the stump, or on an
+        // intermediate block of a fork that is still connecting.
+        if self.pool_settle.load(Ordering::SeqCst) & 1 == 0 {
+            self.template_watch.send_replace(next);
+        }
+    }
+
+    /// Wakes when [`Self::note_template_update`] bumps the generation.
+    #[doc(hidden)]
+    pub fn subscribe_template(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.template_watch.subscribe()
     }
 
     /// The pool has been stripped for `hash`. Templates build on this tip.
@@ -4001,13 +4122,32 @@ impl MempoolHub {
     /// mutex, so callers must record the hash through [`TemplateHold::commit`].
     #[doc(hidden)]
     pub fn template_hold(&self) -> TemplateHold<'_> {
+        // Same thread already holds `template_prev`. Locking again deadlocks,
+        // and a second publish would wake a one-shot wait on an intermediate tip.
+        if TEMPLATE_HOLD_DEPTH.with(|depth| depth.get()) > 0 {
+            template_hold_enter();
+            return TemplateHold {
+                updates: &self.template_updates,
+                watch: &self.template_watch,
+                settle: &self.pool_settle,
+                slot: None,
+                commit: &self.template_commit,
+                updates_at_enter: 0,
+                nested: true,
+            };
+        }
         let slot = self.template_prev.lock().unwrap();
+        let updates_at_enter = self.template_updates.load(Ordering::SeqCst);
         self.pool_settle.fetch_add(1, Ordering::SeqCst);
+        template_hold_enter();
         TemplateHold {
             updates: &self.template_updates,
+            watch: &self.template_watch,
             settle: &self.pool_settle,
-            slot,
-            commit: None,
+            slot: Some(slot),
+            commit: &self.template_commit,
+            updates_at_enter,
+            nested: false,
         }
     }
 
@@ -4628,6 +4768,35 @@ impl MempoolHub {
 
     pub fn set_isolated_broadcast(&self, on: bool) {
         self.isolated_broadcast.store(on, Ordering::Relaxed);
+    }
+
+    /// One finished isolated-broadcast lap. The counter is the wait.
+    #[doc(hidden)]
+    pub fn note_isolated_lap(&self, kind: IsolatedLap) {
+        let slot = match kind {
+            IsolatedLap::SkippedUnknown => &self.isolated_skipped_unknown,
+            IsolatedLap::Lagged => &self.isolated_lagged,
+            IsolatedLap::NoTargets => &self.isolated_no_targets,
+        };
+        slot.fetch_add(1, Ordering::Release);
+        self.isolated_lap.notify_one();
+    }
+
+    /// How many isolated-broadcast laps of each kind have finished.
+    #[doc(hidden)]
+    pub fn isolated_laps(&self) -> IsolatedLapCounts {
+        IsolatedLapCounts {
+            skipped_unknown: self.isolated_skipped_unknown.load(Ordering::Acquire),
+            lagged: self.isolated_lagged.load(Ordering::Acquire),
+            no_targets: self.isolated_no_targets.load(Ordering::Acquire),
+        }
+    }
+
+    /// Wakes after [`Self::note_isolated_lap`]. A permit sticks if the waiter
+    /// has not armed yet.
+    #[doc(hidden)]
+    pub fn isolated_lap_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.isolated_lap.notified()
     }
 
     pub fn isolated_broadcast(&self) -> bool {

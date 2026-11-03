@@ -89,7 +89,7 @@ pub use peer_dos::DEFAULT_MAX_INBOUND;
 pub use peers::{
     connection_counts, outbound_time_offset, parse_peer_addr, parse_peer_addr_with_port,
     parse_peer_net, pick_stale_follow_evict, DialReady, DialRequest, DialTarget, LivePeer,
-    PeerConnType, PeerHub, PeerInfo, PeerOut,
+    OutboundPass, OutboundPassCounts, PeerConnType, PeerHub, PeerInfo, PeerOut,
 };
 pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;

@@ -123,10 +123,10 @@ pub mod uring_session;
 #[doc(hidden)]
 pub mod var_table;
 
+pub use crate::array_table::ClassCWrite;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
-pub use crate::array_table::bind_tip_flush_hold;
-pub use crate::array_table::ClassCWrite;
+pub use crate::array_table::{bind_tip_flush_hold, TipFlushHold};
 pub use crate::chain::HeaderTxsTable;
 pub use crate::compact::output_flags;
 pub use address_head::{is_probe_exhausted_error, is_store_corrupt_display};

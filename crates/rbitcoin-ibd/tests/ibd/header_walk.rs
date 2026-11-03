@@ -120,8 +120,7 @@ fn header_timeouts_preserve_recent_solicited_block_download() {
     st.body.mark_missing(owed);
 
     // Zero is the "no data yet" sentinel; start the production monotonic clock.
-    let _ = ibd_mono_ms();
-    std::thread::sleep(Duration::from_millis(2));
+    rbitcoin_ibd::ibd::peer_io::wait_past_mono_sentinel();
     for miss in 0..HEADER_MISS_DISCONNECT {
         // A different solicited block arrives immediately before each expiry.
         // Keep another block outstanding, matching the production capture.

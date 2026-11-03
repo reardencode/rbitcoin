@@ -204,34 +204,17 @@ fn any_port() -> SocketAddr {
 /// The address `run_p2p` bound for `name`, from `{datadir}/run/{name}.addr`.
 /// A bind-then-drop reserve races another test onto the same port.
 async fn published_listener(datadir: &std::path::Path, name: &str) -> SocketAddr {
-    let path = datadir.join("run").join(format!("{name}.addr"));
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(addr) = text.trim().parse::<SocketAddr>() {
-                if addr.port() != 0 {
-                    return addr;
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "bound {name} address was not published at {}",
-                path.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    rbitcoin_node::run::wait_published_listener(datadir, name, Duration::from_secs(20)).await
 }
 
 async fn wait_listeners(addrs: &[SocketAddr]) {
-    use std::time::Instant;
     use tokio::net::TcpStream;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Reserved ports are not published. Retry until the process accepts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         let mut missing = None;
         for addr in addrs {
-            if TcpStream::connect(addr).await.is_err() {
+            if TcpStream::connect(*addr).await.is_err() {
                 missing = Some(*addr);
                 break;
             }
@@ -239,10 +222,11 @@ async fn wait_listeners(addrs: &[SocketAddr]) {
         if missing.is_none() {
             return;
         }
-        if Instant::now() >= deadline {
-            panic!("listeners not up ({missing:?}): {addrs:?}");
+        let addr = missing.expect("missing");
+        if std::time::Instant::now() >= deadline {
+            panic!("connect {addr} after publish");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -415,7 +399,41 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         )
         .await;
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_ms_until(
+            2_000,
+            || {
+                seed.peers.snapshot().into_iter().any(|p| {
+                    p.inbound
+                        && !p.subver.is_empty()
+                        && p.bytesrecv_per_msg.get("ping").copied().unwrap_or(0) == 32
+                })
+            },
+            || {
+                format!(
+                    "the keepalive ping was not one message: {:?}",
+                    seed.peers.snapshot()
+                )
+            },
+        )
+        .await;
+        let laps = peer.peers.heartbeat_laps();
+        let ping_start = peer
+            .peers
+            .live_peers()
+            .into_iter()
+            .find(|p| !p.inbound)
+            .map(|p| p.ping_start_secs.load(std::sync::atomic::Ordering::Relaxed))
+            .expect("outbound session");
+        // The interval check is `now > sent + 120`, so this second does not
+        // send another ping.
+        peer.peers.set_mock_now(ping_start.saturating_add(120));
+        wait_ms_until(
+            2_000,
+            || peer.peers.heartbeat_laps() > laps,
+            || "the ping-interval heartbeat did not run".to_string(),
+        )
+        .await;
+        peer.peers.set_mock_now(0);
         let inbound = seed
             .peers
             .snapshot()
@@ -524,19 +542,34 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         .await;
         seed.peers.set_mock_now(0);
 
+        let attempts = seed.peers.outbound_attempts();
         seed.peers
             .addconnection(seed.local_addr, PeerConnType::OutboundFullRelay)
             .expect("self-connect dial");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(
-            !seed
-                .peers
-                .snapshot()
-                .into_iter()
-                .any(|p| p.addr == seed.local_addr && !p.subver.is_empty()),
-            "self-connect must not complete handshake: {:?}",
-            seed.peers.snapshot()
-        );
+        wait_ms_until(
+            2_000,
+            || {
+                let nonce_cleared = seed
+                    .peers
+                    .pending_outbound_nonces
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty();
+                let no_handshake = !seed
+                    .peers
+                    .snapshot()
+                    .into_iter()
+                    .any(|p| p.addr == seed.local_addr && !p.subver.is_empty());
+                seed.peers.outbound_attempts() > attempts && nonce_cleared && no_handshake
+            },
+            || {
+                format!(
+                    "self-connect must not complete handshake: {:?}",
+                    seed.peers.snapshot()
+                )
+            },
+        )
+        .await;
 
         seed.peers.set_peer_timeout_secs(1);
 
@@ -710,12 +743,19 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let laps = peer.peers.heartbeat_laps();
+        wait_ms_until(
+            2_000,
+            || peer.peers.heartbeat_laps() > laps,
+            || "AddrFetch heartbeat did not run after the reply".to_string(),
+        )
+        .await;
         let fetch = peer
             .peers
             .snapshot()
             .into_iter()
             .find(|p| p.conn_type == PeerConnType::AddrFetch)
-            .expect("AddrFetch session");
+            .expect("one addr must not complete the fetch");
         assert_eq!(
             fetch
                 .bytessent_per_msg
@@ -725,15 +765,6 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             0,
             "AddrFetch must not GetHeaders: {:?}",
             fetch.bytessent_per_msg
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            peer.peers
-                .snapshot()
-                .into_iter()
-                .any(|p| p.conn_type == PeerConnType::AddrFetch),
-            "one addr must not complete the fetch: {:?}",
-            peer.peers.snapshot()
         );
         let t = peer.peers.now_secs();
         peer.peers.set_mock_now(t + 301);
@@ -1298,18 +1329,20 @@ async fn p2p_compact_hb_getblocktxn_and_orphan() {
             },
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let getdata_after_inv = seed
-            .peers
-            .snapshot()
-            .into_iter()
-            .find(|p| p.inbound)
-            .map(|p| p.bytesrecv_per_msg.get("getdata").copied().unwrap_or(0))
-            .unwrap_or(0);
-        assert!(
-            getdata_after_inv > getdata_parked,
-            "INV of orphanage txid must GetData (same-txid different witness)"
-        );
+        wait_ms_until(
+            3_000,
+            || {
+                seed.peers
+                    .snapshot()
+                    .into_iter()
+                    .find(|p| p.inbound)
+                    .map(|p| p.bytesrecv_per_msg.get("getdata").copied().unwrap_or(0))
+                    .unwrap_or(0)
+                    > getdata_parked
+            },
+            || "INV of orphanage txid must GetData (same-txid different witness)".to_string(),
+        )
+        .await;
 
         wait_ms_until(
             3_000,
@@ -3517,15 +3550,27 @@ async fn pong_first_ping_then_go_silent(node: &P2PNode) -> rbitcoin_net::V2Plain
     let pong = |n: u64| encode_v2_contents(NetworkMessage::Pong(n)).expect("encode");
 
     let nonce = next_ping(&mut raw).await;
+    let laps = node.peers.heartbeat_laps();
+    let pong_before = row().bytesrecv_per_msg.get("pong").copied().unwrap_or(0);
     raw.write_contents(&pong(nonce.wrapping_sub(1)))
         .await
         .expect("write pong");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        row().pingwait.is_some(),
-        "a mismatched nonce leaves the ping outstanding: {:?}",
-        row()
-    );
+    wait_ms_until(
+        2_000,
+        || {
+            let r = row();
+            node.peers.heartbeat_laps() > laps
+                && r.bytesrecv_per_msg.get("pong").copied().unwrap_or(0) > pong_before
+                && r.pingwait.is_some()
+        },
+        || {
+            format!(
+                "a mismatched nonce leaves the ping outstanding: {:?}",
+                row()
+            )
+        },
+    )
+    .await;
     raw.write_contents(&pong(nonce)).await.expect("write pong");
     wait_ms_until(
         2_000,
@@ -3581,6 +3626,7 @@ async fn mocktime_generate_keeps_ponging_peer() {
         let t0 = a.peers.now_secs();
         let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
         for i in 1..=10u64 {
+            let laps = a.peers.heartbeat_laps();
             a.peers.set_mock_now(t0 + i * 600);
             let hub = a.hub.clone();
             let script = script.clone();
@@ -3590,10 +3636,24 @@ async fn mocktime_generate_keeps_ponging_peer() {
             })
             .await
             .expect("join");
-            // Session heartbeats (50ms) ping and time out on this clock step.
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            wait_ms_until(
+                2_000,
+                || {
+                    a.peers.heartbeat_laps() > laps
+                        && a.peers
+                            .snapshot()
+                            .into_iter()
+                            .any(|p| p.handshake_complete && p.subver != SILENT_AGENT)
+                },
+                || {
+                    format!(
+                        "ponging peer dropped on mock step {i}: {:?}",
+                        a.peers.snapshot()
+                    )
+                },
+            )
+            .await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
             a.peers
                 .snapshot()

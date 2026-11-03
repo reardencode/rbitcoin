@@ -156,20 +156,7 @@ fn published_path(dir: &Path, name: &str) -> PathBuf {
 
 /// The address `run_p2p` bound for `name`, from `{datadir}/run/{name}.addr`.
 async fn published_listener(dir: &Path, name: &str, wait: Duration) -> SocketAddr {
-    let path = published_path(dir, name);
-    let deadline = Instant::now() + wait;
-    loop {
-        let bound = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| text.trim().parse::<SocketAddr>().ok());
-        if let Some(addr) = bound {
-            return addr;
-        }
-        if Instant::now() >= deadline {
-            panic!("{name} listener not up at {}", path.display());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    rbitcoin_node::run::wait_published_listener(dir, name, wait).await
 }
 
 async fn wait_listeners(dir: &Path) -> (SocketAddr, SocketAddr) {
@@ -507,7 +494,6 @@ async fn ibd_then_restart(miner: P2PNode, miner_addr: SocketAddr, synced: &mut S
     assert_tip_view(rpc, synced.height, &synced.hash).await;
 
     miner.shutdown().await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_tip_view(rpc, synced.height, &synced.hash).await;
     assert_eq!(history_txids(electrum, &[0x51]).await, synced.script_a);
     assert_eq!(history_txids(electrum, &[0x52]).await, synced.script_b);
@@ -1535,6 +1521,9 @@ async fn stop_logged(
     rpc: SocketAddr,
     node: tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)>,
 ) -> StartupLogs {
+    // RPC answers before startup chooses skip or catch-up. A chain already at
+    // the target height is not that choice. The choice logs, then dials.
+    wait_peer(rpc).await;
     let _ = jsonrpc(rpc, "stop", json!([])).await;
     match tokio::time::timeout(Duration::from_secs(20), node).await {
         Ok(Ok((Ok(()), logs))) => logs,
@@ -1558,6 +1547,24 @@ async fn wait_height(rpc: SocketAddr, height: u32) {
     }
 }
 
+/// One live peer: startup has logged its choice and dialed.
+async fn wait_peer(rpc: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let info = jsonrpc(rpc, "getpeerinfo", json!([])).await;
+        if info["result"]
+            .as_array()
+            .is_some_and(|peers| !peers.is_empty())
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("no peer before stop: {info}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn assert_startup(logs: &StartupLogs, skip: bool) {
     let skipped = logs
         .iter()
@@ -1571,7 +1578,12 @@ fn assert_startup(logs: &StartupLogs, skip: bool) {
         "skip={skip} lines={:?}",
         logs.iter().map(|(_, line)| line).collect::<Vec<_>>()
     );
-    assert_eq!(catch_up, !skip, "catch-up log did not match skip={skip}");
+    assert_eq!(
+        catch_up,
+        !skip,
+        "catch-up log did not match skip={skip} lines={:?}",
+        logs.iter().map(|(_, line)| line).collect::<Vec<_>>()
+    );
 }
 
 /// Restart above genesis with the miner ahead: tip follow, no catch-up dial.

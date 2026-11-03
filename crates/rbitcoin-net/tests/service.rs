@@ -225,25 +225,58 @@ async fn service_listen_shutdown() {
     assert_ne!(extra, node.local_addr);
     assert!(std::net::TcpStream::connect(extra).is_ok());
 
+    tokio::time::pause();
+    let go = Arc::new(tokio::sync::Notify::new());
     let done = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&done);
+    let (go_task, flag) = (Arc::clone(&go), Arc::clone(&done));
     node.tasks.push(tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        go_task.notified().await;
         flag.store(true, Ordering::SeqCst);
     }));
-    node.tasks.push(tokio::spawn(async {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    }));
-    let t0 = std::time::Instant::now();
-    node.shutdown().await;
+    node.tasks.push(tokio::spawn(std::future::pending()));
+    let started = tokio::time::Instant::now();
+    let mut shutdown = std::pin::pin!(node.shutdown());
+    for _ in 0..8 {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => panic!("shutdown returned before the grace advance"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    go.notify_one();
+    for _ in 0..8 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert!(
         done.load(Ordering::SeqCst),
-        "shutdown lets a task that finishes within the grace window finish"
+        "the short task runs when released, before the grace elapses"
+    );
+    tokio::time::advance(Duration::from_millis(750)).await;
+    let mut finished = false;
+    for _ in 0..64 {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                finished = true;
+                break;
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    assert!(finished, "shutdown did not return on the grace advance");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(750),
+        "shutdown returned before the grace: {elapsed:?}"
     );
     assert!(
-        t0.elapsed() < Duration::from_secs(2),
-        "shutdown must not wait out a 30s session task"
+        elapsed < Duration::from_secs(2),
+        "shutdown waited past the grace: {elapsed:?}"
     );
+    tokio::time::resume();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -461,10 +494,13 @@ async fn redial_skips_a_connect_target_still_dialling() {
     let proxy_addr = proxy.local_addr().unwrap();
     let accepts = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&accepts);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake_accept = Arc::clone(&wake);
     let stall = tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((sock, _)) = proxy.accept().await {
             seen.fetch_add(1, Ordering::SeqCst);
+            wake_accept.notify_waiters();
             held.push(sock);
         }
     });
@@ -491,31 +527,53 @@ async fn redial_skips_a_connect_target_still_dialling() {
     )]);
     node.peers.redial_remembered();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while accepts.load(Ordering::SeqCst) == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first dial never reached the proxy"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    loop {
+        let notified = wake.notified();
+        if accepts.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "the first dial never reached the proxy");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("the first dial never reached the proxy");
+        }
     }
+    assert!(
+        !node.peers.in_flight_nets().is_empty(),
+        "the first dial stays in flight while the proxy holds it"
+    );
     for _ in 0..3 {
         node.peers.redial_remembered();
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         accepts.load(Ordering::SeqCst),
         1,
         "a dial still connecting must not be dialled again"
     );
-    // The stalled connect times out and frees the target for the next pass.
+    // The stalled connect times out and drops the in-flight flag.
     let deadline = std::time::Instant::now() + connect_bound * 3;
-    while accepts.load(Ordering::SeqCst) < 2 {
+    while !node.peers.in_flight_nets().is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
+            "a connect that never finishes must time out"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    node.peers.redial_remembered();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = wake.notified();
+        if accepts.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !left.is_zero(),
             "a connect that never finishes must time out and be redialled"
         );
-        node.peers.redial_remembered();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("a connect that never finishes must time out and be redialled");
+        }
     }
     stall.abort();
     drop(node);

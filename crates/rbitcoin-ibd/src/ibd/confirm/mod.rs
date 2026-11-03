@@ -3241,6 +3241,13 @@ fn write_batch_trusted(
     })
 }
 
+/// Park note, then the read note. The park note runs under the spindle lock,
+/// so the holder cannot drop until this thread is waiting.
+fn wait_bulk_spindle(query: &rbitcoin_query::Query) {
+    query.store().spindle_wait_with(note_confirm_bulk_read);
+    note_confirm_bulk_read();
+}
+
 /// One lookup batch: wait out a rotating-media write burst, then identity / `create.loc`.
 pub fn lookup_bulk_wave(
     query: &rbitcoin_query::Query,
@@ -3250,8 +3257,7 @@ pub fn lookup_bulk_wave(
     max_blocks: usize,
     max_inputs: u32,
 ) -> Result<rbitcoin_query::BqResolveWave, rbitcoin_query::ConfirmError> {
-    query.store().spindle_wait();
-    note_confirm_bulk_read();
+    wait_bulk_spindle(query);
     rbitcoin_query::confirm_bq_resolve_wave_capped(
         query, params, milestone, heights, max_blocks, max_inputs,
     )
@@ -3270,7 +3276,6 @@ pub fn load_bulk_stamp(
             load_bulk_stamp(query, params, milestone, blocks, pipeline)
         });
     }
-    query.store().spindle_wait();
-    note_confirm_bulk_read();
+    wait_bulk_spindle(query);
     rbitcoin_query::confirm_wire_lookup_stamp(query, params, milestone, blocks, pipeline)
 }

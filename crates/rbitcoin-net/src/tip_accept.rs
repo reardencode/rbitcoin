@@ -85,6 +85,7 @@ pub fn wait_idle() {
     let i = inflight();
     let mut g = i.mu.lock().unwrap_or_else(|e| e.into_inner());
     while i.n.load(Ordering::SeqCst) > 0 {
+        note_wait_seen();
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -99,6 +100,7 @@ pub fn wait_current_job() {
     let mut g = i.mu.lock().unwrap_or_else(|e| e.into_inner());
     let snapshot = i.gen.load(Ordering::SeqCst);
     while i.n.load(Ordering::SeqCst) > 0 && i.gen.load(Ordering::SeqCst) == snapshot {
+        note_wait_seen();
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -132,6 +134,42 @@ pub fn on_tip_accept_thread() -> bool {
 fn slot_freed() -> &'static tokio::sync::Notify {
     static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
     N.get_or_init(tokio::sync::Notify::new)
+}
+
+fn wait_seen_subs() -> &'static Mutex<Vec<mpsc::Sender<()>>> {
+    static S: OnceLock<Mutex<Vec<mpsc::Sender<()>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// One message when a waiter has observed a running job and is about to wait.
+#[doc(hidden)]
+pub fn subscribe_wait_seen() -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    wait_seen_subs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(tx);
+    rx
+}
+
+fn note_wait_seen() {
+    let mut subs = wait_seen_subs().lock().unwrap_or_else(|e| e.into_inner());
+    subs.retain(|tx| tx.send(()).is_ok());
+}
+
+fn send_parked() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+/// The async sender is inside its `slot_freed` wait.
+#[doc(hidden)]
+pub fn send_parked_notify() -> &'static tokio::sync::Notify {
+    send_parked()
+}
+
+fn note_send_parked() {
+    send_parked().notify_one();
 }
 
 fn note_async_enqueued() {
@@ -289,6 +327,7 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
                     Err(TrySendError::Full(j)) => {
                         job = j;
                         FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
+                        note_send_parked();
                         notified.await;
                     }
                     Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),

@@ -37,6 +37,7 @@ libc = "0.2"
 
 [dev-dependencies]
 rbitcoin-ibd = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # tests/i2p_sam.rs: SO_LINGER 0 resets the fake SAM socket.

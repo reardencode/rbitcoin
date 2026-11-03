@@ -15,6 +15,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use crate::asmap::AsMap;
 use crate::netaddr::{parse_net_addr, NetAddr, OnlyNet};
@@ -304,6 +305,22 @@ pub struct PeerEntry {
 /// (`1000 / 0.23`) so a reply can still be 1000 addresses.
 pub const MAX_ADDR_MAN: usize = 8192;
 
+/// Shared wake for a new dialable row. Clones of one book share it.
+#[derive(Clone)]
+struct AddrAdded(Arc<Notify>);
+
+impl Default for AddrAdded {
+    fn default() -> Self {
+        Self(Arc::new(Notify::new()))
+    }
+}
+
+impl std::fmt::Debug for AddrAdded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddrAdded")
+    }
+}
+
 /// Peer book: seeds, learned addrs, and dial ranking.
 #[derive(Debug, Default, Clone)]
 pub struct AddrMan {
@@ -318,6 +335,8 @@ pub struct AddrMan {
     /// `--i2p-sam`. Default off.
     pub i2p_reachable: bool,
     pub cjdns_reachable: bool,
+    /// Wakes a catch-up wait when a new row is stored.
+    added: AddrAdded,
 }
 
 impl AddrMan {
@@ -501,6 +520,18 @@ impl AddrMan {
         }
         self.by_addr.insert(addr, PeerFlags::empty());
         self.order.push(addr);
+        self.note_added();
+    }
+
+    /// One permit when a new row lands. A waiter that is not armed yet still
+    /// sees it on the next poll of [`Self::added`].
+    #[doc(hidden)]
+    pub fn added(&self) -> Arc<Notify> {
+        Arc::clone(&self.added.0)
+    }
+
+    fn note_added(&self) {
+        self.added.0.notify_one();
     }
 
     /// Insert or keep existing; never clears known flags when already present.
@@ -532,6 +563,7 @@ impl AddrMan {
         }
         self.by_addr.insert(addr, flags);
         self.order.push(addr);
+        self.note_added();
     }
 
     /// Insert a newly learned addr, evicting last-resort then oldest new at `cap`.
@@ -558,6 +590,7 @@ impl AddrMan {
         }
         self.by_addr.insert(addr, PeerFlags::empty());
         self.order.push(addr);
+        self.note_added();
         true
     }
 

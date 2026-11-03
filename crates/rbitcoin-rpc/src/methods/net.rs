@@ -28,6 +28,23 @@ pub fn getnettotals(ctx: &RpcContext) -> Value {
     })
 }
 
+/// Refill and stale-tip pass counts. Not an operator method: `help` omits it.
+#[doc(hidden)]
+pub fn outbound_pass(ctx: &RpcContext) -> Value {
+    let counts = ctx
+        .peers
+        .as_ref()
+        .map(|hub| hub.outbound_pass_counts())
+        .unwrap_or_default();
+    json!({
+        "skipped_pinned": counts.skipped_pinned,
+        "not_stagnant": counts.not_stagnant,
+        "skipped_seeds_off": counts.skipped_seeds_off,
+        "rotated": counts.rotated,
+        "no_spare": counts.no_spare,
+    })
+}
+
 pub fn getpeerinfo(ctx: &RpcContext, hub: &rbitcoin_net::PeerHub) -> Value {
     let chain = ctx.chain.as_deref();
     let rows: Vec<Value> = hub

@@ -3467,6 +3467,37 @@ async fn wait_session_read(
     }
 }
 
+/// A mock-time jump runs the session heartbeat without waiting out
+/// [`SESSION_HEARTBEAT`]. The runtime clock is paused after the first ping,
+/// so that 50 ms sleep cannot complete on its own.
+#[tokio::test(flavor = "current_thread")]
+async fn mock_time_wakes_the_session_heartbeat() {
+    let mut t = paused_serve("mock-wakes-heartbeat", 0, &["/rbitcoin:test(wake)/"]).await;
+    let (raw, sess) = &mut t.clients[0];
+    loop {
+        if let NetworkMessage::Ping(_) = next_peer_msg(raw).await.unwrap() {
+            break;
+        }
+    }
+    let now = t.node.peers.now_secs();
+    tokio::time::pause();
+    t.node.peers.set_mock_now(now + 20 * 60 + 61);
+    let started = std::time::Instant::now();
+    let woke = loop {
+        if sess.stop.load(Ordering::SeqCst) {
+            break true;
+        }
+        if started.elapsed() >= Duration::from_millis(30) {
+            break false;
+        }
+        tokio::task::yield_now().await;
+    };
+    tokio::time::resume();
+    assert!(woke, "mock time did not wake the session heartbeat");
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
 /// Core's ping timeout runs while `ProcessGetData` is paused on
 /// `fPauseSend`. A session paused on a getdata tail, or on its send budget,
 /// still runs the heartbeat: a peer that never reads hits the ping timeout
@@ -3487,7 +3518,7 @@ async fn paused_session_still_times_out_a_silent_peer() {
     wait_session_read(&t.node, slots, "getdata").await;
     let (_, budget) = &t.clients[1];
     budget.note_send_queued(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
-    tokio::time::sleep(4 * SESSION_HEARTBEAT).await;
+    wait_heartbeat_lap(&t.node.peers, "paused session did not heartbeat").await;
 
     let now = t.node.peers.now_secs();
     t.node.peers.set_mock_now(now + 20 * 60 + 61);
@@ -3517,9 +3548,34 @@ async fn paused_session_still_times_out_a_silent_peer() {
 const PING_TIMEOUT_SECS: u64 = 20 * 60;
 const POST_BLOCK_PONG_GRACE_SECS: u64 = 60;
 
-/// Proves the session is still up: it answers a ping after some heartbeats.
-async fn assert_session_answers(raw: &mut V2PlainSession, nonce: u64, why: &str) {
-    tokio::time::sleep(10 * SESSION_HEARTBEAT).await;
+/// The next `on_heartbeat` is the wait. The caller asserts the peer row.
+async fn wait_heartbeat_lap(peers: &rbitcoin_net::peers::PeerHub, why: &str) {
+    let laps = peers.heartbeat_laps();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while peers.heartbeat_laps() <= laps {
+        assert!(std::time::Instant::now() < deadline, "{why}");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// `wait_send_budget` has armed `send_resume` and is still over budget.
+async fn wait_send_parked(peer: &rbitcoin_net::peers::LivePeer, why: &str) {
+    let parked = peer.send_budget_parks();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while peer.send_budget_parks() == parked {
+        assert!(std::time::Instant::now() < deadline, "{why}");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Proves the session is still up: one heartbeat has run, then it answers a ping.
+async fn assert_session_answers(
+    peers: &rbitcoin_net::peers::PeerHub,
+    raw: &mut V2PlainSession,
+    nonce: u64,
+    why: &str,
+) {
+    wait_heartbeat_lap(peers, why).await;
     write_peer_msg(raw, NetworkMessage::Ping(nonce)).await;
     let pong = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -3622,8 +3678,15 @@ async fn ping_timeout_waits_while_a_block_is_in_flight() {
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS - 200);
     deliver(&mut t, 0, blocks[0].clone()).await;
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS + 1);
+    let peers = Arc::clone(&t.node.peers);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        7,
+        "a peer with a block in flight hit the ping timeout",
+    )
+    .await;
     t.node.shutdown().await;
     let _ = std::fs::remove_dir_all(&t.dir);
 }
@@ -3641,16 +3704,45 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     let block = chain_on_tip(&t, 1).remove(0);
     announce_and_wait_for_ask(&mut t, block.header).await;
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS + 1);
+    let peers = Arc::clone(&t.node.peers);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        7,
+        "a peer with a block in flight hit the ping timeout",
+    )
+    .await;
 
     deliver(&mut t, 0, block).await;
-    let delivered = t.node.peers.now_secs();
+    // The tip is published on the accept lane before this session records
+    // `last_block`. A mock jump in that gap would start the grace minute at
+    // the jumped clock.
+    let sess = Arc::clone(&t.clients[0].1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let delivered = loop {
+        let now = t.node.peers.now_secs();
+        let stamped = sess.last_block.load(Ordering::Relaxed);
+        if stamped == now && stamped != 0 {
+            break stamped;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the delivered block was not stamped on the peer"
+        );
+        tokio::task::yield_now().await;
+    };
     t.node
         .peers
         .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 8, "the peer lost its minute to answer the ping").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        8,
+        "the peer lost its minute to answer the ping",
+    )
+    .await;
 
     t.node
         .peers
@@ -3911,12 +4003,14 @@ async fn paused_getdata_tail_is_served_before_the_next_getdata() {
     let _ = std::fs::remove_dir_all(&t.dir);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn handshake_timeout_after_silence() {
     use std::net::SocketAddr;
     use tokio::net::{TcpListener, TcpStream};
 
     assert_eq!(HANDSHAKE_TIMEOUT, Duration::from_secs(60));
+    // The bound is `tokio::time::timeout`. Pause so the clock, not a sleep, is the wait.
+    tokio::time::pause();
 
     async fn bind_pair() -> (TcpStream, TcpStream, SocketAddr, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3926,90 +4020,88 @@ async fn handshake_timeout_after_silence() {
         (client, server, addr, peer)
     }
 
-    async fn join_timeout<T>(
-        handle: tokio::task::JoinHandle<Result<T, NetError>>,
+    async fn expect_handshake_timeout<T>(
+        fut: impl std::future::Future<Output = Result<T, NetError>>,
+        limit: Duration,
         still: &str,
         done: &str,
-        succeeded: &str,
     ) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!handle.is_finished(), "{still}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(handle.is_finished(), "{done}");
-        match handle.await.unwrap() {
+        tokio::pin!(fut);
+        std::future::poll_fn(|cx| match fut.as_mut().poll(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(_) => panic!("{still}"),
+        })
+        .await;
+        // Paused clock. The handshake bound was armed by the poll above.
+        tokio::time::sleep(limit).await;
+        match std::future::poll_fn(|cx| fut.as_mut().poll(cx)).await {
             Err(NetError::Timeout) => {}
-            Err(e) => panic!("expected Timeout, got {e}"),
-            Ok(_) => panic!("{succeeded}"),
+            Err(e) => panic!("{done}: expected Timeout, got {e}"),
+            Ok(_) => panic!("{done}"),
         }
     }
 
+    let limit = Duration::from_millis(50);
     let (client, server, addr, peer) = bind_pair().await;
     let _silent_in = client;
-    join_timeout(
-        tokio::spawn(async move {
-            connect_and_handshake_timed(
-                Duration::from_millis(50),
-                server,
-                Magic::REGTEST,
-                addr,
-                peer,
-                0,
-                true,
-                "/rbitcoin:test/",
-                HandshakePolicy::plain(),
-            )
-            .await
-        }),
+    expect_handshake_timeout(
+        connect_and_handshake_timed(
+            limit,
+            server,
+            Magic::REGTEST,
+            addr,
+            peer,
+            0,
+            true,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        ),
+        limit,
         "must still wait during inbound handshake",
         "silence past the bound must end inbound handshake",
-        "inbound handshake succeeded on a silent peer",
     )
     .await;
 
     let (client, server, addr, _) = bind_pair().await;
     let _silent_out = server;
-    join_timeout(
-        tokio::spawn(async move {
-            connect_and_handshake_timed(
-                Duration::from_millis(50),
-                client,
-                Magic::REGTEST,
-                addr,
-                addr,
-                0,
-                false,
-                "/rbitcoin:test/",
-                HandshakePolicy::plain(),
-            )
-            .await
-        }),
+    expect_handshake_timeout(
+        connect_and_handshake_timed(
+            limit,
+            client,
+            Magic::REGTEST,
+            addr,
+            addr,
+            0,
+            false,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        ),
+        limit,
         "must still wait during outbound handshake",
         "silence past the bound must end outbound handshake",
-        "outbound handshake succeeded on a silent peer",
     )
     .await;
 
     let (client, server, addr, _) = bind_pair().await;
     let _silent_feeler = server;
-    join_timeout(
-        tokio::spawn(async move {
-            run_feeler_timed(
-                Duration::from_millis(50),
-                client,
-                Magic::REGTEST,
-                addr,
-                addr,
-                0,
-                "/rbitcoin:test/",
-                crate::peers::PeerHub::new().as_ref(),
-            )
-            .await
-        }),
+    let feeler_peers = crate::peers::PeerHub::new();
+    expect_handshake_timeout(
+        run_feeler_timed(
+            limit,
+            client,
+            Magic::REGTEST,
+            addr,
+            addr,
+            0,
+            "/rbitcoin:test/",
+            feeler_peers.as_ref(),
+        ),
+        limit,
         "must still wait during feeler",
         "silence past the bound must end feeler",
-        "feeler succeeded on a silent peer",
     )
     .await;
+    tokio::time::resume();
 
     let (client, server, _, _) = bind_pair().await;
     let _silent_plain = server;
@@ -4553,7 +4645,7 @@ async fn over_budget_reader_waits_until_one_byte_is_written() {
     peer.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
     let waiting = std::sync::Arc::clone(&peer);
     let wait = tokio::spawn(async move { waiting.wait_send_budget().await });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_send_parked(&peer, "an over-budget reader never parked").await;
     assert!(
         !wait.is_finished(),
         "an over-budget reader must be parked before the writer drains"
@@ -4573,17 +4665,17 @@ async fn over_budget_session_does_not_read_a_ping() {
     let mut t = paused_serve("serve-pause-read", 1, &["/rbitcoin:test(budget-read)/"]).await;
     let (raw, sess) = &mut t.clients[0];
     sess.note_send_queued(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_send_parked(sess, "over-budget session never paused").await;
     write_peer_msg(raw, NetworkMessage::Ping(7)).await;
-    let early = tokio::time::timeout(Duration::from_millis(200), async {
-        loop {
-            if let NetworkMessage::Pong(7) = next_peer_msg(raw).await.unwrap() {
-                return;
-            }
-        }
-    })
-    .await;
-    assert!(early.is_err(), "over-budget session must not read the ping");
+    let peers = sess.peer_hub().expect("session hub");
+    wait_heartbeat_lap(&peers, "paused session did not heartbeat after the ping").await;
+    let ping = sess
+        .snapshot(0)
+        .bytesrecv_per_msg
+        .get("ping")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(ping, 0, "over-budget session must not read the ping");
     sess.note_send_written(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

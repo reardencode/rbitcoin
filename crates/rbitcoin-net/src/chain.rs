@@ -69,8 +69,10 @@ pub struct TipEvent {
     pub height: u32,
     pub hash: BlockHash,
     pub header: Header,
-    /// New-branch length when this tip came from `accept_branch` (0 = tip-extend).
-    /// `p2p_sendheaders`: >8 → announce inv and pause headers.
+    /// New-branch length from `accept_branch` (0 = tip-extend). A disconnect
+    /// stores how many blocks came off, which is what makes Electrum rescan.
+    /// Announcement skips this hash when the peer already walked past it.
+    /// `p2p_sendheaders`: more than 8 → inv, and pause headers.
     pub reorg_branch_len: u32,
 }
 
@@ -2640,6 +2642,18 @@ impl ChainHub {
             .height_of_hash(&hash.to_byte_array())
             .map_err(NetError::store)?
             .filter(|h| h.0 <= tip);
+        let mut disconnected_to: Option<(u32, BlockHash)> = None;
+        // One mark for the disconnect and the replacement fork. Nested holds
+        // commit into it and do not publish, so the drop below is the only
+        // template send. `template_prev` stays locked, so the Arc has to
+        // outlive the hold.
+        let held_mp = if on_tip.is_some() {
+            self.mempool().cloned()
+        } else {
+            None
+        };
+        let mut template_hold = held_mp.as_ref().map(|mp| mp.template_hold());
+        let was_ibd = on_tip.is_some() && self.in_ibd();
         if let Some(h) = on_tip {
             let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut path = Vec::new();
@@ -2658,10 +2672,15 @@ impl ChainHub {
                 });
             }
             let keep = h.0.saturating_sub(1);
+            let removed = tip.saturating_sub(keep);
             let disconnected = self.disconnect_to(keep);
             self.revalidate_header_report();
             disconnected?;
+            let stump = self.tip_hash();
             drop(_guard);
+            if let Some(stump) = stump {
+                disconnected_to = Some((removed, stump));
+            }
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
@@ -2675,6 +2694,37 @@ impl ChainHub {
             return Err(NetError::Consensus("Block not found".into()));
         }
         let activated = self.activate_best_side_branch(&[], &HashSet::new());
+        // The fork's own hold is nested, so it did not publish. Commit the
+        // tip this call leaves, then drop: one send, after that tip is final.
+        // Activation may already have moved the tip, including before a fault.
+        if let Some((removed, _)) = disconnected_to {
+            if removed > 0 {
+                if let Some(tip) = self.tip_hash() {
+                    if let Some(hold) = template_hold.as_mut() {
+                        hold.commit(tip.to_byte_array());
+                    }
+                }
+            }
+        }
+        drop(template_hold);
+        if on_tip.is_some() {
+            self.maintain_pool_after_ibd(was_ibd);
+        }
+        if let Some((removed, stump)) = disconnected_to {
+            if removed > 0 && self.tip_hash() == Some(stump) {
+                if let (Some(height), Some(tip_hash), Some(header)) =
+                    (self.tip_height(), self.tip_hash(), self.tip_header())
+                {
+                    let _ = self.tip_tx.send(TipEvent {
+                        height,
+                        hash: tip_hash,
+                        header,
+                        reorg_branch_len: removed,
+                    });
+                    self.notify.notify_waiters();
+                }
+            }
+        }
         // Activation may move the tip before a fault, so evict before it is
         // returned.
         if let Some(mp) = self.mempool() {
@@ -3374,8 +3424,13 @@ impl ChainHub {
     pub fn finish_branch_reorg(&self, reorg: BranchReorg<'_>, was_ibd: bool) {
         let BranchReorg { hold, gone, tips } = reorg;
         self.reaccept_disconnected(&gone);
+        // An outer invalidate hold still has `template_prev`. Maintenance
+        // takes that lock, so it runs after the outer drop instead.
+        let defer_maint = hold.as_ref().is_some_and(|h| h.is_nested());
         drop(hold);
-        self.maintain_pool_after_ibd(was_ibd);
+        if !defer_maint {
+            self.maintain_pool_after_ibd(was_ibd);
+        }
         if tips.is_empty() {
             return;
         }
@@ -4030,13 +4085,18 @@ impl ChainHub {
             let spent = spent_outpoints(&block.txdata);
             let n = mp.remove_for_block_spent(&ids, &spent);
             rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
-            if mp.pool_maintained() {
-                mp.note_block_fee_history(Height(height));
-                if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
-                    hold.commit(hash.to_byte_array());
-                } else if let Some(hold) = own_hold.as_mut() {
+            // Disconnect committed the fork point. Keep committing the
+            // connected block, or the drop publishes that ancestor and a
+            // template builds on it while the pool is still catching up.
+            if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
+                hold.commit(hash.to_byte_array());
+            } else if mp.pool_maintained() {
+                if let Some(hold) = own_hold.as_mut() {
                     hold.commit(hash.to_byte_array());
                 }
+            }
+            if mp.pool_maintained() {
+                mp.note_block_fee_history(Height(height));
             }
         }
         let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;
@@ -4078,17 +4138,16 @@ impl ChainHub {
         // and then reads the query. The pool matches `keep_height` once the
         // disconnected transactions are back in it.
         let mp_hold = self.mempool().cloned();
-        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
+        // Hold the mark so a template cannot observe the pool mid-disconnect.
+        // Do not commit this height. The drop would publish it on
+        // template_watch before invalidate applies a heavier fork, and a
+        // one-shot wait would return the stump.
+        let template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
             .query
             .lock_tip_commit()
             .map_err(|e| NetError::Store(e.to_string()))?;
         self.disconnect_to_in_commit(keep_height)?;
-        if let Some(hold) = template_hold.as_mut() {
-            if let Ok(Some((_, rec))) = self.query.header_at_height(Height(keep_height)) {
-                hold.commit(rec.hash);
-            }
-        }
         drop(template_hold);
         Ok(())
     }

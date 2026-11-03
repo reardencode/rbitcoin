@@ -26,6 +26,28 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 use rbitcoin_query::testutil::FixtureChain;
+
+/// `store(true)` ends the serve task without waiting out the shutdown poll.
+#[tokio::test]
+async fn esplora_shutdown_wakes_without_the_fifty_ms_poll() {
+    tokio::time::pause();
+    let (_dir, q) = temp_query("esplora-stop-wake");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let mut handle = run_esplora(cfg, Arc::new(q), None).await.expect("listen");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    handle.shutdown.store(true);
+    tokio::task::yield_now().await;
+    let joined = tokio::time::timeout(Duration::ZERO, &mut handle.task).await;
+    tokio::time::resume();
+    joined
+        .expect("esplora stayed in the 50 ms shutdown poll")
+        .expect("serve task");
+}
+
 fn temp_query(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled(label)
 }
@@ -222,6 +244,14 @@ fn with_sh_join_empty_slot_unblocks_waiter() {
         });
     });
     leader_in_rx.recv().expect("leader entered f");
+    let inf = st
+        .sh_join
+        .lock()
+        .unwrap()
+        .clients
+        .get("c1")
+        .and_then(|c| c.inflight.get(&sh).cloned())
+        .expect("leader inflight");
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let st_w = Arc::clone(&st);
     let waiter = std::thread::spawn(move || {
@@ -229,7 +259,10 @@ fn with_sh_join_empty_slot_unblocks_waiter() {
             let _ = done_tx.send(slot.is_none());
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        inf.wait_queued(Duration::from_secs(2)),
+        "waiter did not queue on the empty join"
+    );
     let _ = release.send(());
     leader.join().expect("leader");
     let empty = done_rx
@@ -258,6 +291,14 @@ fn with_sh_join_leader_panic_unblocks_waiter() {
         });
     });
     leader_in_rx.recv().expect("leader entered f");
+    let inf = st
+        .sh_join
+        .lock()
+        .unwrap()
+        .clients
+        .get("c1")
+        .and_then(|c| c.inflight.get(&sh).cloned())
+        .expect("leader inflight");
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let st_w = Arc::clone(&st);
     let waiter = std::thread::spawn(move || {
@@ -265,7 +306,10 @@ fn with_sh_join_leader_panic_unblocks_waiter() {
             let _ = done_tx.send(());
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        inf.wait_queued(Duration::from_secs(2)),
+        "waiter did not queue before the leader unwound"
+    );
     let _ = release.send(());
     let _ = leader.join();
     done_rx
@@ -926,11 +970,17 @@ impl ScriptHold {
         assert!(n >= 1, "script pool did not start");
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let parked = Arc::new((Mutex::new(()), std::sync::Condvar::new()));
         for _ in 0..n {
             let entered = Arc::clone(&entered);
             let gate = Arc::clone(&gate);
+            let parked = Arc::clone(&parked);
             rbitcoin_consensus::script_pool::spawn_detached(move || {
-                entered.fetch_add(1, Ordering::SeqCst);
+                {
+                    let _g = parked.0.lock().unwrap_or_else(|p| p.into_inner());
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    parked.1.notify_all();
+                }
                 let (lock, cv) = &*gate;
                 let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
                 while !*g {
@@ -939,12 +989,13 @@ impl ScriptHold {
             });
         }
         let start = Instant::now();
+        let (lock, cv) = &*parked;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
         while entered.load(Ordering::SeqCst) < n {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "script workers did not park"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+            let left = Duration::from_secs(2).saturating_sub(start.elapsed());
+            assert!(!left.is_zero(), "script workers did not park");
+            let (next, _timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            g = next;
         }
         Self { gate }
     }
@@ -1014,6 +1065,46 @@ fn heavy_template_encode_waits_for_a_script_worker() {
         }
     };
     assert_eq!(bytes.as_ref(), serde_json::to_vec(body.as_ref()).unwrap());
+}
+
+fn queued_join() -> InflightJoin {
+    InflightJoin {
+        done: Mutex::new(None),
+        cv: std::sync::Condvar::new(),
+        seq: 1,
+        queued: Mutex::new(false),
+        queued_cv: std::sync::Condvar::new(),
+    }
+}
+
+#[test]
+fn a_flag_set_before_the_waiter_arms_is_still_visible() {
+    let inf = queued_join();
+    {
+        let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+        *queued = true;
+        inf.queued_cv.notify_all();
+    }
+    assert!(
+        inf.wait_queued(Duration::from_millis(20)),
+        "a notify with no waiter must still be visible on the flag"
+    );
+}
+
+#[test]
+fn a_waiter_that_locks_first_wakes_when_the_flag_is_stored() {
+    let inf = Arc::new(queued_join());
+    let waiting = Arc::clone(&inf);
+    let waiter = std::thread::spawn(move || waiting.wait_queued(Duration::from_secs(2)));
+    {
+        let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+        *queued = true;
+        inf.queued_cv.notify_all();
+    }
+    assert!(
+        waiter.join().expect("waiter"),
+        "the queued flag is under the mutex the waiter holds"
+    );
 }
 
 include!("esplora_sh_journey.rs");

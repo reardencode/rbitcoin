@@ -5,7 +5,7 @@ use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub use mine::{gbt_template, submit_received_block};
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };
+    static RPC_WAIT_PARK: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
 }
 
 /// The HTTP task already waited. The blocking dispatch must not sleep again.
@@ -29,6 +30,87 @@ pub fn set_http_wait_satisfied(v: bool) {
 
 pub fn http_wait_satisfied() -> bool {
     HTTP_WAIT_SATISFIED.with(|c| c.get())
+}
+
+/// Tests wait on this counter instead of a settle sleep. The note runs on
+/// the waiter thread, after a poll found the wait is not done and before
+/// `RpcWake::next` parks.
+#[doc(hidden)]
+pub fn set_rpc_wait_park_note(note: Option<Arc<AtomicU64>>) {
+    RPC_WAIT_PARK.with(|c| *c.borrow_mut() = note);
+}
+
+fn note_rpc_wait_park() {
+    RPC_WAIT_PARK.with(|c| {
+        if let Some(note) = c.borrow().as_ref() {
+            note.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+}
+
+/// Tip, stop, and template subscriptions for one long-poll.
+pub struct RpcWake {
+    tips: Option<tokio::sync::broadcast::Receiver<rbitcoin_net::TipEvent>>,
+    stop: tokio::sync::watch::Receiver<bool>,
+    template: Option<tokio::sync::watch::Receiver<u64>>,
+}
+
+impl RpcWake {
+    pub fn arm(ctx: &RpcContext) -> Self {
+        Self {
+            tips: ctx.chain.as_ref().map(|c| c.subscribe_tips()),
+            stop: ctx.stop.subscribe(),
+            template: ctx.mempool.as_ref().map(|m| m.subscribe_template()),
+        }
+    }
+
+    /// Returns on the next tip, stop, template generation, or `deadline`.
+    pub async fn next(&mut self, deadline: tokio::time::Instant) {
+        if *self.stop.borrow() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(sleep);
+        tokio::select! {
+            _ = &mut sleep => {}
+            _ = async {
+                if let Some(rx) = self.tips.as_mut() {
+                    let _ = rx.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+            _ = self.stop.changed() => {}
+            _ = async {
+                if let Some(rx) = self.template.as_mut() {
+                    let _ = rx.changed().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+}
+
+/// Blocking long-poll on this thread. HTTP waits on the server runtime
+/// instead; calling this from a worker that already owns a runtime panics.
+pub fn block_on_rpc_wait(ctx: &RpcContext, timeout_ms: u64, ready: impl Fn() -> bool) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("rpc wait runtime");
+    rt.block_on(async {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut wake = RpcWake::arm(ctx);
+        loop {
+            if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline || ready()
+            {
+                return;
+            }
+            note_rpc_wait_park();
+            wake.next(deadline).await;
+        }
+    });
 }
 
 pub fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
@@ -75,13 +157,43 @@ use mempool::*;
 use mine::*;
 use net::*;
 
+/// Process stop bit. `store(true)` wakes every long-poll subscribed to it.
+#[derive(Clone)]
+pub struct StopFlag {
+    flag: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl StopFlag {
+    pub fn new(initial: bool) -> Arc<Self> {
+        let (wake, _) = tokio::sync::watch::channel(initial);
+        Arc::new(Self {
+            flag: Arc::new(AtomicBool::new(initial)),
+            wake: Arc::new(wake),
+        })
+    }
+
+    pub fn load(&self, order: Ordering) -> bool {
+        self.flag.load(order)
+    }
+
+    pub fn store(&self, value: bool, order: Ordering) {
+        self.flag.store(value, order);
+        self.wake.send_replace(value);
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.wake.subscribe()
+    }
+}
+
 /// Shared process context for RPC handlers.
 pub struct RpcContext {
     pub query: Arc<Query>,
     pub mempool: Option<Arc<MempoolHub>>,
     pub network: Network,
     pub start: Instant,
-    pub stop: Arc<AtomicBool>,
+    pub stop: Arc<StopFlag>,
     /// Best-effort live peer count (updated by node; 0 if unknown).
     pub connections: Arc<AtomicU64>,
     /// Fallback IBD flag when no `ChainHub` is attached (tests / smoke RPC).
@@ -582,6 +694,13 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
                 return Ok(json!([]));
             };
             Ok(getpeerinfo(ctx, hub))
+        }
+        // Journey wait. Debug builds only, and left off METHOD_LIST, so a
+        // release node answers -32601 like Core.
+        #[cfg(debug_assertions)]
+        "outboundpass" => {
+            params.reject_unknown(&[])?;
+            Ok(outbound_pass(ctx))
         }
         "ping" => {
             params.reject_unknown(&[])?;

@@ -23,6 +23,23 @@ use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+async fn wait_isolated_lap(
+    mp: &MempoolHub,
+    before: u64,
+    read: impl Fn(&MempoolHub) -> u64,
+    what: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if read(mp) > before {
+            return;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "{what}");
+        let _ = tokio::time::timeout(left, mp.isolated_lap_notified()).await;
+    }
+}
+
 fn dummy_tx() -> Transaction {
     Transaction {
         version: TxVersion::TWO,
@@ -541,11 +558,18 @@ async fn ephemeral_broadcast() {
         }
     });
     held_rx.recv().unwrap();
+    // Sample before the gate opens. The next read notes the lap as soon as
+    // the in-flight send returns, which can be before this task resumes.
+    let lagged = mp.isolated_laps().lagged;
     gate_tx.send(()).unwrap();
     assert_eq!(next_sent(&mut got_rx).await, first.compute_txid());
-    // Only how long the old `try_read` path has to give up. The loop under
-    // test sends `held` whatever this is.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_isolated_lap(
+        &mp,
+        lagged,
+        |m| m.isolated_laps().lagged,
+        "isolated broadcast did not report a lagged read",
+    )
+    .await;
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     assert_eq!(
@@ -567,9 +591,15 @@ async fn ephemeral_broadcast() {
     recipient.abort();
 
     let h = spawn_loop(AddrMan::new());
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let skipped = mp.isolated_laps().skipped_unknown;
     mp.queue_isolated(dummy_tx().compute_txid());
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    wait_isolated_lap(
+        &mp,
+        skipped,
+        |m| m.isolated_laps().skipped_unknown,
+        "an unknown txid was not reported skipped",
+    )
+    .await;
     assert!(
         !h.is_finished(),
         "an unknown txid is skipped without panicking on a tokio worker"
@@ -595,9 +625,16 @@ async fn ephemeral_broadcast() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
+    let no_targets = mp.isolated_laps().no_targets;
     mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
         .expect("local");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_isolated_lap(
+        &mp,
+        no_targets,
+        |m| m.isolated_laps().no_targets,
+        "a local tx with no targets was not reported",
+    )
+    .await;
     assert!(!h.is_finished(), "a local tx with no targets is a no-op");
     h.abort();
 

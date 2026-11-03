@@ -1858,6 +1858,37 @@ fn purge_fault_unindexes_txs_that_already_left() {
     let _ = std::fs::remove_dir_all(&store);
 }
 
+/// An update that lands while a hold is out, and the hold never commits,
+/// still has to reach `template_watch`. A failed connect drops its hold
+/// with no commit. Swallowing the update leaves a longpoll asleep.
+#[test]
+fn dropped_hold_publishes_an_update_that_landed_without_a_commit() {
+    let dir = tmp();
+    let store_dir = tmp();
+    let q = Query::open_or_create_tiny(&store_dir).unwrap();
+    let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+    let watch = mp.subscribe_template();
+    let before = *watch.borrow();
+    {
+        let outer = mp.template_hold();
+        {
+            let _inner = mp.template_hold();
+            mp.note_template_update();
+            assert_eq!(
+                *watch.borrow(),
+                before,
+                "a nested hold must not publish the update"
+            );
+        }
+        assert_eq!(*watch.borrow(), before, "the outer hold is still out");
+        drop(outer);
+    }
+    assert_eq!(*watch.borrow(), mp.template_updates());
+    assert_ne!(*watch.borrow(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
 /// The maintained flag is the Ready bit for listing and `generate`. It must
 /// stay clear while `begin_pool_maintenance` is still waiting on the template
 /// lock, which it holds across the purge.
@@ -4824,6 +4855,30 @@ fn mempool_tx_snapshot_two_live_and_accept_while_held() {
 }
 
 #[test]
+fn snapshot_age_is_a_pure_stale_check() {
+    let now = Instant::now();
+    let max_age = FEE_SNAPSHOT_MAX_AGE;
+    let just_under = now - Duration::from_millis(999);
+    let one_second = now - max_age;
+    assert!(
+        !is_stale(just_under, now, false, max_age),
+        "a snapshot just under 1s old is fresh"
+    );
+    assert!(
+        is_stale(one_second, now, false, max_age),
+        "a snapshot computed 1s ago is stale"
+    );
+    assert!(
+        is_stale(just_under, now, true, max_age),
+        "dirty refreshes before the age"
+    );
+    assert!(
+        is_stale(now + Duration::from_secs(1), now, false, max_age),
+        "a computed_at in the future is stale"
+    );
+}
+
+#[test]
 fn mempool_tx_snapshot_refresh_reuses_tx_arc() {
     let (_store, owned_q, owned_cbs) = pad_cbs(3);
     let q = &owned_q;
@@ -4837,7 +4892,7 @@ fn mempool_tx_snapshot_refresh_reuses_tx_arc() {
     let aid = a.compute_txid();
     let e1 = snap1.get(&aid).expect("a in snap1");
     let _ = e1.json.set("keep-a".into());
-    std::thread::sleep(Duration::from_millis(1100));
+    hub.refresh_tx_snapshot();
     let snap2 = hub.mempool_tx_snapshot();
     let e2 = snap2.get(&aid).expect("a in snap2");
     assert!(

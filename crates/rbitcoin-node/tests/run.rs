@@ -821,6 +821,8 @@ async fn empty_book_waits_for_a_discovered_target() {
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
     let shutdown = Shutdown::new();
     let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let parked = peers.dial_parked().notified();
+    tokio::pin!(parked);
     let shared_task = Arc::clone(&shared);
     let shutdown_task = Arc::clone(&shutdown);
     let peers_task = Arc::clone(&peers);
@@ -839,19 +841,27 @@ async fn empty_book_waits_for_a_discovered_target() {
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::timeout(Duration::from_secs(2), parked)
+        .await
+        .expect("empty book parks before a discovered address");
     assert!(
         !task.is_finished(),
         "an empty book with discovery in flight must stay in catch-up"
     );
+    let started = Instant::now();
     shared
         .lock()
         .unwrap()
         .add_addr(rbitcoin_net::NetAddr::Ip("127.0.0.1:1".parse().unwrap()));
-    let found = tokio::time::timeout(Duration::from_secs(2), task)
+    let found = tokio::time::timeout(Duration::from_millis(50), task)
         .await
-        .expect("learned target wakes catch-up")
+        .expect("learned target wakes catch-up within 50ms")
         .expect("wait task");
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "join took {:?}",
+        started.elapsed()
+    );
     assert_eq!(found.expect("dial targets").len(), 1);
 
     let shutdown = Shutdown::new();
@@ -1261,34 +1271,18 @@ fn sh_writebehind_starts_only_after_tip_entry() {
     );
     #[cfg(target_os = "linux")]
     {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut comms = linux_task_comms();
-        while Instant::now() < deadline
-            && comms.iter().filter(|name| *name == "rbtc-sh-wb").count() < 1
-        {
-            std::thread::sleep(Duration::from_millis(10));
-            comms = linux_task_comms();
-        }
-        let n = comms.iter().filter(|name| *name == "rbtc-sh-wb").count();
-        assert_eq!(n, 1, "one rbtc-sh-wb, saw {comms:?}");
+        let tid = slot
+            .as_ref()
+            .expect("durable tip")
+            .wait_published(Duration::from_secs(1))
+            .expect("rbtc-sh-wb published its tid");
+        let comm =
+            std::fs::read_to_string(format!("/proc/self/task/{tid}/comm")).unwrap_or_default();
+        assert_eq!(comm.trim_end_matches('\n'), "rbtc-sh-wb");
     }
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     slot.take().expect("rbtc-sh-wb").join().expect("rbtc-sh-wb");
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[cfg(target_os = "linux")]
-fn linux_task_comms() -> Vec<String> {
-    let mut names = Vec::new();
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return names;
-    };
-    for task in tasks.flatten() {
-        if let Ok(raw) = std::fs::read_to_string(task.path().join("comm")) {
-            names.push(raw.trim_end_matches('\n').to_string());
-        }
-    }
-    names
 }
 
 #[tokio::test]
@@ -1458,6 +1452,7 @@ async fn start_esplora_applies_max_inflight() {
     .await
     .unwrap();
     let addr = handles[0].local_addr;
+    let admit = Arc::clone(&handles[0].admit);
 
     let get = |addr| async move {
         let mut s = TcpStream::connect(addr).await.unwrap();
@@ -1473,12 +1468,29 @@ async fn start_esplora_applies_max_inflight() {
         .write_all(b"POST /tx HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n")
         .await
         .unwrap();
+    // The stall may not hold the slot yet. Wait until this GET is counted
+    // as waiting, and retry if it was served before the slot filled.
     let mut waiting = None;
     for _ in 0..20 {
+        let before = admit.waiting();
         let g = tokio::spawn(get(addr));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if !g.is_finished() {
-            waiting = Some(g);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = admit.notified();
+            if !g.is_finished() && admit.waiting() > before {
+                waiting = Some(g);
+                break;
+            }
+            if g.is_finished() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "a limit of one did not queue the request");
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!("a limit of one did not queue the request");
+            }
+        }
+        if waiting.is_some() {
             break;
         }
     }
@@ -1590,4 +1602,30 @@ fn trusted_noban_fills_to_max_outbound_and_stops() {
         dial_sockets(&mut rx).is_empty(),
         "a noban hub already at --max-outbound must not queue another wave"
     );
+}
+
+/// Publishing the listener file wakes a waiter that is already parked.
+#[tokio::test]
+async fn publish_listener_addr_wakes_the_waiter() {
+    tokio::time::pause();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-listener-wake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_wait = dir.clone();
+    let wait = tokio::spawn(async move {
+        wait_published_listener(&dir_wait, "rpc", Duration::from_secs(2)).await
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    let addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
+    publish_listener_addr(&dir, "rpc", addr);
+    tokio::task::yield_now().await;
+    let got = tokio::time::timeout(Duration::ZERO, wait).await;
+    tokio::time::resume();
+    let got = got
+        .expect("publish left the waiter on the file poll")
+        .expect("waiter");
+    assert_eq!(got, addr);
+    let _ = std::fs::remove_dir_all(&dir);
 }

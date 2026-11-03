@@ -10,19 +10,22 @@ use rbitcoin_ibd::{
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
-    BlockingRegion, ChainHub, Dialer, MempoolHub, NetAddr, P2PNode, PeerConnType, TipEvent,
+    BlockingRegion, ChainHub, Dialer, MempoolHub, NetAddr, OutboundPass, P2PNode, PeerConnType,
+    TipEvent,
 };
 use rbitcoin_primitives::Network;
+use rbitcoin_query::connect::ShWritebehind;
 use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
 use rbitcoin_rpc::{
     gbt_template, run_rpc, HubRegtest, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
 };
 use rbitcoin_store::StoreError;
 use rbitcoin_sv2::{run_sv2_tp, Sv2TpConfig, Sv2TpHandle};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Notify};
 
@@ -1481,7 +1484,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
 
             let stagnant = last_tip_change.elapsed() >= stale_tip;
-            if !stagnant || config.listen.has_pinned_connect() || !config.listen.use_seeds {
+            if !stagnant {
+                node.peers.note_outbound_pass(OutboundPass::NotStagnant);
+                continue;
+            }
+            if config.listen.has_pinned_connect() {
+                node.peers.note_outbound_pass(OutboundPass::SkippedPinned);
+                continue;
+            }
+            if !config.listen.use_seeds {
+                node.peers.note_outbound_pass(OutboundPass::SkippedSeedsOff);
                 continue;
             }
             if shutdown.requested() {
@@ -1491,6 +1503,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             // only rotates one full-relay session once the quota is full.
             let rows = node.peers.outbound_full_relay_rows();
             if !stale_follow_needs_room(rows.len(), max_out) {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             }
             let ids: Vec<u64> = rows.iter().map(|(id, _)| *id).collect();
@@ -1501,17 +1514,20 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .collect();
             let salt = node.hub.clock.now_secs();
             let Some(evict_id) = rbitcoin_net::pick_stale_follow_evict(&ids, salt, &groups) else {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             };
             let (occupied, _, _) = outbound_slots(&node.peers);
             let replacement = outbound_full_relay_candidates(&shared_peers, 1, &occupied);
             if replacement.is_empty() {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             }
             last_tip_change = Instant::now();
             node.peers.disconnect_id(evict_id);
             info!("node: stale tip — replacing outbound {evict_id}");
             queue_outbound_full_relay(&node.peers, &shared_peers, &replacement);
+            node.peers.note_outbound_pass(OutboundPass::Rotated);
         }
     }
 
@@ -1800,35 +1816,59 @@ pub async fn wait_for_dialable_targets(
     network: Network,
 ) -> Option<Vec<rbitcoin_net::NetAddr>> {
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
-    let mut next_requeue = Instant::now();
+    let queue_seeds = || {
+        if !proxy_seeds {
+            return;
+        }
+        let answering = peers
+            .snapshot()
+            .iter()
+            .any(|p| p.conn_type == PeerConnType::AddrFetch);
+        if !answering {
+            let n = queue_proxy_seed_addrfetch(peers, network);
+            if n > 0 {
+                info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+            }
+        }
+    };
+    queue_seeds();
+    let mut requeue = tokio::time::interval(PROXY_SEED_RETRY);
+    requeue.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    requeue.tick().await;
     loop {
         if shutdown.requested() {
             return None;
         }
-        if proxy_seeds && Instant::now() >= next_requeue {
-            let answering = peers
-                .snapshot()
-                .iter()
-                .any(|p| p.conn_type == PeerConnType::AddrFetch);
-            if !answering {
-                let n = queue_proxy_seed_addrfetch(peers, network);
-                if n > 0 {
-                    info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+        let mut sample = || {
+            {
+                let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.is_empty() {
+                    *addrman = g.clone();
                 }
             }
-            next_requeue = Instant::now() + PROXY_SEED_RETRY;
-        }
-        {
-            let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.is_empty() {
-                *addrman = g.clone();
-            }
-        }
-        let targets = follow_dial_targets(pinned, addrman, candidate_n, occupied);
+            follow_dial_targets(pinned, addrman, candidate_n, occupied)
+        };
+        let targets = sample();
         if !targets.is_empty() {
             return Some(targets);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        peers.note_dial_parked();
+        let added = shared_peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .added();
+        let wake = added.notified();
+        tokio::pin!(wake);
+        let targets = sample();
+        if !targets.is_empty() {
+            return Some(targets);
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            _ = &mut wake => {}
+            _ = requeue.tick() => queue_seeds(),
+        }
     }
 }
 
@@ -2180,8 +2220,31 @@ where
     })
 }
 
-// Bound TCP address, including the kernel port when the configured port was 0.
-// Unix Esplora's placeholder `127.0.0.1:0` is not a listener and is skipped.
+fn listener_addr_path(datadir: &Path, name: &str) -> PathBuf {
+    datadir.join("run").join(format!("{name}.addr"))
+}
+
+fn listener_wakes() -> &'static Mutex<HashMap<PathBuf, Arc<Notify>>> {
+    static WAKES: OnceLock<Mutex<HashMap<PathBuf, Arc<Notify>>>> = OnceLock::new();
+    WAKES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn listener_addr_wake(path: &Path) -> Arc<Notify> {
+    let mut wakes = listener_wakes().lock().unwrap_or_else(|e| e.into_inner());
+    wakes
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Notify::new()))
+        .clone()
+}
+
+fn read_listener_addr(path: &Path) -> Option<SocketAddr> {
+    let addr: SocketAddr = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    (addr.port() != 0).then_some(addr)
+}
+
+/// Bound TCP address, including the kernel port when the configured port was 0.
+/// Unix Esplora's placeholder `127.0.0.1:0` is not a listener and is skipped.
+/// A same-process waiter blocked in [`wait_published_listener`] is woken.
 #[doc(hidden)]
 pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
     if addr.port() == 0 {
@@ -2192,7 +2255,7 @@ pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
         warn!("listener address {}: {e}", dir.display());
         return;
     }
-    let path = dir.join(format!("{name}.addr"));
+    let path = listener_addr_path(datadir, name);
     let tmp = dir.join(format!("{name}.addr.tmp"));
     if let Err(e) = std::fs::write(&tmp, format!("{addr}\n")) {
         warn!("listener address {}: {e}", tmp.display());
@@ -2200,6 +2263,38 @@ pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
     }
     if let Err(e) = std::fs::rename(&tmp, &path) {
         warn!("listener address {}: {e}", path.display());
+        return;
+    }
+    if let Some(wake) = listener_wakes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&path)
+        .cloned()
+    {
+        wake.notify_waiters();
+    }
+}
+
+/// The address `run_p2p` published for `name`. Same-process publish wakes this.
+/// A child process has no shared wake, so the wait also retries until `wait`.
+#[doc(hidden)]
+pub async fn wait_published_listener(datadir: &Path, name: &str, wait: Duration) -> SocketAddr {
+    let path = listener_addr_path(datadir, name);
+    let wake = listener_addr_wake(&path);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let notified = wake.notified();
+        if let Some(addr) = read_listener_addr(&path) {
+            return addr;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{name} listener not up at {}", path.display());
+        }
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
     }
 }
 
@@ -2416,7 +2511,7 @@ pub async fn start_esplora_if_ready(
                 mempool: Some(Arc::clone(&mp)),
                 network,
                 start: Instant::now(),
-                stop: Arc::new(AtomicBool::new(false)),
+                stop: rbitcoin_rpc::methods::StopFlag::new(false),
                 connections: Arc::new(AtomicU64::new(0)),
                 initial_block_download: Arc::new(AtomicBool::new(false)),
                 subversion: String::new(),
@@ -2534,7 +2629,7 @@ pub fn sh_tip_ready_gates(query: &Query) -> TipModeGates {
 
 /// Start the Class B appender once. A second call does not spawn another thread.
 pub fn ensure_sh_writebehind(
-    slot: &mut Option<std::thread::JoinHandle<()>>,
+    slot: &mut Option<ShWritebehind>,
     query: Arc<Query>,
     stop: Arc<AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
@@ -2550,7 +2645,7 @@ pub fn sh_writebehind_at_tip_entry(
     query: Arc<Query>,
     stop: Arc<AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
-) -> Option<std::thread::JoinHandle<()>> {
+) -> Option<ShWritebehind> {
     if !query.enqueues_sh_writebehind() {
         return None;
     }
@@ -2955,14 +3050,20 @@ pub fn refill_outbound_full_relay(
     max_out: usize,
 ) {
     if config.trust_peer_set() || config.listen.has_pinned_connect() {
+        peers.note_outbound_pass(OutboundPass::SkippedPinned);
         return;
     }
     let (occupied, live, pending) = outbound_slots(peers);
     if live >= max_out {
+        peers.note_outbound_pass(OutboundPass::NoSpare);
         return;
     }
     let room = max_out.saturating_sub(live).saturating_sub(pending);
     let picked = outbound_full_relay_candidates(shared_peers, room, &occupied);
+    if picked.is_empty() {
+        peers.note_outbound_pass(OutboundPass::NoSpare);
+        return;
+    }
     queue_outbound_full_relay(peers, shared_peers, &picked);
 }
 

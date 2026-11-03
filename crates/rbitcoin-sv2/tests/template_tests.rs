@@ -1142,20 +1142,13 @@ async fn fee_pushes_keep_older_same_tip_templates_solvable() {
     tp.shutdown().await;
 }
 
-/// Fee pushes stay an interval apart while txs keep arriving: a tx admitted
-/// during a build or send waits for the next check, not the moment after
-/// the push. Steady admission makes that window likely on some push, not
-/// certain. Cost: about 0.8 s over the shared pad copy. A smaller fan-out
-/// runs out before four pushes, and a sparser stream rarely lands inside a
-/// build; with this one, arming the check at the send was caught on every
-/// run, with pushes 3-6 ms apart against the 125 ms floor.
-#[tokio::test(flavor = "multi_thread")]
+/// One paused interval after an admit produces one fee push. The next
+/// admit waits for the next advance.
+#[tokio::test]
 async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
     let tc = shared_regtest(1);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
-    // Confirmed fan-out: each streamed spend is its own cluster. Enough
-    // outputs to outlast four pushes on a loaded runner.
-    let outs = 1_000u64;
+    let outs = 4u64;
     let each = (50_0000_0000 - 10_000) / outs;
     let mut fanout = spend(tc.coinbases[0], 10_000, cheap.clone());
     fanout.output = vec![
@@ -1201,72 +1194,81 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
     c.coinbase_output_constraints(0, 0).await.unwrap();
     expect_template(&mut c, &tc, &[], true).await;
 
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let feeder = {
-        let (mempool, stop, fanout) = (Arc::clone(&tc.mempool), Arc::clone(&stop), fanout);
-        std::thread::spawn(move || {
-            for vout in 0..outs as u32 {
-                if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
+    tokio::time::pause();
+    for vout in 0..outs as u32 {
+        let tx = Transaction {
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout.compute_txid(),
+                    vout,
+                },
+                ..fanout.input[0].clone()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(each - FEE_DELTA),
+                script_pubkey: cheap.clone(),
+            }],
+            ..fanout.clone()
+        };
+        tc.mempool.accept_tx(&tx).expect("mempool accept");
+        let mut recv = std::pin::pin!(c.recv());
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut recv)
+                .await
+                .is_err(),
+            "admit {vout} pushed before the interval"
+        );
+        // One millisecond past the deadline: an exact advance leaves the
+        // timer due but not fired.
+        tokio::time::advance(interval + Duration::from_millis(1)).await;
+        // Poll. An unbounded await would auto-advance the paused clock to a
+        // later timer and accept a push this interval did not produce.
+        let mut pushed = None;
+        for _ in 0..64 {
+            match tokio::time::timeout(Duration::ZERO, &mut recv).await {
+                Ok(Ok(frame)) => {
+                    pushed = Some(frame);
+                    break;
                 }
-                let tx = Transaction {
-                    input: vec![TxIn {
-                        previous_output: OutPoint {
-                            txid: fanout.compute_txid(),
-                            vout,
-                        },
-                        ..fanout.input[0].clone()
-                    }],
-                    output: vec![TxOut {
-                        value: Amount::from_sat(each - FEE_DELTA),
-                        script_pubkey: cheap.clone(),
-                    }],
-                    ..fanout.clone()
-                };
-                mempool.accept_tx(&tx).expect("mempool accept");
-                std::thread::sleep(Duration::from_millis(2));
+                Ok(Err(e)) => panic!("fee push failed: {e}"),
+                Err(_) => tokio::task::yield_now().await,
             }
-        })
-    };
-    let mut at = Vec::new();
-    for _ in 0..4 {
-        let mut f = recv_in_time(&mut c).await;
-        at.push(tokio::time::Instant::now());
+        }
+        let mut f = pushed.expect("one advance produces one push");
         assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
         let t: NewTemplate = binary_sv2::from_bytes(&mut f.payload).expect("decode");
         assert!(!t.future_template, "fee push");
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    feeder.join().expect("feeder");
-    // Receive times jitter around the server's sends; half an interval
-    // leaves room for that and still fails a push right after the last.
-    for w in at.windows(2) {
-        assert!(
-            w[1] - w[0] >= interval / 2,
-            "pushes {:?} apart, interval {interval:?}",
-            w[1] - w[0]
-        );
-    }
-
+    tokio::time::resume();
     tp.shutdown().await;
 }
 
-/// An idle session checks once per interval and builds nothing: the
-/// counter did not move. The listener's stats count both.
-#[tokio::test(flavor = "multi_thread")]
+/// An idle session checks once per paused interval and does not rebuild.
+#[tokio::test]
 async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     let tc = shared_regtest(0);
     let interval = Duration::from_millis(250);
     let FirstTemplate { tp, c, .. } = first_template_every(&tc, interval).await;
+    tokio::time::pause();
     let stats = tp.stats();
     assert_eq!(stats.builds.totals().0, 1, "the first template");
-    tokio::time::sleep(4 * interval + interval / 2).await;
-    let checks = stats.fee_checks.totals().0;
-    assert!(
-        (2..=8).contains(&checks),
-        "about one check per interval, got {checks}"
-    );
+    let before = stats.fee_checks.totals().0;
+    for i in 1..=4 {
+        // One millisecond past the deadline: an exact advance leaves the
+        // timer due but not fired.
+        tokio::time::advance(interval + Duration::from_millis(1)).await;
+        let want = before + u64::try_from(i).unwrap();
+        for _ in 0..64 {
+            if stats.fee_checks.totals().0 >= want {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(stats.fee_checks.totals().0, want, "one check per advance");
+    }
     assert_eq!(stats.builds.totals().0, 1, "an idle mempool is not rebuilt");
+    tokio::time::resume();
     drop(c);
     tp.shutdown().await;
 }
