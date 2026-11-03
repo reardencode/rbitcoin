@@ -4940,7 +4940,9 @@ pub fn on_inv_txid(
         if let Some(s) = session {
             let _ = mp.add_orphan_announcer(txid, s.id);
         }
-        end_private_broadcast_on_echo(hub, session, *txid);
+        if asks_back_local_tx(mp, session, txid) {
+            return Some(Inventory::WitnessTransaction(*txid));
+        }
         return None;
     }
     if let Some(s) = session {
@@ -4959,26 +4961,13 @@ pub fn on_inv_txid(
     Some(Inventory::WitnessTransaction(*txid))
 }
 
-fn end_private_broadcast_on_echo(
-    hub: &ChainHub,
+fn asks_back_local_tx(
+    mp: &crate::tx_relay::MempoolHub,
     session: Option<&crate::peers::LivePeer>,
-    txid: bitcoin::Txid,
-) {
-    let Some(mp) = hub.mempool() else {
-        return;
-    };
-    if !mp.note_echo(&txid) {
-        return;
-    }
-    let Some(s) = session else {
-        return;
-    };
-    if let Some(tx) = mp.try_get_tx(&txid) {
-        s.note_announced_wtx(tx.compute_wtxid());
-    }
-    if let Some(ph) = s.peer_hub() {
-        force_announce_txid(hub, ph.as_ref(), txid);
-    }
+    txid: &bitcoin::Txid,
+) -> bool {
+    session.is_some_and(|s| s.conn_type != crate::peers::PeerConnType::BlockRelay)
+        && mp.skip_standing_inv(txid)
 }
 
 #[doc(hidden)]
@@ -5014,8 +5003,11 @@ pub fn on_inv_wtxid(
         }
         return Some(Inventory::WTx(*wtxid));
     }
-    if let Some(tx) = mp.try_get_tx_by_wtxid(wtxid) {
-        end_private_broadcast_on_echo(hub, session, tx.compute_txid());
+    if mp
+        .try_txid_for_wtxid(wtxid)
+        .is_some_and(|txid| asks_back_local_tx(mp, session, &txid))
+    {
+        return Some(Inventory::WTx(*wtxid));
     }
     let s = session?;
     let _ = mp.add_orphan_announcer_wtxid(wtxid, s.id);
@@ -6143,6 +6135,9 @@ pub async fn on_tx(
                     match tx_accept_log(&e) {
                         TxAcceptLog::Silent => {
                             if let rbitcoin_mempool::AcceptError::Duplicate(tid) = &e {
+                                if mp.try_contains_wtxid(&wtxid) {
+                                    mp.note_returned(tid);
+                                }
                                 maybe_force_relay_duplicate(hub, session, tx, *tid);
                             }
                         }

@@ -887,8 +887,10 @@ enum IsolatedTurn {
     Held,
     /// Waiting for the isolated loop. The number is submit order.
     Waiting(u64),
-    /// The loop took it.
-    Taken,
+    Taken {
+        returned: bool,
+    },
+    Sent,
 }
 
 impl LocalOrigin {
@@ -924,7 +926,8 @@ impl LocalOrigin {
             }
         }
         let (_, txid) = oldest?;
-        self.txs.insert(txid, IsolatedTurn::Taken);
+        self.txs
+            .insert(txid, IsolatedTurn::Taken { returned: false });
         Some((txid, waiting - 1))
     }
 }
@@ -2385,6 +2388,10 @@ impl MempoolHub {
     /// True if a live mempool entry has this wtxid (BIP339 inv filter).
     pub fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
         self.lock_read().graph.contains_wtxid(wtxid)
+    }
+
+    pub fn try_txid_for_wtxid(&self, wtxid: &Wtxid) -> Option<Txid> {
+        self.inner.try_read().ok()?.graph.txid_for_wtxid(wtxid)
     }
 
     pub fn try_contains_wtxid(&self, wtxid: &Wtxid) -> bool {
@@ -6178,8 +6185,31 @@ impl MempoolHub {
         }
     }
 
-    pub fn note_echo(&self, txid: &Txid) -> bool {
-        self.isolated_broadcast() && self.local_origin.lock().unwrap().txs.remove(txid).is_some()
+    pub fn note_returned(&self, txid: &Txid) {
+        if !self.isolated_broadcast() {
+            return;
+        }
+        let mut origin = self.local_origin.lock().unwrap();
+        match origin.txs.get_mut(txid) {
+            Some(IsolatedTurn::Taken { returned }) => *returned = true,
+            Some(_) => {
+                origin.txs.remove(txid);
+            }
+            None => {}
+        }
+    }
+
+    pub fn isolated_sent(&self, txid: &Txid) {
+        let mut origin = self.local_origin.lock().unwrap();
+        match origin.txs.get(txid) {
+            Some(IsolatedTurn::Taken { returned: true }) => {
+                origin.txs.remove(txid);
+            }
+            Some(IsolatedTurn::Taken { returned: false }) => {
+                origin.txs.insert(*txid, IsolatedTurn::Sent);
+            }
+            _ => {}
+        }
     }
 
     pub fn is_local_origin(&self, txid: &Txid) -> bool {

@@ -492,6 +492,37 @@ fn reorg_reaccept_then_unindex_drops_relay() {
     let _ = std::fs::remove_dir_all(&mp);
 }
 
+#[tokio::test]
+async fn returned_tx_waits_for_in_flight_isolated_sends() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let hub = MempoolHub::open(tmp(), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.set_isolated_broadcast(true);
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+
+    let sending = spend_true(cbs[1], 1_000, spk.clone());
+    let txid = sending.compute_txid();
+    hub.accept_tx_from(&sending, TxOrigin::Local)
+        .expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.note_returned(&txid);
+    assert!(
+        hub.is_local_origin(&txid),
+        "a tx back mid-send keeps its entry so the other dials still run"
+    );
+    hub.isolated_sent(&txid);
+    assert!(!hub.is_local_origin(&txid));
+
+    let sent = spend_true(cbs[2], 1_000, spk);
+    let txid = sent.compute_txid();
+    hub.accept_tx_from(&sent, TxOrigin::Local).expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.isolated_sent(&txid);
+    assert!(hub.is_local_origin(&txid), "sent but not back yet");
+    hub.note_returned(&txid);
+    assert!(!hub.is_local_origin(&txid));
+}
+
 #[test]
 fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     use rbitcoin_store::script_hash;
