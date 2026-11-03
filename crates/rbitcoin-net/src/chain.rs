@@ -1698,7 +1698,13 @@ impl ChainHub {
     /// not poison later getdata of that hash.
     #[doc(hidden)]
     pub fn remember_failed_accept(&self, offered: BlockHash, e: &NetError) {
-        if matches!(e, NetError::Consensus(m) if m == BLOCK_IS_INVALIDATED || m == BAD_PREVBLK) {
+        if matches!(e, NetError::Consensus(m) if m == BLOCK_IS_INVALIDATED) {
+            return;
+        }
+        // Not kept or marked, so a peer may serve it once the parent is
+        // reconsidered.
+        if matches!(e, NetError::Consensus(m) if m == BAD_PREVBLK) {
+            self.forget_asked_block(&offered);
             return;
         }
         let hash = e
