@@ -3896,51 +3896,115 @@ fn pin_maxburn_json_shapes(ctx: &RpcContext, hex: &str) {
     }
 }
 
-/// `RpcContext::package_dialect` turns on Core's child-with-parents gate for
-/// `submitpackage`. Off, the same unrelated pair gets past that gate.
+/// Spends each `(txid, vout)` into one OP_TRUE output of `value` sat.
+fn spend_outpoints(prevs: &[(Txid, u32)], value: u64) -> Transaction {
+    use bitcoin::{OutPoint, TxIn, TxOut, Witness};
+    Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: prevs
+            .iter()
+            .map(|&(txid, vout)| TxIn {
+                previous_output: OutPoint { txid, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+/// `RpcContext::package_dialect` turns on Core's `IsChildWithParentsTree`
+/// gate for `submitpackage`: every member is a parent of the last one, and
+/// no parent spends another. Off, the same packages get past that gate.
 #[test]
 fn submitpackage_topology_gate_follows_the_context() {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::consensus::encode::serialize;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    let unrelated = |n: u8| {
-        let tx = Transaction {
-            version: TxVersion::TWO,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: bitcoin::Txid::from_byte_array([n; 32]),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        };
-        rbitcoin_primitives::hex_encode(serialize(&tx))
+    let txid = |n: u8| bitcoin::Txid::from_byte_array([n; 32]);
+    let hexes = |txs: &[&Transaction]| {
+        json!(txs
+            .iter()
+            .map(|t| rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(*t)))
+            .collect::<Vec<_>>())
     };
-    let pkg = json!([unrelated(1), unrelated(2)]);
+    let u1 = spend_outpoints(&[(txid(1), 0)], 1_000);
+    let u2 = spend_outpoints(&[(txid(2), 0)], 1_000);
+    let mut gp = spend_outpoints(&[(txid(3), 0)], 5_000);
+    gp.output.push(gp.output[0].clone());
+    let p = spend_outpoints(&[(gp.compute_txid(), 0)], 4_000);
+    let c = spend_outpoints(&[(gp.compute_txid(), 1), (p.compute_txid(), 0)], 8_000);
+    let mut burn = u2.clone();
+    burn.output[0].script_pubkey = ScriptBuf::new_op_return([0xaa; 4]);
     let dir = TempDir::labeled("rpc-pkg-dialect").unwrap();
     let mut ctx = open_ctx(&dir);
 
     ctx.package_dialect = true;
-    let err = dispatch(&ctx, "submitpackage", vec![pkg.clone()]).unwrap_err();
-    assert!(
-        err.to_string().contains("package topology disallowed"),
-        "{err}"
-    );
+    for pkg in [hexes(&[&u1, &u2]), hexes(&[&gp, &p, &c])] {
+        let err = dispatch(&ctx, "submitpackage", vec![pkg]).unwrap_err();
+        assert_eq!(err["code"], ERR_VERIFY_ERROR, "{err}");
+        assert_eq!(
+            err["message"],
+            "package topology disallowed. not child-with-parents or parents depend on each other.",
+            "{err}"
+        );
+    }
+    // Core checks maxburnamount while it decodes, before the topology.
+    let err = dispatch(&ctx, "submitpackage", vec![hexes(&[&u1, &burn])]).unwrap_err();
+    assert!(rpc_message(&err).contains("maxburnamount"), "{err}");
 
     ctx.package_dialect = false;
-    let res = dispatch(&ctx, "submitpackage", vec![pkg]);
-    assert!(
-        !format!("{res:?}").contains("package topology disallowed"),
-        "{res:?}"
+    for pkg in [hexes(&[&u1, &u2]), hexes(&[&gp, &p, &c])] {
+        let res = dispatch(&ctx, "submitpackage", vec![pkg]);
+        assert!(
+            !format!("{res:?}").contains("package topology disallowed"),
+            "{res:?}"
+        );
+    }
+}
+
+/// Core `AcceptPackage` tries each member alone, in package order. A parent
+/// over `maxfeerate` fails alone and stops package evaluation, but the other
+/// parent still enters the pool, and the child is missing the first parent.
+#[test]
+fn submitpackage_over_max_parent_leaves_the_other_parent() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (rich_hex, rich) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000_000, spk.clone());
+    let (plain_hex, plain) = spend_generated_coinbase(&ctx, 2, 50_0000_0000 - 1_000, spk);
+    let child = spend_outpoints(
+        &[(rich.compute_txid(), 0), (plain.compute_txid(), 0)],
+        rich.output[0].value.to_sat() + plain.output[0].value.to_sat() - 10_000,
     );
+    let child_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&child));
+    let pkg = dispatch(
+        &ctx,
+        "submitpackage",
+        vec![json!([rich_hex, plain_hex, child_hex])],
+    )
+    .unwrap();
+    let rows = &pkg["tx-results"];
+    let w = |t: &Transaction| hash_hex_display(&t.compute_wtxid().to_byte_array());
+    assert_eq!(pkg["package_msg"], "transaction failed", "{pkg}");
+    assert_eq!(rows[w(&rich)]["error"], "max feerate exceeded", "{pkg}");
+    assert!(rows[w(&plain)].get("error").is_none(), "{pkg}");
+    assert_eq!(
+        rows[w(&plain)]["fees"]["base"],
+        sat_btc_json(1_000),
+        "{pkg}"
+    );
+    assert_eq!(
+        rows[w(&child)]["error"],
+        "bad-txns-inputs-missingorspent",
+        "{pkg}"
+    );
+    let mp = ctx.mempool.as_ref().unwrap();
+    assert!(mp.contains(&plain.compute_txid()), "{pkg}");
+    assert!(!mp.contains(&rich.compute_txid()), "{pkg}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

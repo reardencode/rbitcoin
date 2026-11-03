@@ -880,9 +880,12 @@ pub fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook
     )
 }
 
+const PACKAGE_TOPOLOGY_DISALLOWED: &str =
+    "package topology disallowed. not child-with-parents or parents depend on each other.";
+
 #[doc(hidden)]
 pub fn submitpackage_topology_disallowed(txs: &[Transaction], dialect: bool) -> bool {
-    dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_direct_parents(txs)
+    dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_parents_tree(txs)
 }
 
 #[doc(hidden)]
@@ -2020,14 +2023,8 @@ pub fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
             ),
         ));
     }
-    let mut txs = Vec::with_capacity(arr.len());
-    for v in arr {
-        let hex = v
-            .as_str()
-            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_package_tx_hex(hex)?);
-    }
-    if let Some(done) = submitpackage_screen(ctx, mp, &txs, max_feerate, max_burn)? {
+    let txs = submitpackage_txs(ctx, arr, max_burn)?;
+    if let Some(done) = submitpackage_screen(mp, &txs)? {
         return Ok(done);
     }
     Ok(submitpackage_admit(ctx, mp, &txs, max_feerate))
@@ -2057,33 +2054,42 @@ pub async fn submitpackage_async(
             ),
         ));
     }
-    let mut txs = Vec::with_capacity(arr.len());
-    for v in arr {
-        let hex = v
-            .as_str()
-            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_package_tx_hex(hex)?);
-    }
-    let ctx_s = Arc::clone(ctx);
+    let txs = submitpackage_txs(ctx, arr, max_burn)?;
     let mp_s = Arc::clone(&mp);
     let txs_s = txs.clone();
-    if let Some(done) = rbitcoin_net::off_pool_budgeted(move || {
-        submitpackage_screen(&ctx_s, &mp_s, &txs_s, max_feerate, max_burn)
-    })
-    .await?
+    if let Some(done) =
+        rbitcoin_net::off_pool_budgeted(move || submitpackage_screen(&mp_s, &txs_s)).await?
     {
         return Ok(done);
     }
     Ok(submitpackage_admit_async(ctx, &mp, txs, max_feerate).await)
 }
 
-fn submitpackage_screen(
+/// Core `submitpackage` decode: each member's `maxburnamount` as it decodes,
+/// then the topology gate.
+fn submitpackage_txs(
     ctx: &RpcContext,
-    mp: &MempoolHub,
-    txs: &[Transaction],
-    max_feerate: u64,
+    arr: &[Value],
     max_burn: u64,
-) -> Result<Option<Value>, Value> {
+) -> Result<Vec<Transaction>, Value> {
+    let mut txs = Vec::with_capacity(arr.len());
+    for v in arr {
+        let hex = v
+            .as_str()
+            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
+        let tx = decode_package_tx_hex(hex)?;
+        if burn_exceeds_max(&tx, max_burn) {
+            return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
+        }
+        txs.push(tx);
+    }
+    if submitpackage_topology_disallowed(&txs, ctx.package_dialect) {
+        return Err(rpc_error(ERR_VERIFY_ERROR, PACKAGE_TOPOLOGY_DISALLOWED));
+    }
+    Ok(txs)
+}
+
+fn submitpackage_screen(mp: &MempoolHub, txs: &[Transaction]) -> Result<Option<Value>, Value> {
     if !mp.relay_enabled() {
         return Err(rpc_error(
             ERR_MISC,
@@ -2095,12 +2101,6 @@ fn submitpackage_screen(
     }
     if package_has_conflicts(txs) {
         return Ok(Some(submitpackage_conflict_result(txs)));
-    }
-    if submitpackage_topology_disallowed(txs, ctx.package_dialect) {
-        return Err(rpc_error(ERR_VERIFY_ERROR, "package topology disallowed"));
-    }
-    if let Some(failed) = submitpackage_fee_burn_precheck(ctx, mp, txs, max_feerate, max_burn)? {
-        return Ok(Some(failed));
     }
     Ok(None)
 }
@@ -2125,55 +2125,6 @@ pub fn submitpackage_conflict_result(txs: &[Transaction]) -> Value {
 }
 
 #[doc(hidden)]
-pub fn submitpackage_fee_burn_precheck(
-    ctx: &RpcContext,
-    mp: &MempoolHub,
-    txs: &[Transaction],
-    max_feerate: u64,
-    max_burn: u64,
-) -> Result<Option<Value>, Value> {
-    let mut tx_results = serde_json::Map::new();
-    let mut pre_fail = false;
-    for tx in txs {
-        let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
-        let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
-        if burn_exceeds_max(tx, max_burn) {
-            return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
-        }
-        // Chain and mempool prevouts only; in-package parents wait for admit.
-        // A member already in the pool is not re-checked (Core `AcceptPackage`).
-        if !mp.contains(&tx.compute_txid())
-            && package_tx_fee_exceeds_max(ctx, mp, tx, &[], max_feerate)
-        {
-            pre_fail = true;
-            tx_results.insert(
-                wtxid,
-                json!({
-                    "txid": txid,
-                    "error": "max feerate exceeded",
-                }),
-            );
-        }
-    }
-    if !pre_fail {
-        return Ok(None);
-    }
-    for tx in txs {
-        let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
-        tx_results.entry(wtxid).or_insert_with(|| {
-            json!({
-                "txid": hash_hex_display(&tx.compute_txid().to_byte_array()),
-                "error": "bad-txns-inputs-missingorspent",
-            })
-        });
-    }
-    Ok(Some(json!({
-        "package_msg": "transaction failed",
-        "tx-results": tx_results,
-        "replaced-transactions": [],
-    })))
-}
-
 #[doc(hidden)]
 struct PackagePlan {
     tx_results: serde_json::Map<String, Value>,
@@ -2292,14 +2243,25 @@ fn submitpackage_plan(
     // that member can enter, including a parent that exists only in this
     // package. Such a member is not submitted: package feerate must not
     // rescue it, and it must not rescue the others (`rpc_packages.py`).
+    // Core tries each member alone in package order, so a member that
+    // spends a refused one (directly or through another) is missing inputs,
+    // not over the cap.
     let mut eval_txs = Vec::new();
     let mut over_max = Vec::new();
+    let mut refused = std::collections::HashSet::new();
     for tx in to_admit {
-        if package_tx_fee_exceeds_max(ctx, mp, &tx, txs, max_feerate) {
+        let spends_refused = tx
+            .input
+            .iter()
+            .any(|i| refused.contains(&i.previous_output.txid));
+        if spends_refused {
+            refused.insert(tx.compute_txid());
+        } else if package_tx_fee_exceeds_max(ctx, mp, &tx, txs, max_feerate) {
+            refused.insert(tx.compute_txid());
             over_max.push(tx);
-        } else {
-            eval_txs.push(tx);
+            continue;
         }
+        eval_txs.push(tx);
     }
     let package_eval = over_max.is_empty();
     PackagePlan {

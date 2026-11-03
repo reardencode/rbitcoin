@@ -4454,9 +4454,9 @@ impl MempoolHub {
         ActiveMempool::check_package_shape(txs)
     }
 
-    /// Core `IsChildWithParents` (submitpackage topology).
-    pub fn package_is_child_with_direct_parents(txs: &[Transaction]) -> bool {
-        ActiveMempool::package_is_child_with_direct_parents(txs)
+    /// Core `IsChildWithParentsTree` (submitpackage topology).
+    pub fn package_is_child_with_parents_tree(txs: &[Transaction]) -> bool {
+        ActiveMempool::package_is_child_with_parents_tree(txs)
     }
 
     /// Core ancestor package size cap (count, not weight).

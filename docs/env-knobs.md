@@ -43,7 +43,7 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_P2P_MAX_INBOUND` | 200 | Only if `--max-inbound` / conf omitted |
 | `RBITCOIN_URING_DRAIN_HARD_SECS` | 120 | `drain_all` zero-CQE abort (Linux/pool/IOCP). Raise if completions are slow but still arriving |
 | `RBITCOIN_RPC_WAIT_TIP_IDLE` | off | `getblockcount` / `getbestblockhash` / `wait_height` wait until the tip-accept lane is empty. Default (unset) waits only for the job that was running when the RPC arrived. The Core-functional bitcoind shim sets `1` so `sync_blocks` stays deterministic. **Not** a production operator knob |
-| `RBITCOIN_RPC_PACKAGE_DIALECT` | off | `submitpackage` uses Core `IsChildWithParents` (`-25 package topology disallowed`). Default (unset) still package-evaluates a child-with-parents remainder that failed min relay, the dynamic mempool floor, or missing inputs; a child that is not that shape stays `bad-txns-inputs-missingorspent`. A member whose own feerate exceeds `maxfeerate` is rejected either way and does not rescue the package. The Core-functional bitcoind shim sets `1`. **Not** a production operator knob |
+| `RBITCOIN_RPC_PACKAGE_DIALECT` | off | `submitpackage` uses Core `IsChildWithParentsTree` (`-25 package topology disallowed`): the last tx spends every other member, and no parent spends another. Default (unset) still package-evaluates a child-with-parents remainder that failed min relay, the dynamic mempool floor, or missing inputs; a child that is not that shape stays `bad-txns-inputs-missingorspent`. A member whose own feerate exceeds `maxfeerate` is rejected either way and does not rescue the package. The Core-functional bitcoind shim sets `1`. **Not** a production operator knob |
 
 ## Hardcoded (no env)
 
