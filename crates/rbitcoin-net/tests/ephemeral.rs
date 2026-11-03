@@ -219,7 +219,7 @@ async fn ephemeral_broadcast_one_shot_tx_and_new_socks_creds() {
     let peer_addr = bitcoin_l.local_addr().unwrap();
     let inbound = tokio::spawn(async move {
         let (stream, from) = bitcoin_l.accept().await.unwrap();
-        let (_ver, mut reader, _writer, _wire, _tcp) = connect_and_handshake_timed(
+        let (_ver, mut reader, mut writer, _wire, _tcp) = connect_and_handshake_timed(
             Duration::from_secs(5),
             stream,
             Magic::REGTEST,
@@ -232,19 +232,7 @@ async fn ephemeral_broadcast_one_shot_tx_and_new_socks_creds() {
         )
         .await
         .unwrap();
-        let frame = tokio::time::timeout(
-            Duration::from_secs(5),
-            read_v2_frame(&mut reader, Magic::REGTEST),
-        )
-        .await
-        .expect("tx frame")
-        .expect("tx decrypt");
-        let msg = decode_framed_offload(frame).await.unwrap();
-        assert!(
-            matches!(msg.payload(), NetworkMessage::Tx(_)),
-            "expected tx, got {:?}",
-            msg.payload()
-        );
+        receive_offered_tx(&mut reader, &mut writer).await;
         let eof = tokio::time::timeout(
             Duration::from_secs(5),
             read_v2_frame(&mut reader, Magic::REGTEST),
@@ -313,7 +301,7 @@ async fn gated_recipient(
             gate.await.unwrap();
         }
         let here = s.local_addr().unwrap();
-        let (_ver, mut reader, _writer, _wire, _tcp) = connect_and_handshake_timed(
+        let (_ver, mut reader, mut writer, _wire, _tcp) = connect_and_handshake_timed(
             Duration::from_secs(5),
             s,
             Magic::REGTEST,
@@ -326,12 +314,38 @@ async fn gated_recipient(
         )
         .await
         .unwrap();
-        let frame = read_v2_frame(&mut reader, Magic::REGTEST).await.unwrap();
-        let msg = decode_framed_offload(frame).await.unwrap();
-        let NetworkMessage::Tx(tx) = msg.payload() else {
-            panic!("expected tx, got {:?}", msg.payload());
-        };
+        let tx = receive_offered_tx(&mut reader, &mut writer).await;
         got.send(tx.compute_txid()).unwrap();
+    }
+}
+
+async fn receive_offered_tx(
+    reader: &mut rbitcoin_net::v2::V2Reader,
+    writer: &mut rbitcoin_net::v2::V2Writer,
+) -> Transaction {
+    use rbitcoin_net::v2::write_v2_msg;
+    let mut got = None;
+    loop {
+        let frame = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_v2_frame(reader, Magic::REGTEST),
+        )
+        .await
+        .expect("offer frame")
+        .expect("offer decrypt");
+        match decode_framed_offload(frame).await.unwrap().into_payload() {
+            NetworkMessage::Inv(inv) => write_v2_msg(writer, NetworkMessage::GetData(inv))
+                .await
+                .unwrap(),
+            NetworkMessage::Tx(tx) => got = Some(tx),
+            NetworkMessage::Ping(nonce) => {
+                write_v2_msg(writer, NetworkMessage::Pong(nonce))
+                    .await
+                    .unwrap();
+                return got.expect("tx before the ping");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
 
@@ -686,7 +700,7 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
     let peer_addr = bitcoin_l.local_addr().unwrap();
     let inbound = tokio::spawn(async move {
         let (stream, from) = bitcoin_l.accept().await.unwrap();
-        let (_ver, mut reader, _writer, _wire, _tcp) = connect_and_handshake_timed(
+        let (_ver, mut reader, mut writer, _wire, _tcp) = connect_and_handshake_timed(
             Duration::from_secs(5),
             stream,
             Magic::REGTEST,
@@ -699,19 +713,7 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
         )
         .await
         .unwrap();
-        let frame = tokio::time::timeout(
-            Duration::from_secs(5),
-            read_v2_frame(&mut reader, Magic::REGTEST),
-        )
-        .await
-        .expect("tx frame")
-        .expect("tx decrypt");
-        let msg = decode_framed_offload(frame).await.unwrap();
-        assert!(
-            matches!(msg.payload(), NetworkMessage::Tx(_)),
-            "expected tx, got {:?}",
-            msg.payload()
-        );
+        receive_offered_tx(&mut reader, &mut writer).await;
         true
     });
     let socks_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -770,7 +772,14 @@ async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
 
 /// A BIP324 recipient that answers our VERSION with its own (`relay` as
 /// given) and VERACK, then records every message until we hang up.
-async fn recording_recipient(l: TcpListener, relay: bool) -> Vec<NetworkMessage> {
+#[derive(Clone, Copy, PartialEq)]
+enum Answer {
+    Core,
+    NoGetData,
+    NoPong,
+}
+
+async fn recording_recipient(l: TcpListener, relay: bool, answer: Answer) -> Vec<NetworkMessage> {
     use bitcoin::p2p::address::Address;
     use bitcoin::p2p::message_network::VersionMessage;
     use bitcoin::p2p::ServiceFlags;
@@ -811,6 +820,19 @@ async fn recording_recipient(l: TcpListener, relay: bool) -> Vec<NetworkMessage>
                 .await
                 .unwrap();
         }
+        match &msg {
+            NetworkMessage::Inv(inv) if answer != Answer::NoGetData => {
+                write_v2_msg(&mut writer, NetworkMessage::GetData(inv.clone()))
+                    .await
+                    .unwrap();
+            }
+            NetworkMessage::Ping(nonce) if answer == Answer::Core => {
+                write_v2_msg(&mut writer, NetworkMessage::Pong(*nonce))
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
         seen.push(msg);
     }
     seen
@@ -834,7 +856,9 @@ fn commands(seen: &[NetworkMessage]) -> Vec<&'static str> {
             NetworkMessage::Verack => "verack",
             NetworkMessage::WtxidRelay => "wtxidrelay",
             NetworkMessage::SendAddrV2 => "sendaddrv2",
+            NetworkMessage::Inv(_) => "inv",
             NetworkMessage::Tx(_) => "tx",
+            NetworkMessage::Ping(_) => "ping",
             _ => "other",
         })
         .collect()
@@ -842,8 +866,9 @@ fn commands(seen: &[NetworkMessage]) -> Vec<&'static str> {
 
 /// Core #29415 `PushNodeVersion` for a private broadcast connection: no
 /// services, time 0, both addresses unset, `/pynode:0.0.1/`, height 0,
-/// relay off. Then VERACK and the tx, with no WTXIDRELAY or SENDADDRV2. An
-/// ordinary outbound handshake still sends this node's own VERSION.
+/// relay off. Then VERACK, INV, the tx once the peer asks with GETDATA, and
+/// PING, with no WTXIDRELAY or SENDADDRV2. An ordinary outbound handshake
+/// still sends this node's own VERSION.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_broadcast_sends_core_private_broadcast_version() {
     use bitcoin::p2p::address::Address;
@@ -851,20 +876,27 @@ async fn isolated_broadcast_sends_core_private_broadcast_version() {
 
     let peer_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_addr = peer_l.local_addr().unwrap();
-    let recipient = tokio::spawn(recording_recipient(peer_l, true));
+    let recipient = tokio::spawn(recording_recipient(peer_l, true, Answer::Core));
     let (dialer, splice) = socks_to(peer_addr).await;
+    let tx = dummy_tx();
     send_tx_isolated_timed(
         &dialer,
         NetAddr::Ip(peer_addr),
         Magic::REGTEST,
-        dummy_tx(),
+        tx.clone(),
         Duration::from_secs(5),
     )
     .await
     .unwrap();
     let seen = recipient.await.unwrap();
     splice.abort();
-    assert_eq!(commands(&seen), ["version", "verack", "tx"]);
+    assert_eq!(commands(&seen), ["version", "verack", "inv", "tx", "ping"]);
+    assert_eq!(
+        seen[2],
+        NetworkMessage::Inv(vec![
+            bitcoin::p2p::message_blockdata::Inventory::Transaction(tx.compute_txid())
+        ])
+    );
     let NetworkMessage::Version(v) = &seen[0] else {
         unreachable!()
     };
@@ -884,7 +916,7 @@ async fn isolated_broadcast_sends_core_private_broadcast_version() {
 
     let normal_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let normal_addr = normal_l.local_addr().unwrap();
-    let recipient = tokio::spawn(recording_recipient(normal_l, true));
+    let recipient = tokio::spawn(recording_recipient(normal_l, true, Answer::Core));
     let stream = TcpStream::connect(normal_addr).await.unwrap();
     let our = stream.local_addr().unwrap();
     let (_ver, reader, writer, _wire, tcp) = connect_and_handshake_timed(
@@ -923,7 +955,7 @@ async fn isolated_broadcast_sends_core_private_broadcast_version() {
 async fn isolated_broadcast_skips_a_peer_that_does_not_relay() {
     let peer_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_addr = peer_l.local_addr().unwrap();
-    let recipient = tokio::spawn(recording_recipient(peer_l, false));
+    let recipient = tokio::spawn(recording_recipient(peer_l, false, Answer::Core));
     let (dialer, splice) = socks_to(peer_addr).await;
     let sent = send_tx_isolated_timed(
         &dialer,
@@ -937,4 +969,34 @@ async fn isolated_broadcast_skips_a_peer_that_does_not_relay() {
     let seen = recipient.await.unwrap();
     splice.abort();
     assert_eq!(commands(&seen), ["version"]);
+}
+
+/// Core #29415: the tx goes out only after the peer asks for it with
+/// GETDATA, and the send counts only once the peer's PONG comes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_broadcast_needs_getdata_and_pong() {
+    for (answer, want) in [
+        (Answer::NoGetData, vec!["version", "verack", "inv"]),
+        (
+            Answer::NoPong,
+            vec!["version", "verack", "inv", "tx", "ping"],
+        ),
+    ] {
+        let peer_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_l.local_addr().unwrap();
+        let recipient = tokio::spawn(recording_recipient(peer_l, true, answer));
+        let (dialer, splice) = socks_to(peer_addr).await;
+        let sent = send_tx_isolated_timed(
+            &dialer,
+            NetAddr::Ip(peer_addr),
+            Magic::REGTEST,
+            dummy_tx(),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(sent.is_err(), "no receipt must not count as sent");
+        let seen = recipient.await.unwrap();
+        splice.abort();
+        assert_eq!(commands(&seen), want);
+    }
 }

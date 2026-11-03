@@ -1,15 +1,18 @@
 //! One-shot isolated SOCKS broadcast of locally submitted transactions.
 
 use crate::error::NetError;
+use crate::msg_decode::decode_framed_offload;
 use crate::peer::{
-    connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT, PRIVATE_BROADCAST_USER_AGENT,
+    connect_and_handshake_timed, rand_nonce, HandshakePolicy, HANDSHAKE_TIMEOUT,
+    PRIVATE_BROADCAST_USER_AGENT,
 };
 use crate::seeds::AddrMan;
 use crate::socks::Dialer;
 use crate::tx_relay::{IsolatedLap, MempoolHub};
-use crate::v2::write_v2_msg;
+use crate::v2::{read_v2_frame, write_v2_msg, V2Reader, V2Writer};
 use crate::{NetAddr, OnlyNet};
 use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::Magic;
 use bitcoin::Transaction;
 use std::net::SocketAddr;
@@ -79,7 +82,8 @@ pub async fn send_tx_isolated_timed(
     let their = target
         .socket_addr()
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], target.port())));
-    let (_ver, _reader, mut writer, _wire, tcp_shutdown) = connect_and_handshake_timed(
+    let deadline = tokio::time::Instant::now() + limit;
+    let (_ver, mut reader, mut writer, _wire, tcp_shutdown) = connect_and_handshake_timed(
         limit,
         stream,
         magic,
@@ -91,8 +95,35 @@ pub async fn send_tx_isolated_timed(
         HandshakePolicy::private_broadcast(),
     )
     .await?;
-    write_v2_msg(&mut writer, NetworkMessage::Tx(tx)).await?;
+    let handed_over =
+        tokio::time::timeout_at(deadline, hand_over_tx(&mut reader, &mut writer, magic, tx)).await;
     let _ = tcp_shutdown.shutdown(std::net::Shutdown::Both);
+    handed_over.map_err(|_| NetError::Timeout)?
+}
+
+async fn hand_over_tx(
+    reader: &mut V2Reader,
+    writer: &mut V2Writer,
+    magic: Magic,
+    tx: Transaction,
+) -> Result<(), NetError> {
+    let txid = tx.compute_txid();
+    write_v2_msg(
+        writer,
+        NetworkMessage::Inv(vec![Inventory::Transaction(txid)]),
+    )
+    .await?;
+    loop {
+        if let NetworkMessage::GetData(asked) = next_message(reader, magic).await? {
+            if asked.iter().any(|inv| asks_for(inv, txid)) {
+                break;
+            }
+        }
+    }
+    write_v2_msg(writer, NetworkMessage::Tx(tx)).await?;
+    let nonce = rand_nonce();
+    write_v2_msg(writer, NetworkMessage::Ping(nonce)).await?;
+    while next_message(reader, magic).await? != NetworkMessage::Pong(nonce) {}
     Ok(())
 }
 
@@ -103,6 +134,15 @@ pub enum IsolatedBroadcast {
     NoTargets,
     /// Each target was attempted, or the tx left the mempool between dials.
     Finished,
+}
+
+fn asks_for(inv: &Inventory, txid: bitcoin::Txid) -> bool {
+    matches!(inv, Inventory::Transaction(t) | Inventory::WitnessTransaction(t) if *t == txid)
+}
+
+async fn next_message(reader: &mut V2Reader, magic: Magic) -> Result<NetworkMessage, NetError> {
+    let frame = read_v2_frame(reader, magic).await?;
+    Ok(decode_framed_offload(frame).await?.into_payload())
 }
 
 /// Send `tx` one-shot to each target while `in_pool()` holds. It is asked
