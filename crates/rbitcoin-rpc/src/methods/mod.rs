@@ -1081,8 +1081,8 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     (
         "decodescript",
         "decodescript hexstring\n\
-         asm, type, hex, address when standard, and desc. No p2sh wrap, \
-         segwit wrap, or miniscript.",
+         asm, desc, type, address when standard, and Core's p2sh and segwit \
+         wraps. segwit.desc infers wsh(multi(...)), not other miniscript.",
     ),
     (
         "validateaddress",

@@ -161,7 +161,7 @@ Per-method notes, auth, and the shindex matrix live in
 | Coin / MiniWallet (`gettxout`) | done |
 | Index / tips (`getindexinfo`, `getchaintips`, `waitforblock*`) | done (`txindex` = Class A reconstruct) |
 | Fee (`estimatesmartfee`) | done (**10-minute inclusion** — not Core historical) |
-| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done (node subset; official Core dialect scripts stay `rpc-dialect`) |
+| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done (node subset). Every RPC `asm` is Core `ScriptToAsmStr`, with sighash names on scriptSig signatures. `decodescript` prints Core's `p2sh` and `segwit` wraps; its `segwit.desc` infers `wsh(multi(...))` but no other miniscript, where Core prints `wsh(<miniscript>)` and rbitcoin prints `addr(...)`. `validateaddress` is the happy path. Official Core dialect scripts stay `rpc-dialect` |
 | Regtest `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` / `submitblock` / `setmocktime` | harness (`generate*` also on signet whose challenge is exactly `OP_TRUE`; `setmocktime` / `mockscheduler` stay regtest; `submitblock` is all networks) |
 | `invalidateblock` / `reconsiderblock` / `preciousblock` | done |
 | Mining template (`getblocktemplate`, `getmininginfo`, `prioritisetransaction`, `getmempoolcluster`) | done (no stratum / wallet keys; `getdeploymentinfo` does not list BIP9 `testdummy`) |

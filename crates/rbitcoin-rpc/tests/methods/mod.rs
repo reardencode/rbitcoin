@@ -256,8 +256,8 @@ fn decode_rpc_subset() {
     let script = dispatch(&ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
     assert_eq!(script["type"], json!("witness_v0_keyhash"));
     assert_eq!(script["address"], json!(p2wpkh.to_string()));
-    assert_eq!(script["hex"], json!(spk_hex));
-    assert!(script.get("p2sh").is_none());
+    assert!(script.get("hex").is_none(), "{script}");
+    assert!(script.get("p2sh").is_some(), "{script}");
     assert!(script.get("segwit").is_none());
 
     let op_true = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap();

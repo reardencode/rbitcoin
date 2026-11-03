@@ -3,6 +3,7 @@
 
 use super::{ctx_empty, ctx_regtest_hub, p2wpkh_regtest};
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
+use bitcoin::hashes::Hash;
 use bitcoin::{ScriptBuf, Transaction};
 use rbitcoin_rpc::methods::*;
 use serde_json::{json, Value};
@@ -185,5 +186,150 @@ fn chain_rpcs_print_core_asm() {
     assert_eq!(raw["vout"][0]["scriptPubKey"]["asm"], want, "{raw}");
     let coin = dispatch(&ctx, "gettxout", vec![txid, json!(0)]).unwrap();
     assert_eq!(coin["scriptPubKey"]["asm"], want, "{coin}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `test/functional/data/rpc_decodescript.json`, plus P2PK, bare multisig,
+/// and `OP_NOP10` objects built with Core's functional test framework.
+const CORE_DECODESCRIPT: &str = r#"[
+ ["5120eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", {
+   "asm": "1 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "address": "bcrt1pamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqz6nvlh",
+   "desc": "rawtr(eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)#jk7c6kys",
+   "type": "witness_v1_taproot"}],
+ ["5102eeee", {
+   "asm": "1 -28398",
+   "address": "bcrt1pamhqk96edn",
+   "desc": "addr(bcrt1pamhqk96edn)#vkh8uj5a",
+   "type": "witness_unknown"}],
+ ["0020eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", {
+   "asm": "0 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "address": "bcrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqgdn98t",
+   "desc": "addr(bcrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqgdn98t)#afaecevx",
+   "type": "witness_v0_scripthash",
+   "p2sh": "2MwGk8mw1GBP6U9D5X8gTvgvXpuknmAK3fo"}],
+ ["a914eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee87", {
+   "asm": "OP_HASH160 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee OP_EQUAL",
+   "address": "2NF2b3KS8xXb9XHvbRMXdZh8s5g92rUZHtp",
+   "desc": "addr(2NF2b3KS8xXb9XHvbRMXdZh8s5g92rUZHtp)#ywfcpmh9",
+   "type": "scripthash"}],
+ ["6a00", {"asm": "OP_RETURN 0", "desc": "raw(6a00)#ncfmkl43", "type": "nulldata"}],
+ ["6aee", {"asm": "OP_RETURN OP_UNKNOWN", "desc": "raw(6aee)#vsyzgqdt", "type": "nonstandard"}],
+ ["6a02ee", {"asm": "OP_RETURN [error]", "desc": "raw(6a02ee)#gvdwnlzl", "type": "nonstandard"}],
+ ["02eeee", {
+   "asm": "-28398",
+   "desc": "raw(02eeee)#5xzck7pr",
+   "type": "nonstandard",
+   "p2sh": "2N34iiGoUUkVSPiaaTFpJjB1FR9TXQu3PGM",
+   "segwit": {
+     "asm": "0 96c2368fc30514a438a8bd909f93c49a1549d77198ccbdb792043b666cb24f42",
+     "desc": "addr(bcrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapqk795l5)#5akkdska",
+     "hex": "002096c2368fc30514a438a8bd909f93c49a1549d77198ccbdb792043b666cb24f42",
+     "address": "bcrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapqk795l5",
+     "type": "witness_v0_scripthash",
+     "p2sh-segwit": "2MtoejEictTQ6XtmHYzoYttt35Ec6krqFKN"}}],
+ ["ba", {"asm": "OP_CHECKSIGADD", "desc": "raw(ba)#yy0eg44l", "type": "nonstandard"}],
+ ["50", {"asm": "OP_RESERVED", "desc": "raw(50)#a7tu03xf", "type": "nonstandard"}],
+ ["2103b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2ac", {
+   "asm": "03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2 OP_CHECKSIG",
+   "desc": "pk(03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2)#h9zd5h4y",
+   "type": "pubkey",
+   "p2sh": "2NGPSb9XrNbqMS2rhEPezerzXVsnMk2e5oW",
+   "segwit": {
+     "asm": "0 5dd1d3a048119c27b28293056724d9522f26d945",
+     "hex": "00145dd1d3a048119c27b28293056724d9522f26d945",
+     "type": "witness_v0_keyhash",
+     "address": "bcrt1qthga8gzgzxwz0v5zjvzkwfxe2ghjdk2997w9up",
+     "desc": "addr(bcrt1qthga8gzgzxwz0v5zjvzkwfxe2ghjdk2997w9up)#4szxctnl",
+     "p2sh-segwit": "2MszFsCB9jCc65ZyLXAXjXN3nq6yhKJEcqQ"}}],
+ ["522103b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb22103b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb22103b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb253ae", {
+   "asm": "2 03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2 03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2 03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2 3 OP_CHECKMULTISIG",
+   "desc": "multi(2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2)#0urjxu43",
+   "type": "multisig",
+   "p2sh": "2MwtFW8ZnW2hgeEnW8pos6dNgqSHroF8v7R",
+   "segwit": {
+     "asm": "0 0f320decca000221b611117448134c78dd220cd22384ac80025b59e43c8698e8",
+     "hex": "00200f320decca000221b611117448134c78dd220cd22384ac80025b59e43c8698e8",
+     "type": "witness_v0_scripthash",
+     "address": "bcrt1qpueqmmx2qqpzrds3z96ysy6v0rwjyrxjywz2eqqztdv7g0yxnr5q7ckd78",
+     "desc": "wsh(multi(2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2,03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2))#lkvk0320",
+     "p2sh-segwit": "2MyAJNJ4QTTwnM9TBPmKyD2XzwQGNhqBDCc"}}],
+ ["b9", {
+   "asm": "OP_NOP10",
+   "desc": "raw(b9)#jlu6s349",
+   "type": "nonstandard",
+   "p2sh": "2MuCdHGuWznJtBSHpthmADdDJyQ63RRMr2s",
+   "segwit": {
+     "asm": "0 04d6c0c946716aac894fc1653383543a91faab601302cf011607c82f06304651",
+     "hex": "002004d6c0c946716aac894fc1653383543a91faab601302cf011607c82f06304651",
+     "type": "witness_v0_scripthash",
+     "address": "bcrt1qqntvpj2xw942ez20c9jn8q6582gl42mqzvpv7qgkqlyz7p3sgegsu6atg4",
+     "desc": "addr(bcrt1qqntvpj2xw942ez20c9jn8q6582gl42mqzvpv7qgkqlyz7p3sgegsu6atg4)#25ekxhmt",
+     "p2sh-segwit": "2N8ZVEkbDkfzjdiqfmFu8o7rtMUr238CpKg"}}]
+]"#;
+
+#[test]
+fn decodescript_objects_match_core() {
+    let rows: Vec<(String, Value)> = serde_json::from_str(CORE_DECODESCRIPT).unwrap();
+    let (ctx, dir) = ctx_empty();
+    for (hex, want) in &rows {
+        assert_eq!(&decode_script(&ctx, hex), want, "{hex}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn decodescript_wraps_only_where_core_does() {
+    let push_key = format!("21{KEY}");
+    let uncompressed = "04b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb25e01fc8fde47c96c98a4f3a8123e33a38a50cf9025cc8c4494a518f991792bb7";
+    let rows: Vec<(String, bool, bool)> = vec![
+        (format!("41{uncompressed}ac"), true, false),
+        (format!("52{push_key}41{uncompressed}52ae"), true, false),
+        (format!("0014{KEY_HASH}"), true, false),
+        (format!("0020{}", "d8".repeat(32)), true, false),
+        (format!("a914{KEY_HASH}87"), false, false),
+        (format!("5120{}", "01".repeat(32)), false, false),
+        ("51024e73".into(), false, false),
+        ("7e".into(), false, false),
+        ("bb".into(), false, false),
+        (format!("4d0902{}", "ab".repeat(521)), false, false),
+        (format!("4d0802{}75", "ab".repeat(520)), true, true),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, p2sh, segwit) in &rows {
+        let got = decode_script(&ctx, hex);
+        assert_eq!(got.get("p2sh").is_some(), *p2sh, "{hex} {got}");
+        assert_eq!(got.get("segwit").is_some(), *segwit, "{hex} {got}");
+        assert!(got.get("hex").is_none(), "{got}");
+    }
+
+    let p2pkh = decode_script(&ctx, &format!("76a914{KEY_HASH}88ac"));
+    assert_eq!(
+        p2pkh["segwit"]["type"],
+        json!("witness_v0_keyhash"),
+        "{p2pkh}"
+    );
+    assert_eq!(p2pkh["segwit"]["asm"], json!(format!("0 {KEY_HASH}")));
+
+    let cltv = format!("63{push_key}ad670320a107b17568{push_key}ac");
+    let cltv_hash =
+        bitcoin::hashes::sha256::Hash::hash(&rbitcoin_primitives::hex_decode(&cltv).unwrap());
+    let got = decode_script(&ctx, &cltv);
+    assert_eq!(
+        got["segwit"]["asm"],
+        json!(format!("0 {cltv_hash:x}")),
+        "{got}"
+    );
+
+    let anchor = decode_script(&ctx, "51024e73");
+    assert_eq!(anchor["address"], json!("bcrt1pfeesnyr2tx"));
+
+    let src = "5b21020e0338c96a8870479f2396c373cc7696ba124e8635d41b0ea581112b678172612102675333a4e4b8fb51d9d4e22fa5a8eaced3fdac8a8cbf9be8c030f75712e6af992102896807d54bc55c24981f24a453c60ad3e8993d693732288068a23df3d9f50d4821029e51a5ef5db3137051de8323b001749932f2ff0d34c82e96a2c2461de96ae56c2102a4e1a9638d46923272c266631d94d36bdb03a64ee0e14c7518e49d2f29bc401021031c41fdbcebe17bec8d49816e00ca1b5ac34766b91c9f2ac37d39c63e5e008afb2103079e252e85abffd3c401a69b087e590a9b86f33f574f08129ccbd3521ecf516b2103111cf405b627e22135b3b3733a4a34aa5723fb0f58379a16d32861bf576b0ec2210318f331b3e5d38156da6633b31929c5b220349859cc9ca3d33fb4e68aa08401742103230dae6b4ac93480aeab26d000841298e3b8f6157028e47b0897c1e025165de121035abff4281ff00660f99ab27bb53e6b33689c2cd8dcd364bc3c90ca5aea0d71a62103bd45cddfacf2083b14310ae4a84e25de61e451637346325222747b157446614c2103cc297026b06c71cbfa52089149157b5ff23de027ac5ab781800a578192d175462103d3bde5d63bdb3a6379b461be64dad45eabff42f758543a9645afd42f6d4248282103ed1e8d5109c9ed66f7941bc53cc71137baa76d50d274bda8d5e8ffbd6e61fe9a5fae736402c00fb269522103aab896d53a8e7d6433137bbba940f9c521e085dd07e60994579b64a6d992cf79210291b7d0b1b692f8f524516ed950872e5da10fb1b808b5a526dedc6fed1cf29807210386aa9372fbab374593466bc5451dc59954e90787f08060964d95c87ef34ca5bb53ae68";
+    let over_520 = decode_script(&ctx, src);
+    assert_eq!(
+        over_520["p2sh"],
+        json!("2NEx4dVbLBLFmKHuyXhjbJpFxZm2dqTAPed"),
+        "a redeem script over 520 bytes still gets Core's p2sh"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

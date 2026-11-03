@@ -60,51 +60,90 @@ pub fn rpc_btc_network(n: Network) -> BtcNetwork {
     }
 }
 
-pub fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Value {
+/// Core `ScriptToUniv` with `hex`.
+pub fn script_pubkey_json(script: &bitcoin::Script, network: BtcNetwork) -> Value {
+    let mut obj = script_json(script, network);
+    obj["hex"] = json!(rbitcoin_primitives::hex_encode(script.as_bytes()));
+    obj
+}
+
+/// Core `ScriptToUniv` without `hex`, as `decodescript` prints its input.
+pub fn script_json(script: &bitcoin::Script, network: BtcNetwork) -> Value {
     let mut obj = json!({
-        "hex": rbitcoin_primitives::hex_encode(script.as_bytes() ),
         "asm": script_asm(script, SighashAsm::Hex),
-        "type": script_core_type(script),
+        "type": TxoutType::of(script).name(),
         "desc": infer_descriptor(script, network),
     });
     if let Ok(addr) = Address::from_script(script, network) {
-        if let Some(m) = obj.as_object_mut() {
-            m.insert("address".into(), json!(addr.to_string()));
-        }
+        obj["address"] = json!(addr.to_string());
     }
     obj
 }
 
-/// Core `decoderawtransaction` / `decodescript` `type` strings.
-pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
-    if script.is_p2pkh() {
-        "pubkeyhash"
-    } else if script.is_p2sh() {
-        "scripthash"
-    } else if script.is_p2wpkh() {
-        "witness_v0_keyhash"
-    } else if script.is_p2wsh() {
-        "witness_v0_scripthash"
-    } else if script.is_p2tr() {
-        "witness_v1_taproot"
-    } else if is_p2anchor(script) {
-        "anchor"
-    } else if let Some(version) = script.witness_version() {
-        if version == bitcoin::WitnessVersion::V0 {
-            "nonstandard"
+/// Core `TxoutType`, as `Solver` picks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxoutType {
+    NonStandard,
+    PubKey,
+    PubKeyHash,
+    ScriptHash,
+    Multisig,
+    NullData,
+    WitnessV0KeyHash,
+    WitnessV0ScriptHash,
+    WitnessV1Taproot,
+    WitnessUnknown,
+    Anchor,
+}
+
+impl TxoutType {
+    pub fn of(script: &bitcoin::Script) -> Self {
+        if script.is_p2pkh() {
+            Self::PubKeyHash
+        } else if script.is_p2sh() {
+            Self::ScriptHash
+        } else if script.is_p2wpkh() {
+            Self::WitnessV0KeyHash
+        } else if script.is_p2wsh() {
+            Self::WitnessV0ScriptHash
+        } else if script.is_p2tr() {
+            Self::WitnessV1Taproot
+        } else if is_p2anchor(script) {
+            Self::Anchor
+        } else if let Some(version) = script.witness_version() {
+            if version == bitcoin::WitnessVersion::V0 {
+                Self::NonStandard
+            } else {
+                Self::WitnessUnknown
+            }
+        } else if script.is_op_return()
+            && bitcoin::Script::from_bytes(&script.as_bytes()[1..]).is_push_only()
+        {
+            Self::NullData
+        } else if p2pk_key(script).is_some() {
+            Self::PubKey
+        } else if bare_multisig(script).is_some() {
+            Self::Multisig
         } else {
-            "witness_unknown"
+            Self::NonStandard
         }
-    } else if script.is_op_return()
-        && bitcoin::Script::from_bytes(&script.as_bytes()[1..]).is_push_only()
-    {
-        "nulldata"
-    } else if p2pk_key(script).is_some() {
-        "pubkey"
-    } else if bare_multisig(script).is_some() {
-        "multisig"
-    } else {
-        "nonstandard"
+    }
+
+    /// Core `GetTxnOutputType`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NonStandard => "nonstandard",
+            Self::PubKey => "pubkey",
+            Self::PubKeyHash => "pubkeyhash",
+            Self::ScriptHash => "scripthash",
+            Self::Multisig => "multisig",
+            Self::NullData => "nulldata",
+            Self::WitnessV0KeyHash => "witness_v0_keyhash",
+            Self::WitnessV0ScriptHash => "witness_v0_scripthash",
+            Self::WitnessV1Taproot => "witness_v1_taproot",
+            Self::WitnessUnknown => "witness_unknown",
+            Self::Anchor => "anchor",
+        }
     }
 }
 

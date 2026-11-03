@@ -884,7 +884,7 @@ status = "run"
 name = "rpc_decodescript.py"
 status = "skip"
 reason = "rpc-dialect"
-analog = "node decodescript/decoderawtransaction subset (no p2sh/segwit wrap, desc, Core asm)"
+analog = "node decodescript/decoderawtransaction; segwit.desc infers no miniscript beyond multi"
 
 [[test]]
 name = "rpc_deprecated.py"
