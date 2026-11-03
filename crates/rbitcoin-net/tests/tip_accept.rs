@@ -69,6 +69,43 @@ fn wait_idle_blocks_until_job_finishes() {
     wait_idle();
 }
 
+/// `LanePermit::take` drains an in-flight job. That drain must not publish
+/// `subscribe_wait_seen`: the waiter tests treat that publication as proof
+/// their own wait has parked.
+#[test]
+fn lane_permit_take_does_not_publish_wait_seen() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        arm_lane_oneshot();
+        run_on_tip_accept(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    started_rx.recv().unwrap();
+    let seen = subscribe_wait_seen();
+    let (id_tx, id_rx) = mpsc::channel();
+    let drainer = thread::spawn(move || {
+        id_tx.send(()).unwrap();
+        let _permit = LanePermit::take();
+    });
+    id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("drainer started");
+    let noted = seen.recv_timeout(Duration::from_millis(400));
+    assert!(
+        noted.is_err(),
+        "LanePermit::take published wait_seen while draining the running job"
+    );
+    release_tx.send(()).unwrap();
+    drainer.join().expect("drain");
+    worker.join().expect("job");
+}
+
 #[test]
 fn wait_current_job_returns_while_second_job_queued() {
     use std::sync::mpsc;
