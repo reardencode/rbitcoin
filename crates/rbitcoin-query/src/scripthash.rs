@@ -54,6 +54,9 @@ pub struct ScriptHashOutpoint {
     pub txid: [u8; 32],
     pub value: i64,
     pub create_height: u32,
+    /// Core `CScript::IsUnspendable`. Never a coin: history keeps the tx;
+    /// balance, listunspent, and funded stats skip the output.
+    pub unspendable: bool,
 }
 
 /// Electrum `blockchain.scripthash.get_history` row.
@@ -411,6 +414,7 @@ impl ShJoinSlot {
                     txid: [0; 32],
                     value: 0,
                     create_height: 0,
+                    unspendable: false,
                 },
                 spent: false,
                 spender_fks: vec![Fk::NULL; n],
@@ -519,6 +523,7 @@ impl Query {
                     txid,
                     value: o.value as i64,
                     create_height: height,
+                    unspendable: rbitcoin_consensus::policy::is_unspendable(&o.script),
                 });
             }
         }
@@ -651,19 +656,8 @@ impl Query {
         #[cfg(not(debug_assertions))]
         let _admit = admit;
         let t_pages = std::time::Instant::now();
-        let entries = self.store.scripthash.create_fks(scripthash)?;
+        let mut fks = self.strong_sh_creates(scripthash, view)?;
         let pages_us = t_pages.elapsed().as_micros();
-        let mut fks = Vec::new();
-        for fk in entries {
-            if self.confirmed_strong_in(fk, view)? {
-                fks.push(fk);
-            }
-        }
-        for fk in self.pending_sh_create_fks(scripthash) {
-            if self.confirmed_strong_in(fk, view)? && !fks.contains(&fk) {
-                fks.push(fk);
-            }
-        }
         if let Some(to) = to_height {
             let heights = self.store.tx_height_get_batch(&fks)?;
             if heights.len() != fks.len() {
@@ -907,7 +901,7 @@ impl Query {
     ) -> Result<ScriptHashBalance, QueryError> {
         let mut confirmed = 0i64;
         for rec in recs {
-            if !self.join_out_spent(rec)? {
+            if !rec.out.unspendable && !self.join_out_spent(rec)? {
                 confirmed = confirmed.saturating_add(rec.out.value);
             }
         }
@@ -924,7 +918,7 @@ impl Query {
     ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
         let mut out = Vec::new();
         for rec in recs {
-            if self.join_out_spent(rec)? {
+            if rec.out.unspendable || self.join_out_spent(rec)? {
                 continue;
             }
             out.push(ScriptHashUtxo {
@@ -950,9 +944,12 @@ impl Query {
         let mut spent_sum = 0i64;
         let mut txs: HashSet<Fk> = HashSet::new();
         for rec in recs {
+            txs.insert(rec.out.create_tx_fk);
+            if rec.out.unspendable {
+                continue;
+            }
             funded_n = funded_n.saturating_add(1);
             funded_sum = funded_sum.saturating_add(rec.out.value);
-            txs.insert(rec.out.create_tx_fk);
             if self.join_out_spent(rec)? {
                 spent_n = spent_n.saturating_add(1);
                 spent_sum = spent_sum.saturating_add(rec.out.value);
@@ -1263,15 +1260,18 @@ impl Query {
         }))
     }
 
+    /// Best-chain creates of `scripthash` at `view`, oldest fk first,
+    /// without the genesis coinbase ([`Query::set_genesis_coinbase_txid`]).
     #[doc(hidden)]
     pub fn strong_sh_creates(
         &self,
         scripthash: &[u8; 32],
         view: &ChainView,
     ) -> Result<Vec<Fk>, QueryError> {
+        let genesis = self.genesis_coinbase_fk()?;
         let mut fks = Vec::new();
         for fk in self.store.scripthash.create_fks(scripthash)? {
-            if self.confirmed_strong_in(fk, view)? {
+            if Some(fk) != genesis && self.confirmed_strong_in(fk, view)? {
                 fks.push(fk);
             }
         }
@@ -1284,6 +1284,21 @@ impl Query {
             }
         }
         Ok(fks)
+    }
+
+    /// The stored genesis coinbase, once [`Query::set_genesis_coinbase_txid`]
+    /// named it and the genesis block is stored.
+    fn genesis_coinbase_fk(&self) -> Result<Option<Fk>, QueryError> {
+        if let Some(fk) = self.genesis_coinbase_fk.get() {
+            return Ok(Some(*fk));
+        }
+        let Some(txid) = self.genesis_coinbase_txid.get() else {
+            return Ok(None);
+        };
+        let Some((fk, 0)) = self.store.get_fk_by_txid_tip_height(txid)? else {
+            return Ok(None);
+        };
+        Ok(Some(*self.genesis_coinbase_fk.get_or_init(|| fk)))
     }
 
     /// See [`NewestWindow`].

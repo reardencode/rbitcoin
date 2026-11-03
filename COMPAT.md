@@ -51,6 +51,14 @@ joins with more than N creates: Esplora HTTP **503**, Electrum JSON-RPC error
 `--heavy-sh-creates N` (default **10000**; **0** = off) runs unpaged joins with
 more than N creates one at a time across the node; lighter joins stay parallel.
 
+**Coins only.** Scripthash balance, Electrum `listunspent`, Esplora `/utxo`,
+and the funded and spent counts in Esplora `chain_stats` and `mempool_stats`
+skip an output Core never adds to the coins view: a script that starts with
+`OP_RETURN` (the witness commitment too), or one longer than 10,000 bytes.
+The transaction that paid it stays in that script's history and `tx_count`.
+The genesis coinbase is in no scripthash view: no history row, balance, or
+UTXO. It cannot be spent, and Electrum height `0` means mempool.
+
 `GET …/txs/summary` is a **dialect** route (not Blockstream Esplora `API.md`).
 Shape and owner row: [Esplora REST surface](#esplora-rest-surface).
 

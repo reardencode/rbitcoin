@@ -1989,6 +1989,7 @@ pub fn apply_startup_index_mode(
     query.set_sh_index_enabled(config.shindex);
     query.set_sh_force_rebuild(config.sh_force_rebuild);
     query.set_block_filter_index(config.block_filter_index)?;
+    query.set_genesis_coinbase_txid(config.chain_params()?.genesis_coinbase_txid);
     query.set_max_sh_creates(config.max_sh_creates);
     query.set_heavy_sh_creates(config.heavy_sh_creates);
     query.set_seqsigwit_ram_threshold_bytes(config.prune_seqsigwit_ram_threshold_bytes)?;

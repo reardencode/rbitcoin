@@ -1076,3 +1076,71 @@ fn unconfirmed_until_sh_visible() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A pooled `OP_RETURN` output is never a coin. listunspent, the
+/// unconfirmed balance, and the mempool funded stats leave it out. The tx
+/// still counts once in that script's mempool stats.
+#[test]
+fn pooled_unspendable_output_is_not_unspent() {
+    const BURN: u64 = 10_000;
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let maturity = params.coinbase_maturity();
+    let (_tip, _tip_time, cbs) = rbitcoin_query::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        maturity + 1,
+        1,
+    );
+    let q = Arc::new(q);
+    let hub = MempoolHub::open(dir.join("mempool"), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    let burn_script = vec![0x6a, 0x01, 0x02];
+    let mut tx = spend_coinbase(cbs[0], 1_000 + BURN);
+    tx.output.push(TxOut {
+        value: Amount::from_sat(BURN),
+        script_pubkey: ScriptBuf::from_bytes(burn_script.clone()),
+    });
+    hub.accept_tx(&tx).expect("accept burn");
+
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut header_sub = false;
+    let mut sh_subs = HashSet::new();
+    let hex = electrum_scripthash_hex(&burn_script);
+    let mut call = |method: &str| {
+        dispatch(
+            method,
+            &json!([hex]),
+            &q,
+            &cfg,
+            &params,
+            Some(&hub),
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap()
+    };
+    assert_eq!(call("blockchain.scripthash.listunspent"), json!([]));
+    assert_eq!(
+        call("blockchain.scripthash.get_balance"),
+        json!({"confirmed": 0, "unconfirmed": 0})
+    );
+    assert_eq!(
+        call("blockchain.scripthash.get_mempool")
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "the burn tx stays in that script's mempool history"
+    );
+    let sh = rbitcoin_store::script_hash(&burn_script);
+    let stats = rbitcoin_electrum::scripthash_mempool_stats_slot(&q, &hub, &sh, &mut None).unwrap();
+    assert_eq!(stats.tx_count, 1);
+    assert_eq!((stats.funded_txo_count, stats.funded_txo_sum), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}

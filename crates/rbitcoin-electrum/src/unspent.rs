@@ -58,7 +58,7 @@ pub fn overlay_mempool_utxos(
             continue;
         };
         for (vout, o) in tx.output.iter().enumerate() {
-            if script_hash(o.script_pubkey.as_bytes()) != *sh {
+            if !pays_coin_to(o, sh) {
                 continue;
             }
             let op = OutPoint {
@@ -77,6 +77,12 @@ pub fn overlay_mempool_utxos(
             });
         }
     }
+}
+
+/// `o` pays `sh` and is a coin (not Core `CScript::IsUnspendable`).
+fn pays_coin_to(o: &bitcoin::TxOut, sh: &[u8; 32]) -> bool {
+    let script = o.script_pubkey.as_bytes();
+    script_hash(script) == *sh && !rbitcoin_consensus::policy::is_unspendable(script)
 }
 
 /// Esplora `mempool_stats` for a scripthash (same funding/spend loops as listunspent).
@@ -124,7 +130,7 @@ pub fn scripthash_mempool_stats_slot(
             continue;
         };
         for (vout, o) in tx.output.iter().enumerate() {
-            if script_hash(o.script_pubkey.as_bytes()) != *sh {
+            if !pays_coin_to(o, sh) {
                 continue;
             }
             let op = OutPoint {
