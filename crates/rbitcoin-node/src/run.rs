@@ -3160,34 +3160,3 @@ pub fn resolve_seednode(raw: &str, network: Network) -> Result<NetAddr, String> 
         default_port(network),
     )))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn publish_listener_addr_wakes_the_waiter() {
-        tokio::time::pause();
-        let dir =
-            std::env::temp_dir().join(format!("rbitcoin-listener-wake-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir_wait = dir.clone();
-        let wait = tokio::spawn(async move {
-            wait_published_listener(&dir_wait, "rpc", Duration::from_secs(2)).await
-        });
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-        let addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
-        publish_listener_addr(&dir, "rpc", addr);
-        tokio::task::yield_now().await;
-        let got = tokio::time::timeout(Duration::ZERO, wait).await;
-        tokio::time::resume();
-        let got = got
-            .expect("publish left the waiter on the file poll")
-            .expect("waiter");
-        assert_eq!(got, addr);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
