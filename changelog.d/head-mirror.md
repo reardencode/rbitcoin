@@ -1,16 +1,5 @@
 Changed
 
-- **IBD looks up txids through a map of the open `tx.head`.** The open
-  segment's slot file is read through a read-only `MAP_SHARED` view, so a
-  probe no longer reads a 4 KiB page per key. Each slot also carries a
-  fingerprint of its txid in the spare bits of the 4-byte entry (7 bits at
-  the 25-bit default, and none when the width is 32), so most
-  foreign slots on a probe chain are skipped before the identity read of
-  `txid.body`. Signet IBD on the Mac mini ran about 20% faster. The open
-  segment's uring page-probe stream is gone; sealed segments are untouched.
-- **`tx.head` meta is v2.** An existing head opens as before; its open
-  segment gets fingerprints written from `txid.body` on that first open, once,
-  then the meta records it as tagged. A downgrade to a binary that expects
-  meta v1 rebuilds `tx.head` from Class A.
-- **`tx.head` slots are 4 bytes only.** The 8-byte entry width (bits 33 and
-  34) is removed; `RBITCOIN_TX_HEAD_BITS` tops out at 32.
+- **Transaction-id lookup during initial download reads the open `tx.head` segment from a shared memory map.** A probe no longer reads a 4 KiB page per key. Each slot also stores a short fingerprint of the id, so most misses skip the full id read. Signet initial download on a Mac mini ran about 20% faster. Sealed segments are unchanged.
+- **`tx.head` metadata is version 2.** An existing head opens as before. The first open writes fingerprints into the open segment and records that. A downgrade to a binary that expects version 1 rebuilds `tx.head` from the chain data.
+- **`tx.head` slots are 4 bytes.** The 8-byte width is gone. `RBITCOIN_TX_HEAD_BITS` cannot be set above 32.

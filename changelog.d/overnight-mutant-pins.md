@@ -1,5 +1,3 @@
-Changed
+Fixed
 
-- Overnight missed mutants in confirm, logging, and the mempool are pinned or removed where the operator could not change a block, a peer message, or a reopened pool.
-- Confirm progress, parent checks, and reject rewinds are pinned on the paths the confirm thread calls. Mempool compaction uses the dead-slot quarter, worst-chunk order keeps the earlier tied rate, eviction stops when a slot is free, and a package that spends a later txid is not topological.
-- API-log truncation uses the standard char boundary, so a cut in the middle of a character cannot spin.
+- **An API log line is cut on a character boundary.** A cut through the middle of a character no longer spins.

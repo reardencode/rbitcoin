@@ -1,3 +1,3 @@
 Changed
 
-- **Impossible states are no longer a second success path.** Output amounts are `u64` after decode, input parents are an enum, and index mode, confirm reject, fuse filters, and txstat stamps fail closed when a promised fact is missing.
+- **A missing fact is no longer treated as success, or as the peer's fault.** Output amounts stay unsigned after they are decoded. A confirm or index step that was promised a row and does not have it fails that step. It does not skip the row, zero it, or blame the peer.

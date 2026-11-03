@@ -1,3 +1,3 @@
-### Fixed
+Fixed
 
-- Health metrics and `getblockchaininfo` now include IBD's locally accepted header walk, including look-ahead headers and restored checkpoints. Header height no longer falls back to the validated block tip during catch-up, incorrectly reporting verification progress as complete. Peer-advertised horizons do not count as accepted headers. Both IBD and stored header tips use one reporting cache; invalidation and reconsideration recheck candidate ancestry off the scrape path, without permanently silencing unrelated valid walks.
+- **Header height during catch-up is the headers this node accepted.** Health metrics and `getblockchaininfo` count that walk, including headers ahead of the validated tip and checkpoints restored at startup. They no longer report the validated block tip as if verification were finished. A height a peer only advertised does not count. Invalidating or reconsidering a block rechecks that chain and does not silence a different valid walk.

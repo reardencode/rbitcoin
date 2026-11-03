@@ -1,7 +1,6 @@
 Changed
 
-- The IBD header thread is named `ibd-header` for the catch-up, then joined.
-- `rbtc-sh-wb` starts when `--sh-index` has the index in Tip. A durable head starts it before catch-up. Direct catch-up starts it only after materialize. It stays down when materialize is cancelled or fails.
-- IBD Class C barriers share one `rbtc-tip-flush` thread for the confirm engine. Tip mode still flushes that barrier on the tip-accept thread.
-- Heavy pure CPU leaves the blocking pool for `rbtc-scripts-*`: v2 encode when `encode_is_cpu_heavy`, compact short ids after the body is in hand, and Electrum or Esplora JSON of at least 4 KiB, including `GET /block-template`. Shorter encodes stay on the caller. Block templates still send `cache-control: no-store`. Block and header decode stay on the blocking pool.
-- A panic inside one of those script-pool jobs does not kill the worker. A dropped JSON encode is an error, not `{}`. A dropped compact-block encode is a peer protocol error, not a header fallback.
+- **The scripthash index thread starts when that index is at the tip.** With `--sh-index`, a head that is already durable starts it before catch-up. A catch-up that has to build the index starts it only after that build. It stays down when the build is cancelled or fails, and when the index is off.
+- **Heavy CPU leaves the blocking pool for the script workers (`rbtc-scripts-*`).** That is a heavy v2 encode, compact-block short ids after the body is in hand, and an Electrum or Esplora JSON body of at least 4 KiB, including `GET /block-template`. Shorter encodes stay on the caller. Block and header decode stay on the blocking pool. Block templates still send `cache-control: no-store`.
+- **A panic in one script job does not kill the worker.** A JSON encode that is dropped is an error, not `{}`. A compact-block encode that is dropped is a peer protocol error, not a fallback to headers.
+- **Initial-download tip flushes share one thread.** Tip mode still flushes on the thread that accepts the tip.

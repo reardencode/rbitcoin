@@ -1,15 +1,4 @@
 Fixed
 
-- **IBD header timeouts retain productive block connections without blocking
-  frontier handoff.** After repeated late header replies, prefer another header
-  peer without discarding useful outstanding downloads when the connection has
-  delivered a solicited block within 30 seconds and still has requests on the
-  wire. Recent block traffic permits two extra header misses; four consecutive
-  unanswered asks disconnect even a productive sole peer. A header reply resets
-  the miss count, and the first challenge miss does not change frontier ownership.
-  If later bodies are queued and another peer is connected, the retained
-  peer's request for the next required block no longer counts as active
-  coverage. Its request stays outstanding and its response remains usable;
-  the existing scheduler can ask an eligible alternative without waiting for
-  the body-queue racing threshold. Other downloads, header validation, body
-  budgets, and block-stall handling are unchanged.
+- **A peer that is still delivering blocks is not dropped for a late header reply.** After repeated late header replies, initial download prefers another header peer. It keeps the connection when that peer delivered a requested block within the last 30 seconds and still has requests on the wire. Recent block traffic allows two extra header misses. Four unanswered header asks in a row still disconnect that peer, even if it is the only one. A header reply clears the miss count. The first miss does not move which peer owns the download frontier.
+- **Keeping that peer does not block the next block.** If later bodies are queued and another peer is connected, the kept peer's request for the next block no longer counts as covering that height. The request stays out, and a reply can still be used. Another eligible peer can be asked without waiting for the usual racing limit. Other downloads, header checks, body budgets, and block stalls are unchanged.

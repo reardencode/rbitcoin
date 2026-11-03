@@ -1,4 +1,3 @@
 Changed
 
-- **One redial, SAM retry, and SV2 budget cooldown in every build.** A debug node used 250ms, 50ms, and 100ms. The binary now uses 2s, 500ms, and 1s, and it no longer warns about short test timings. A test that waits on one of those sleeps passes the short duration in, so the suite does not get slower. Shutdown still wakes on the stop signal and the 750ms grace.
-- **Unread test counters are gone.** `sync_default` had no caller. The resume-work path counter was incremented and never read.
+- **Redial, I2P retry, and the Stratum v2 budget wait use one interval in every build.** A debug node used 250 ms, 50 ms, and 100 ms. The binary now uses 2 seconds, 500 ms, and 1 second, and it no longer warns about short test timings. Shutdown still wakes on the stop signal and on the 750 ms grace.
