@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Refresh crates/rbitcoin-net/seeds/nodes_{main,test,signet}.txt from Bitcoin
-# Core's contrib/seeds at COMMIT. Core's generate-seeds.py builds
-# src/chainparamsseeds.h from these same files. rbitcoin has no testnet4.
+# Refresh crates/rbitcoin-net/seeds/nodes_{main,test,testnet4,signet}.txt from
+# Bitcoin Core's contrib/seeds at COMMIT. Core's generate-seeds.py builds
+# src/chainparamsseeds.h from these same files.
 # The DNS seed list is hand-copied from src/kernel/chainparams.cpp into
 # dns_seeds() in crates/rbitcoin-net/src/seeds.rs. It prints each file's
 # SHA-256; copy them into fixed_seeds_are_core_v32_tables.
@@ -19,7 +19,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$OUT"
-for net in main test signet; do
+for net in main test testnet4 signet; do
   src="contrib/seeds/nodes_$net.txt"
   curl -fsSL --proto '=https' \
     "https://raw.githubusercontent.com/bitcoin/bitcoin/$commit/$src" -o "$tmp/nodes_$net.txt"
@@ -30,4 +30,4 @@ for net in main test signet; do
   echo "$OUT/nodes_$net.txt: $(grep -cv '^#' "$OUT/nodes_$net.txt") lines"
 done
 echo "SHA-256 for fixed_seeds_are_core_v32_tables (crates/rbitcoin-net/tests/seeds.rs):"
-(cd "$OUT" && sha256sum nodes_main.txt nodes_test.txt nodes_signet.txt)
+(cd "$OUT" && sha256sum nodes_main.txt nodes_test.txt nodes_testnet4.txt nodes_signet.txt)

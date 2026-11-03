@@ -11,6 +11,7 @@ fn warn_rule_matches_core_chainparams() {
     assert_eq!(rule(Network::Mainnet), ((2016, 1815), 711_648));
     assert_eq!(rule(Network::Testnet), ((2016, 1512), 2_013_984));
     assert_eq!(rule(Network::Signet), ((2016, 1512), 0));
+    assert_eq!(rule(Network::Testnet4), ((2016, 1512), 0));
     assert_eq!(rule(Network::Regtest), ((144, 108), 0));
 }
 
