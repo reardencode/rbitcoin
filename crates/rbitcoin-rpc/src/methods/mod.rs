@@ -583,6 +583,11 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
             };
             Ok(getpeerinfo(ctx, hub))
         }
+        // Journey wait. Left off METHOD_LIST so `help` stays the operator catalog.
+        "outboundpass" => {
+            params.reject_unknown(&[])?;
+            Ok(outbound_pass(ctx))
+        }
         "ping" => {
             params.reject_unknown(&[])?;
             ping(ctx)

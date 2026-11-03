@@ -1637,6 +1637,12 @@ pub struct PeerHub {
     heartbeat_laps: AtomicU64,
     /// Outbound version nonces registered. Stays after the nonce is cleared.
     outbound_attempts: AtomicU64,
+    /// Refill and stale-tip passes. The wait, not the peer-row contract.
+    pass_skipped_pinned: AtomicU64,
+    pass_not_stagnant: AtomicU64,
+    pass_skipped_seeds_off: AtomicU64,
+    pass_rotated: AtomicU64,
+    pass_no_spare: AtomicU64,
     /// Count of sessions currently in headers-sync.
     pub headers_sync_peers: AtomicU64,
     /// Last inv hash that started headers sync with a not-yet-sync peer.
@@ -1691,6 +1697,29 @@ pub struct PeerHub {
     /// Per hub, not process-wide: one process runs many nodes in tests, and
     /// only the node whose filters reached the tip may advertise the bit.
     pub compact_filters: AtomicBool,
+}
+
+/// Why one outbound refill or stale-tip pass declined, or that it rotated
+/// one full-relay peer. The count is only the wait.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutboundPass {
+    SkippedPinned,
+    NotStagnant,
+    SkippedSeedsOff,
+    Rotated,
+    NoSpare,
+}
+
+/// Per-kind totals from [`PeerHub::note_outbound_pass`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutboundPassCounts {
+    pub skipped_pinned: u64,
+    pub not_stagnant: u64,
+    pub skipped_seeds_off: u64,
+    pub rotated: u64,
+    pub no_spare: u64,
 }
 
 #[doc(hidden)]
@@ -1768,6 +1797,11 @@ impl PeerHub {
             session_heartbeat: watch::channel(0).0,
             heartbeat_laps: AtomicU64::new(0),
             outbound_attempts: AtomicU64::new(0),
+            pass_skipped_pinned: AtomicU64::new(0),
+            pass_not_stagnant: AtomicU64::new(0),
+            pass_skipped_seeds_off: AtomicU64::new(0),
+            pass_rotated: AtomicU64::new(0),
+            pass_no_spare: AtomicU64::new(0),
             headers_sync_peers: AtomicU64::new(0),
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
@@ -2143,6 +2177,31 @@ impl PeerHub {
 
     pub(crate) fn note_heartbeat_lap(&self) {
         self.heartbeat_laps.fetch_add(1, Ordering::Release);
+    }
+
+    /// One refill or stale-tip decision. Callers in the tip-follow loop.
+    #[doc(hidden)]
+    pub fn note_outbound_pass(&self, kind: OutboundPass) {
+        let slot = match kind {
+            OutboundPass::SkippedPinned => &self.pass_skipped_pinned,
+            OutboundPass::NotStagnant => &self.pass_not_stagnant,
+            OutboundPass::SkippedSeedsOff => &self.pass_skipped_seeds_off,
+            OutboundPass::Rotated => &self.pass_rotated,
+            OutboundPass::NoSpare => &self.pass_no_spare,
+        };
+        slot.fetch_add(1, Ordering::Release);
+    }
+
+    /// How many times each outbound pass has been recorded.
+    #[doc(hidden)]
+    pub fn outbound_pass_counts(&self) -> OutboundPassCounts {
+        OutboundPassCounts {
+            skipped_pinned: self.pass_skipped_pinned.load(Ordering::Acquire),
+            not_stagnant: self.pass_not_stagnant.load(Ordering::Acquire),
+            skipped_seeds_off: self.pass_skipped_seeds_off.load(Ordering::Acquire),
+            rotated: self.pass_rotated.load(Ordering::Acquire),
+            no_spare: self.pass_no_spare.load(Ordering::Acquire),
+        }
     }
 
     pub fn clear_outbound_nonce(&self, nonce: u64) {
