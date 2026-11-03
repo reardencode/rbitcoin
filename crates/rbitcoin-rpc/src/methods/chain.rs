@@ -6,7 +6,6 @@ use rbitcoin_primitives::{median_time_past_times, Fk, Height, MedianWindow};
 
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 #[doc(hidden)]
 pub fn wait_chain_tip(ctx: &RpcContext) {
@@ -1489,8 +1488,6 @@ pub fn waitfornewblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
 
 /// `feature_shutdown.py`: stop must wake waiters so in-flight wait RPCs
 /// return the current tip instead of hanging until the connection drops.
-/// `feature_shutdown.py`: stop must wake waiters so in-flight wait RPCs
-/// return the current tip instead of hanging until the connection drops.
 pub fn wait_for_tip(
     ctx: &RpcContext,
     timeout_ms: u64,
@@ -1500,21 +1497,14 @@ pub fn wait_for_tip(
         let (hash, height) = tip_hash_height(ctx)?;
         return Ok(json!({ "hash": hash, "height": height }));
     }
-    let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        if ctx.stop.load(Ordering::SeqCst) {
-            let (hash, height) = tip_hash_height(ctx)?;
-            return Ok(json!({ "hash": hash, "height": height }));
-        }
-        let (hash, height) = tip_hash_height(ctx)?;
-        if pred(&hash, height) {
-            return Ok(json!({ "hash": hash, "height": height }));
-        }
-        if Instant::now() >= deadline {
-            return Ok(json!({ "hash": hash, "height": height }));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    super::block_on_rpc_wait(ctx, timeout_ms, || {
+        ctx.stop.load(Ordering::SeqCst)
+            || tip_hash_height(ctx)
+                .ok()
+                .is_some_and(|(hash, height)| pred(&hash, height))
+    });
+    let (hash, height) = tip_hash_height(ctx)?;
+    Ok(json!({ "hash": hash, "height": height }))
 }
 
 fn block_missing_or_misc(e: impl std::fmt::Display) -> Value {

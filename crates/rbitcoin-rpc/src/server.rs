@@ -130,7 +130,7 @@ pub struct RpcHandle {
     pub socket_path: Option<PathBuf>,
     pub token_path: PathBuf,
     pub auth: RpcAuth,
-    pub stop: Arc<AtomicBool>,
+    pub stop: Arc<crate::methods::StopFlag>,
     pub connections: Arc<AtomicU64>,
     pub initial_block_download: Arc<AtomicBool>,
     /// Shared with [`RpcContext::active`] so tip-follow can drain in-flight
@@ -198,7 +198,7 @@ pub async fn run_rpc(
         .map(|path| read_cookie_file(path, config.cookie_perms))
         .transpose()?;
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = crate::methods::StopFlag::new(false);
     let connections = Arc::new(AtomicU64::new(0));
     let ibd = Arc::new(AtomicBool::new(false));
     let active = Arc::new(std::sync::Mutex::new(crate::methods::RpcActive::default()));
@@ -455,7 +455,6 @@ pub async fn satisfy_http_wait(
         Some(v) => RpcParams::from_json(v).unwrap_or_else(RpcParams::empty),
         _ => RpcParams::empty(),
     };
-    let mut tips = ctx.chain.as_ref().map(|c| c.subscribe_tips());
     if method == "getblocktemplate" {
         let want = {
             let ctx = Arc::clone(ctx);
@@ -476,6 +475,7 @@ pub async fn satisfy_http_wait(
         let ctx = Arc::clone(ctx);
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(crate::methods::RPC_WAIT_TIMEOUT_MS);
+        let mut wake = crate::methods::RpcWake::arm(&ctx);
         loop {
             if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
                 return true;
@@ -492,13 +492,7 @@ pub async fn satisfy_http_wait(
             if ready || tokio::time::Instant::now() >= deadline {
                 return true;
             }
-            let slice = deadline
-                .saturating_duration_since(tokio::time::Instant::now())
-                .min(std::time::Duration::from_millis(50));
-            tokio::select! {
-                _ = tokio::time::sleep(slice) => {}
-                _ = recv_tip(&mut tips) => {}
-            }
+            wake.next(deadline).await;
         }
     }
     let timeout_ms = match method {
@@ -536,6 +530,7 @@ pub async fn satisfy_http_wait(
     let _active = crate::methods::ActiveCall::enter(&ctx.active, method);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let ctx = Arc::clone(ctx);
+    let mut wake = crate::methods::RpcWake::arm(&ctx);
     loop {
         if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
             return true;
@@ -559,12 +554,7 @@ pub async fn satisfy_http_wait(
         if ready || tokio::time::Instant::now() >= deadline {
             return true;
         }
-        let slice = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let slice = slice.min(std::time::Duration::from_millis(50));
-        tokio::select! {
-            _ = tokio::time::sleep(slice) => {}
-            _ = recv_tip(&mut tips) => {}
-        }
+        wake.next(deadline).await;
     }
 }
 
@@ -574,14 +564,6 @@ pub enum WaitKind {
     Block(String),
     Height(u32),
     New(String),
-}
-
-pub async fn recv_tip(tips: &mut Option<tokio::sync::broadcast::Receiver<rbitcoin_net::TipEvent>>) {
-    if let Some(rx) = tips.as_mut() {
-        let _ = rx.recv().await;
-    } else {
-        std::future::pending::<()>().await;
-    }
 }
 
 async fn read_http_body(req: Request) -> Result<Bytes, Response> {

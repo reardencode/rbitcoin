@@ -1032,6 +1032,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         rbitcoin_consensus::Milestone::NONE,
     );
     hub.ensure_genesis().unwrap();
+    let hub = Arc::new(hub);
     let query = Arc::clone(&hub.query);
     let cfg = RpcConfig {
         listen: Some("127.0.0.1:0".parse().unwrap()),
@@ -1050,7 +1051,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         blocksonly: false,
         package_dialect: false,
     };
-    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
         .unwrap();
     let (st, body) = post_raw(
@@ -1151,6 +1152,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         "stale getblocktemplate longpoll slept {:?}",
         t3.elapsed()
     );
+    published_tip_wakes_waitfornewblock(&handle, &hub).await;
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1167,6 +1169,7 @@ async fn long_poll_deadline_returns_the_tip() {
         rbitcoin_consensus::Milestone::NONE,
     );
     hub.ensure_genesis().unwrap();
+    let hub = Arc::new(hub);
     let query = Arc::clone(&hub.query);
     let cfg = RpcConfig {
         listen: Some("127.0.0.1:0".parse().unwrap()),
@@ -1185,7 +1188,7 @@ async fn long_poll_deadline_returns_the_tip() {
         blocksonly: false,
         package_dialect: false,
     };
-    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
         .unwrap();
     let missing = "00".repeat(32);
@@ -1252,7 +1255,7 @@ async fn long_poll_deadline_returns_the_tip() {
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(31)).await;
     tokio::time::resume();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
         "read timeout interrupted a complete RPC request"
@@ -1267,8 +1270,43 @@ async fn long_poll_deadline_returns_the_tip() {
         .unwrap();
     assert_eq!(reply["result"]["height"], 0, "{reply}");
     assert!(reply["error"].is_null(), "{reply}");
+    published_tip_wakes_waitfornewblock(&handle, &hub).await;
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn published_tip_wakes_waitfornewblock(handle: &RpcHandle, hub: &rbitcoin_net::ChainHub) {
+    let addr = tcp_addr(handle);
+    let auth = handle.auth.clone();
+    let waiter = tokio::spawn(async move {
+        post_rpc(addr, &auth, "waitfornewblock", serde_json::json!([5_000])).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let info = post_rpc(addr, &handle.auth, "getrpcinfo", serde_json::json!([]))
+                .await
+                .unwrap();
+            if info["result"]["active_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cmd| cmd["method"] == "waitfornewblock")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waitfornewblock parks before the tip");
+    hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), Vec::new())
+        .expect("publish a tip");
+    let body = tokio::time::timeout(std::time::Duration::from_millis(40), waiter)
+        .await
+        .expect("published tip wakes waitfornewblock within a few ms")
+        .unwrap()
+        .unwrap();
+    assert!(body["result"]["height"].as_u64().unwrap() >= 1, "{body}");
 }
 
 #[tokio::test]
@@ -1512,7 +1550,29 @@ async fn long_poll_does_not_hold_the_work_queue() {
         "POST / HTTP/1.1\r\nHost: rpc\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{{",
         auth_header(&handle.auth)
     ).as_bytes()).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let info = post_rpc(
+                tcp_addr(&handle),
+                &handle.auth,
+                "getrpcinfo",
+                serde_json::json!([]),
+            )
+            .await
+            .unwrap();
+            if info["result"]["active_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cmd| cmd["method"] == "waitfornewblock")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waitfornewblock parks");
     let (st, body) = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         post_raw(
@@ -2145,7 +2205,7 @@ fn http_wait_ctx() -> (
         mempool: None,
         network: Network::Regtest,
         start: Instant::now(),
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: rbitcoin_rpc::methods::StopFlag::new(false),
         connections: Arc::new(AtomicU64::new(0)),
         initial_block_download: Arc::new(AtomicBool::new(false)),
         subversion: "/rbitcoin:test/".into(),
@@ -2229,7 +2289,24 @@ async fn http_longpoll_logs_the_request_once_before_it_waits() {
         let req = req.clone();
         tokio::spawn(async move { satisfy_http_wait(&ctx, &req).await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let t0 = Instant::now();
+    loop {
+        let parked = ctx
+            .active
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|(method, _)| method == "getblocktemplate");
+        if parked {
+            break;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(2),
+            "getblocktemplate longpoll never parked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(!waiter.is_finished(), "the longpoll id has not changed");
     let mut lines = rbitcoin_log::take_logs();
     let needle = "ThreadRPCServer method=getblocktemplate";

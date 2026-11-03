@@ -37,7 +37,7 @@ fn open_ctx(dir: &TempDir) -> RpcContext {
         mempool: Some(mp),
         network: Network::Regtest,
         start: Instant::now() - Duration::from_secs(42),
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: rbitcoin_rpc::methods::StopFlag::new(false),
         connections: Arc::new(AtomicU64::new(2)),
         initial_block_download: Arc::new(AtomicBool::new(false)),
         subversion: rbitcoin_primitives::rbitcoin_subversion(
@@ -1372,7 +1372,7 @@ fn all_methods_callable_empty_or_error() {
         mempool: None,
         network: Network::Regtest,
         start: Instant::now(),
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: rbitcoin_rpc::methods::StopFlag::new(false),
         connections: Arc::new(AtomicU64::new(0)),
         initial_block_download: Arc::new(AtomicBool::new(true)),
         subversion: rbitcoin_primitives::rbitcoin_subversion(
@@ -1851,7 +1851,7 @@ fn regtest_ctx(
         mempool: Some(mp),
         network: Network::Regtest,
         start: Instant::now(),
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: rbitcoin_rpc::methods::StopFlag::new(false),
         connections: Arc::new(AtomicU64::new(0)),
         initial_block_download: Arc::new(AtomicBool::new(false)),
         subversion: rbitcoin_primitives::rbitcoin_subversion(
@@ -2595,6 +2595,81 @@ fn miniwallet_raw_scan_and_gettxout() {
     let empty = dispatch(&ctx, "getindexinfo", vec![json!("coinstatsindex")]).unwrap();
     assert_eq!(empty, json!({}));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A tip published while `wait_for_tip` is parked must wake it. The old
+/// 50 ms slice would still be asleep.
+#[test]
+fn published_tip_wakes_wait_for_tip() {
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let height = hub.tip_height().expect("height");
+    let hash = hub.tip_hash().expect("hash");
+    let header = hub.tip_header().expect("header");
+    let seen = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(15));
+            seen.store(true, Ordering::Release);
+            let _ = hub.tip_tx.send(rbitcoin_net::TipEvent {
+                height,
+                hash,
+                header,
+                reorg_branch_len: 0,
+            });
+        });
+        let t0 = Instant::now();
+        let got = rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 5_000, |_hash, _height| {
+            seen.load(Ordering::Acquire)
+        })
+        .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(40),
+            "wait_for_tip stayed in the 50 ms poll: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(got["height"], height);
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A mempool template bump must wake a GBT longpoll. The old 50 ms tick
+/// would still be asleep.
+#[test]
+fn template_update_wakes_gbt_longpoll() {
+    use std::time::{Duration, Instant};
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let id = dispatch(
+        &ctx,
+        "getblocktemplate",
+        vec![json!({ "rules": ["segwit"] })],
+    )
+    .unwrap()["longpollid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mp = Arc::clone(ctx.mempool.as_ref().unwrap());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(15));
+            mp.note_template_update();
+        });
+        let t0 = Instant::now();
+        let got = dispatch(
+            &ctx,
+            "getblocktemplate",
+            vec![json!({ "rules": ["segwit"], "longpollid": id })],
+        )
+        .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(40),
+            "gbt longpoll stayed in the 50 ms tick: {:?}",
+            t0.elapsed()
+        );
+        assert!(got["height"].is_number(), "{got}");
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6660,7 +6735,7 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     .unwrap();
     assert_eq!(other_tip["previousblockhash"], gbt["previousblockhash"]);
     let mut stopping = ctx_without_chain(&ctx);
-    stopping.stop = Arc::new(AtomicBool::new(true));
+    stopping.stop = rbitcoin_rpc::methods::StopFlag::new(true);
     assert_eq!(
         gbt_err(&stopping, json!({"rules": ["segwit"], "longpollid": 5})),
         (ERR_CLIENT_NOT_CONNECTED, "Shutting down".to_owned()),

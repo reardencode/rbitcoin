@@ -2454,7 +2454,7 @@ pub async fn start_esplora_if_ready(
                 mempool: Some(Arc::clone(&mp)),
                 network,
                 start: Instant::now(),
-                stop: Arc::new(AtomicBool::new(false)),
+                stop: rbitcoin_rpc::methods::StopFlag::new(false),
                 connections: Arc::new(AtomicU64::new(0)),
                 initial_block_download: Arc::new(AtomicBool::new(false)),
                 subversion: String::new(),
