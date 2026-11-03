@@ -8316,3 +8316,52 @@ include!("../regtest_chain_ops_journey.rs");
 mod chain;
 mod decode;
 mod mempool;
+
+/// The HTTP route runs these methods on the request task
+/// (`dispatch_tip_connect`), not through `dispatch`. Core's block count and
+/// decode text hold there too.
+#[test]
+fn request_task_methods_answer_as_core() {
+    let (ctx, _dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let ctx = Arc::new(ctx);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let call = |method: &str, params: Vec<Value>| {
+        rt.block_on(dispatch_tip_connect(
+            &ctx,
+            method,
+            RpcParams::positional(params),
+        ))
+    };
+    for (method, params) in [
+        ("generate", vec![json!(4_294_967_297_u64)]),
+        (
+            "generatetodescriptor",
+            vec![json!(4_294_967_297_u64), json!("raw(51)")],
+        ),
+    ] {
+        let err = call(method, params).unwrap_err();
+        assert_eq!(err["code"], -1, "{method}: {err}");
+        assert_eq!(
+            err["message"], "JSON integer out of range",
+            "{method}: {err}"
+        );
+    }
+    assert_eq!(call("generate", vec![json!(0)]).unwrap(), json!([]));
+
+    let superfluous_witness = "02000000000100010000000000000000015100000000";
+    let err = call("sendrawtransaction", vec![json!(superfluous_witness)]).unwrap_err();
+    assert_eq!(
+        err["message"], "TX decode failed. Make sure the tx has at least one input.",
+        "{err}"
+    );
+    let err = call("testmempoolaccept", vec![json!([superfluous_witness])]).unwrap_err();
+    assert_eq!(
+        err["message"],
+        format!("TX decode failed: {superfluous_witness} Make sure the tx has at least one input."),
+        "{err}"
+    );
+}
