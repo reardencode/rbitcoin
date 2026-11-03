@@ -93,9 +93,22 @@ fn park_until_idle(announce: bool) {
     while i.n.load(Ordering::SeqCst) > 0 {
         if announce {
             note_wait_seen();
+        } else {
+            // Before the condvar wait, so a subscriber unblocks only once
+            // this thread has observed `n > 0`. This arm does not call
+            // `note_wait_seen`.
+            note_quiet_drain();
         }
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
+}
+
+/// Drain a running tip-accept job without publishing [`note_wait_seen`].
+/// [`LanePermit::take`] uses this. The permit is already held by the caller
+/// when a test uses it directly, so the drain does not enqueue.
+#[doc(hidden)]
+pub fn quiet_drain_for_tests() {
+    park_until_idle(false);
 }
 
 /// Wait until the tip-accept job that was running when this call started
@@ -204,7 +217,7 @@ fn take_lane_exemption() -> bool {
         return true;
     }
     let oneshot = LANE_ONESHOT.with(|c| c.replace(false));
-    oneshot || LANE_HELD.with(|c| c.get() > 0)
+    oneshot || lane_held_after_revoke() > 0
 }
 
 #[cfg(not(debug_assertions))]
@@ -236,7 +249,10 @@ fn lane_send_guard(_exempt: bool) -> Option<std::sync::MutexGuard<'static, ()>> 
 /// entries in this process wait until the guard drops.
 #[doc(hidden)]
 pub struct LanePermit {
-    _private: (),
+    /// Thread that incremented the permit hold. Drop on any other thread must
+    /// not leave that increment behind.
+    #[cfg(debug_assertions)]
+    owner: thread::ThreadId,
 }
 
 impl LanePermit {
@@ -249,12 +265,18 @@ impl LanePermit {
             }
             LANE_EXCLUSIVE.store(true, Ordering::Release);
             drop(g);
+            // A permit dropped on another thread left a revoke for us.
+            // Clear it before this take adds its own hold.
+            let _ = lane_held_after_revoke();
             LANE_HELD.with(|c| c.set(c.get().saturating_add(1)));
-            // Quiet drain. `wait_idle` would publish `note_wait_seen` and the
-            // waiter tests would treat this thread as their parked waiter.
-            park_until_idle(false);
+            // Same drain the waiter test calls. It does not publish
+            // `note_wait_seen`.
+            quiet_drain_for_tests();
         }
-        Self { _private: () }
+        Self {
+            #[cfg(debug_assertions)]
+            owner: thread::current().id(),
+        }
     }
 }
 
@@ -262,11 +284,58 @@ impl Drop for LanePermit {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
         {
-            LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+            if thread::current().id() == self.owner {
+                LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+            } else {
+                revoke_lane_held(self.owner);
+            }
             let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
             LANE_EXCLUSIVE.store(false, Ordering::Release);
             LANE_EXCLUSIVE_CV.notify_all();
         }
+    }
+}
+
+#[cfg(debug_assertions)]
+static LANE_HELD_REVOKES: Mutex<Vec<thread::ThreadId>> = Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn revoke_lane_held(owner: thread::ThreadId) {
+    LANE_HELD_REVOKES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(owner);
+}
+
+#[cfg(debug_assertions)]
+fn apply_lane_held_revoke() {
+    let id = thread::current().id();
+    let mut revoked = LANE_HELD_REVOKES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = revoked.iter().position(|held| *held == id) {
+        revoked.swap_remove(i);
+        LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// Holds still charged to this thread. Applies a cross-thread drop first.
+#[cfg(debug_assertions)]
+fn lane_held_after_revoke() -> u32 {
+    if LANE_GATE_ON.load(Ordering::Acquire) {
+        apply_lane_held_revoke();
+    }
+    LANE_HELD.with(|c| c.get())
+}
+
+/// Test read of the permit hold on this thread.
+#[doc(hidden)]
+pub fn lane_held_for_tests() -> u32 {
+    #[cfg(debug_assertions)]
+    {
+        lane_held_after_revoke()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        0
     }
 }
 
@@ -313,6 +382,28 @@ pub fn wait_seen_from(
 fn note_wait_seen() {
     let id = thread::current().id();
     let mut subs = wait_seen_subs().lock().unwrap_or_else(|e| e.into_inner());
+    subs.retain(|tx| tx.send(id).is_ok());
+}
+
+fn quiet_drain_subs() -> &'static Mutex<Vec<mpsc::Sender<thread::ThreadId>>> {
+    static S: OnceLock<Mutex<Vec<mpsc::Sender<thread::ThreadId>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// One message when [`quiet_drain_for_tests`] has observed a running job.
+#[doc(hidden)]
+pub fn subscribe_quiet_drain() -> mpsc::Receiver<thread::ThreadId> {
+    let (tx, rx) = mpsc::channel();
+    quiet_drain_subs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(tx);
+    rx
+}
+
+fn note_quiet_drain() {
+    let id = thread::current().id();
+    let mut subs = quiet_drain_subs().lock().unwrap_or_else(|e| e.into_inner());
     subs.retain(|tx| tx.send(id).is_ok());
 }
 

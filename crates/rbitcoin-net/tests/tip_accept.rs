@@ -78,14 +78,15 @@ fn wait_idle_blocks_until_job_finishes() {
     wait_idle();
 }
 
-/// `LanePermit::take` drains an in-flight job. That drain must not publish
-/// `subscribe_wait_seen`: the waiter tests treat that publication as proof
-/// their own wait has parked.
+/// `LanePermit::take` drains an in-flight job through [`quiet_drain_for_tests`].
+/// That drain must not publish `subscribe_wait_seen`. The permit is held
+/// first so the job cannot enter while another test is filling the lane.
 #[test]
 fn lane_permit_take_does_not_publish_wait_seen() {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    let _lane = LanePermit::take();
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
@@ -97,21 +98,50 @@ fn lane_permit_take_does_not_publish_wait_seen() {
     });
     started_rx.recv().unwrap();
     let seen = subscribe_wait_seen();
+    let quiet = subscribe_quiet_drain();
     let (id_tx, id_rx) = mpsc::channel();
     let drainer = thread::spawn(move || {
         id_tx.send(thread::current().id()).unwrap();
-        let _permit = LanePermit::take();
+        quiet_drain_for_tests();
     });
     let id = id_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("drainer started");
     assert!(
-        !wait_seen_from(&seen, id, Duration::from_millis(400)),
-        "LanePermit::take published wait_seen while draining the running job"
+        wait_seen_from(&quiet, id, Duration::from_secs(2)),
+        "quiet drain did not park on the running job"
+    );
+    let mut published = false;
+    while let Ok(noted) = seen.try_recv() {
+        if noted == id {
+            published = true;
+        }
+    }
+    assert!(
+        !published,
+        "LanePermit drain published wait_seen while the job was running"
+    );
+    assert!(
+        !drainer.is_finished(),
+        "quiet drain returned while the tip-accept job was running"
     );
     release_tx.send(()).unwrap();
     drainer.join().expect("drain");
     worker.join().expect("job");
+}
+
+/// Drop on the taking thread clears `LANE_HELD` there. Drop on another
+/// thread must not leave that take exempt for a later full-queue test.
+#[test]
+fn lane_permit_drop_on_another_thread_clears_the_taker_exemption() {
+    let permit = LanePermit::take();
+    assert!(lane_held_for_tests() >= 1);
+    thread::spawn(move || drop(permit)).join().expect("drop");
+    assert_eq!(
+        lane_held_for_tests(),
+        0,
+        "dropping LanePermit on another thread left the taker exempt"
+    );
 }
 
 #[test]
