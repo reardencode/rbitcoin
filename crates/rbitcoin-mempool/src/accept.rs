@@ -1847,19 +1847,23 @@ impl ActiveMempool {
         Ok(())
     }
 
-    /// Core `IsChildWithParents`: last tx spends every other package member.
-    pub fn package_is_child_with_direct_parents(txs: &[Transaction]) -> bool {
-        if txs.len() < 2 {
+    /// Core `IsChildWithParentsTree`: the last tx spends every other package
+    /// member, and no parent spends another parent.
+    pub fn package_is_child_with_parents_tree(txs: &[Transaction]) -> bool {
+        let Some((child, parents)) = txs.split_last() else {
+            return false;
+        };
+        if parents.is_empty() {
             return false;
         }
-        let spent: BTreeSet<Txid> = txs[txs.len() - 1]
-            .input
-            .iter()
-            .map(|i| i.previous_output.txid)
-            .collect();
-        txs[..txs.len() - 1]
-            .iter()
-            .all(|tx| spent.contains(&tx.compute_txid()))
+        let spent: BTreeSet<Txid> = child.input.iter().map(|i| i.previous_output.txid).collect();
+        let parent_ids: BTreeSet<Txid> = parents.iter().map(Transaction::compute_txid).collect();
+        parent_ids.iter().all(|id| spent.contains(id))
+            && parents.iter().all(|tx| {
+                tx.input
+                    .iter()
+                    .all(|i| !parent_ids.contains(&i.previous_output.txid))
+            })
     }
 
     /// Last tx is a child; every other member is an in-package ancestor of it.

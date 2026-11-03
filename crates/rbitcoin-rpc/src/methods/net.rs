@@ -1,5 +1,4 @@
 use super::*;
-use rbitcoin_net::MempoolHub;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 
@@ -120,7 +119,7 @@ pub fn peerinfo_json(chain: Option<&rbitcoin_net::ChainHub>, p: rbitcoin_net::Pe
         "bip152_hb_from": p.bip152_hb_from,
         "last_block": p.last_block,
         "last_transaction": p.last_transaction,
-        "minfeefilter": sat_kvb_to_btc(p.minfeefilter_sat_kvb),
+        "minfeefilter": sat_btc_json(p.minfeefilter_sat_kvb as i64),
         "bytesrecv": p.bytesrecv,
         "bytessent": p.bytessent,
         "last_inv_sequence": p.last_inv_sequence,
@@ -416,8 +415,8 @@ pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
         "connections_in": cin,
         "connections_out": cout,
         "networks": networks_json(ctx),
-        "relayfee": MempoolHub::relay_fee_btc_per_kb(),
-        "incrementalfee": MempoolHub::relay_fee_btc_per_kb(),
+        "relayfee": relay_fee_json(),
+        "incrementalfee": relay_fee_json(),
         "localaddresses": localaddresses_json(ctx),
         "warnings": rpc_warnings(ctx),
     })

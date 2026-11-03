@@ -8,9 +8,23 @@ use rbitcoin_primitives::hex_encode;
 const MAX_MULTISIG_KEYS: usize = 20;
 
 pub fn infer_descriptor(script: &Script, network: Network) -> String {
-    let body = infer_body(script, network);
+    with_checksum(infer_body(script, network))
+}
+
+/// Core `InferDescriptor` of the P2WSH output whose witness script, known to
+/// the provider, is this multisig of compressed keys.
+pub(super) fn wsh_multi_descriptor(required: usize, keys: &[&[u8]]) -> String {
+    with_checksum(format!("wsh({})", multi_body(required, keys)))
+}
+
+fn with_checksum(body: String) -> String {
     let sum = checksum(&body);
     format!("{body}#{sum}")
+}
+
+fn multi_body(required: usize, keys: &[&[u8]]) -> String {
+    let keys: Vec<String> = keys.iter().map(hex_encode).collect();
+    format!("multi({required},{})", keys.join(","))
 }
 
 fn infer_body(script: &Script, network: Network) -> String {
@@ -20,8 +34,7 @@ fn infer_body(script: &Script, network: Network) -> String {
     if let Some((required, keys)) =
         bare_multisig(script).filter(|(_, keys)| !keys.iter().any(|k| is_hybrid(k)))
     {
-        let keys: Vec<String> = keys.into_iter().map(hex_encode).collect();
-        return format!("multi({required},{})", keys.join(","));
+        return multi_body(required, &keys);
     }
     if let Some(key) = taproot_output_key(script) {
         return format!("rawtr({})", hex_encode(key.serialize()));

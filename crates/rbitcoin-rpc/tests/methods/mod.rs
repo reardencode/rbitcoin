@@ -256,8 +256,8 @@ fn decode_rpc_subset() {
     let script = dispatch(&ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
     assert_eq!(script["type"], json!("witness_v0_keyhash"));
     assert_eq!(script["address"], json!(p2wpkh.to_string()));
-    assert_eq!(script["hex"], json!(spk_hex));
-    assert!(script.get("p2sh").is_none());
+    assert!(script.get("hex").is_none(), "{script}");
+    assert!(script.get("p2sh").is_some(), "{script}");
     assert!(script.get("segwit").is_none());
 
     let op_true = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap();
@@ -1948,6 +1948,54 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     assert!(txs[0].get("fee").is_none(), "coinbase must omit fee: {v2}");
     let fee = txs[1]["fee"].as_f64().expect("spend fee");
     assert!((fee - (1_000.0 / 1e8)).abs() < 1e-10, "fee={fee} v2={v2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `ValueFromAmount`: every BTC amount and BTC/kvB rate is a JSON number
+/// with exactly eight decimals, never `50.0`, `49.99999`, or `1e-6`.
+#[test]
+fn btc_amounts_print_eight_decimals() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let text = |v: &Value| serde_json::to_string(v).unwrap();
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = json!(spend.compute_txid().to_string());
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let mempool_out = dispatch(&ctx, "gettxout", vec![txid.clone(), json!(0)]).unwrap();
+    assert_eq!(text(&mempool_out["value"]), "49.99999000", "{mempool_out}");
+    let raw = dispatch(&ctx, "getrawtransaction", vec![txid, json!(true)]).unwrap();
+    assert_eq!(text(&raw["vout"][0]["value"]), "49.99999000", "{raw}");
+    let (dust_hex, _) = spend_generated_coinbase(&ctx, 2, 100, ScriptBuf::from_bytes(vec![0x51]));
+    let decoded = dispatch(&ctx, "decoderawtransaction", vec![json!(dust_hex)]).unwrap();
+    assert_eq!(
+        text(&decoded["vout"][0]["value"]),
+        "0.00000100",
+        "{decoded}"
+    );
+
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(2)]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![hash, json!(2)]).unwrap();
+    let coinbase = &blk["tx"][0];
+    assert_eq!(text(&coinbase["vout"][0]["value"]), "50.00000000", "{blk}");
+    let confirmed = dispatch(&ctx, "gettxout", vec![coinbase["txid"].clone(), json!(0)]).unwrap();
+    assert_eq!(text(&confirmed["value"]), "50.00000000", "{confirmed}");
+
+    let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(text(&net["relayfee"]), "0.00000100", "{net}");
+    assert_eq!(text(&net["incrementalfee"]), "0.00000100", "{net}");
+
+    let mp = ctx.mempool.as_ref().unwrap();
+    for height in 1..=2_100 {
+        let block = rbitcoin_net::fee_history::HistoricalFeeBlock {
+            p10_sat_kvb: Some(1_050),
+            txstat_bytes: 8,
+        };
+        mp.insert_backfill_fee_block(height, block, None);
+    }
+    mp.mark_fee_dirty();
+    let smart = dispatch(&ctx, "estimatesmartfee", vec![json!(2)]).unwrap();
+    assert_eq!(text(&smart["feerate"]), "0.00001050", "{smart}");
+    let raw_fee = dispatch(&ctx, "estimaterawfee", vec![json!(2)]).unwrap();
+    assert_eq!(text(&raw_fee["feerate"]), "0.00001050", "{raw_fee}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3848,51 +3896,115 @@ fn pin_maxburn_json_shapes(ctx: &RpcContext, hex: &str) {
     }
 }
 
-/// `RpcContext::package_dialect` turns on Core's child-with-parents gate for
-/// `submitpackage`. Off, the same unrelated pair gets past that gate.
+/// Spends each `(txid, vout)` into one OP_TRUE output of `value` sat.
+fn spend_outpoints(prevs: &[(Txid, u32)], value: u64) -> Transaction {
+    use bitcoin::{OutPoint, TxIn, TxOut, Witness};
+    Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: prevs
+            .iter()
+            .map(|&(txid, vout)| TxIn {
+                previous_output: OutPoint { txid, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+/// `RpcContext::package_dialect` turns on Core's `IsChildWithParentsTree`
+/// gate for `submitpackage`: every member is a parent of the last one, and
+/// no parent spends another. Off, the same packages get past that gate.
 #[test]
 fn submitpackage_topology_gate_follows_the_context() {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::consensus::encode::serialize;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    let unrelated = |n: u8| {
-        let tx = Transaction {
-            version: TxVersion::TWO,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: bitcoin::Txid::from_byte_array([n; 32]),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        };
-        rbitcoin_primitives::hex_encode(serialize(&tx))
+    let txid = |n: u8| bitcoin::Txid::from_byte_array([n; 32]);
+    let hexes = |txs: &[&Transaction]| {
+        json!(txs
+            .iter()
+            .map(|t| rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(*t)))
+            .collect::<Vec<_>>())
     };
-    let pkg = json!([unrelated(1), unrelated(2)]);
+    let u1 = spend_outpoints(&[(txid(1), 0)], 1_000);
+    let u2 = spend_outpoints(&[(txid(2), 0)], 1_000);
+    let mut gp = spend_outpoints(&[(txid(3), 0)], 5_000);
+    gp.output.push(gp.output[0].clone());
+    let p = spend_outpoints(&[(gp.compute_txid(), 0)], 4_000);
+    let c = spend_outpoints(&[(gp.compute_txid(), 1), (p.compute_txid(), 0)], 8_000);
+    let mut burn = u2.clone();
+    burn.output[0].script_pubkey = ScriptBuf::new_op_return([0xaa; 4]);
     let dir = TempDir::labeled("rpc-pkg-dialect").unwrap();
     let mut ctx = open_ctx(&dir);
 
     ctx.package_dialect = true;
-    let err = dispatch(&ctx, "submitpackage", vec![pkg.clone()]).unwrap_err();
-    assert!(
-        err.to_string().contains("package topology disallowed"),
-        "{err}"
-    );
+    for pkg in [hexes(&[&u1, &u2]), hexes(&[&gp, &p, &c])] {
+        let err = dispatch(&ctx, "submitpackage", vec![pkg]).unwrap_err();
+        assert_eq!(err["code"], ERR_VERIFY_ERROR, "{err}");
+        assert_eq!(
+            err["message"],
+            "package topology disallowed. not child-with-parents or parents depend on each other.",
+            "{err}"
+        );
+    }
+    // Core checks maxburnamount while it decodes, before the topology.
+    let err = dispatch(&ctx, "submitpackage", vec![hexes(&[&u1, &burn])]).unwrap_err();
+    assert!(rpc_message(&err).contains("maxburnamount"), "{err}");
 
     ctx.package_dialect = false;
-    let res = dispatch(&ctx, "submitpackage", vec![pkg]);
-    assert!(
-        !format!("{res:?}").contains("package topology disallowed"),
-        "{res:?}"
+    for pkg in [hexes(&[&u1, &u2]), hexes(&[&gp, &p, &c])] {
+        let res = dispatch(&ctx, "submitpackage", vec![pkg]);
+        assert!(
+            !format!("{res:?}").contains("package topology disallowed"),
+            "{res:?}"
+        );
+    }
+}
+
+/// Core `AcceptPackage` tries each member alone, in package order. A parent
+/// over `maxfeerate` fails alone and stops package evaluation, but the other
+/// parent still enters the pool, and the child is missing the first parent.
+#[test]
+fn submitpackage_over_max_parent_leaves_the_other_parent() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (rich_hex, rich) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000_000, spk.clone());
+    let (plain_hex, plain) = spend_generated_coinbase(&ctx, 2, 50_0000_0000 - 1_000, spk);
+    let child = spend_outpoints(
+        &[(rich.compute_txid(), 0), (plain.compute_txid(), 0)],
+        rich.output[0].value.to_sat() + plain.output[0].value.to_sat() - 10_000,
     );
+    let child_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&child));
+    let pkg = dispatch(
+        &ctx,
+        "submitpackage",
+        vec![json!([rich_hex, plain_hex, child_hex])],
+    )
+    .unwrap();
+    let rows = &pkg["tx-results"];
+    let w = |t: &Transaction| hash_hex_display(&t.compute_wtxid().to_byte_array());
+    assert_eq!(pkg["package_msg"], "transaction failed", "{pkg}");
+    assert_eq!(rows[w(&rich)]["error"], "max feerate exceeded", "{pkg}");
+    assert!(rows[w(&plain)].get("error").is_none(), "{pkg}");
+    assert_eq!(
+        rows[w(&plain)]["fees"]["base"],
+        sat_btc_json(1_000),
+        "{pkg}"
+    );
+    assert_eq!(
+        rows[w(&child)]["error"],
+        "bad-txns-inputs-missingorspent",
+        "{pkg}"
+    );
+    let mp = ctx.mempool.as_ref().unwrap();
+    assert!(mp.contains(&plain.compute_txid()), "{pkg}");
+    assert!(!mp.contains(&rich.compute_txid()), "{pkg}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -5183,7 +5295,12 @@ fn getpeerinfo_lists_registered_session() {
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");
     assert_eq!(arr[0]["last_block"], 0);
     assert_eq!(arr[0]["last_transaction"], 0);
-    assert!(arr[0].get("minfeefilter").is_some());
+    assert_eq!(
+        serde_json::to_string(&arr[0]["minfeefilter"]).unwrap(),
+        "0.00000000",
+        "Core ValueFromAmount: {}",
+        arr[0]
+    );
     assert!(arr[0]["bytesrecv_per_msg"]["pong"].as_u64().unwrap() >= 29);
     let totals = dispatch(&ctx, "getnettotals", vec![]).unwrap();
     assert!(totals["totalbytesrecv"].as_u64().unwrap() >= 29);
@@ -8197,4 +8314,54 @@ fn spend_coinbase_two_outputs(ctx: &RpcContext, height: u32, value: u64) -> (Str
 include!("../regtest_chain_ops_journey.rs");
 
 mod chain;
+mod decode;
 mod mempool;
+
+/// The HTTP route runs these methods on the request task
+/// (`dispatch_tip_connect`), not through `dispatch`. Core's block count and
+/// decode text hold there too.
+#[test]
+fn request_task_methods_answer_as_core() {
+    let (ctx, _dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let ctx = Arc::new(ctx);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let call = |method: &str, params: Vec<Value>| {
+        rt.block_on(dispatch_tip_connect(
+            &ctx,
+            method,
+            RpcParams::positional(params),
+        ))
+    };
+    for (method, params) in [
+        ("generate", vec![json!(4_294_967_297_u64)]),
+        (
+            "generatetodescriptor",
+            vec![json!(4_294_967_297_u64), json!("raw(51)")],
+        ),
+    ] {
+        let err = call(method, params).unwrap_err();
+        assert_eq!(err["code"], -1, "{method}: {err}");
+        assert_eq!(
+            err["message"], "JSON integer out of range",
+            "{method}: {err}"
+        );
+    }
+    assert_eq!(call("generate", vec![json!(0)]).unwrap(), json!([]));
+
+    let superfluous_witness = "02000000000100010000000000000000015100000000";
+    let err = call("sendrawtransaction", vec![json!(superfluous_witness)]).unwrap_err();
+    assert_eq!(
+        err["message"], "TX decode failed. Make sure the tx has at least one input.",
+        "{err}"
+    );
+    let err = call("testmempoolaccept", vec![json!([superfluous_witness])]).unwrap_err();
+    assert_eq!(
+        err["message"],
+        format!("TX decode failed: {superfluous_witness} Make sure the tx has at least one input."),
+        "{err}"
+    );
+}

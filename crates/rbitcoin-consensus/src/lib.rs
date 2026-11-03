@@ -29,6 +29,7 @@ pub mod sync;
 pub mod trust;
 #[doc(hidden)]
 pub mod tx_precompute;
+pub mod wire;
 
 pub use block::ScriptCheckJob;
 

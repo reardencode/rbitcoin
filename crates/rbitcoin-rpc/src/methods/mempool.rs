@@ -72,8 +72,6 @@ pub fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
     }))
 }
 
-/// Exact 8-decimal BTC JSON number (Core `ValueFromAmount`). Avoids f64 drift
-/// against `Decimal` comparisons in the functional suite.
 #[doc(hidden)]
 pub fn accept_fees_json(fee_sat: u64, weight: u64, wtxid: &str) -> Value {
     accept_fees_parts(fee_sat, fee_sat, weight, &[wtxid.to_string()])
@@ -133,6 +131,8 @@ pub fn submit_fees_json(
     accept_fees_parts(base_fee, modified, weight, &[wtxid.to_string()])
 }
 
+/// Exact 8-decimal BTC JSON number (Core `ValueFromAmount`): every BTC
+/// amount and BTC/kvB rate the RPC prints. An f64 prints `1e-6` or `50.0`.
 pub fn sat_btc_json(sat: i64) -> Value {
     let sign = if sat < 0 { "-" } else { "" };
     let abs = sat.unsigned_abs();
@@ -880,9 +880,12 @@ pub fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook
     )
 }
 
+const PACKAGE_TOPOLOGY_DISALLOWED: &str =
+    "package topology disallowed. not child-with-parents or parents depend on each other.";
+
 #[doc(hidden)]
 pub fn submitpackage_topology_disallowed(txs: &[Transaction], dialect: bool) -> bool {
-    dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_direct_parents(txs)
+    dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_parents_tree(txs)
 }
 
 #[doc(hidden)]
@@ -984,7 +987,7 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         _ => opt_maxfeerate_sat_kvb(params, 1)?,
     };
     let max_burn = opt_maxburn_sat(params, 2)?;
-    let tx = decode_tx_hex(hex)?;
+    let tx = decode_sendraw_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .as_ref()
@@ -1021,7 +1024,7 @@ pub async fn sendrawtransaction_async(
         _ => opt_maxfeerate_sat_kvb(params, 1)?,
     };
     let max_burn = opt_maxburn_sat(params, 2)?;
-    let tx = decode_tx_hex(hex)?;
+    let tx = decode_sendraw_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .clone()
@@ -1214,7 +1217,7 @@ pub fn testmempoolaccept(ctx: &RpcContext, params: &RpcParams) -> Result<Value, 
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "rawtx hex required"))?;
-        decoded.push(decode_tx_hex(hex)?);
+        decoded.push(decode_package_tx_hex(hex)?);
     }
     if let Some(rows) = testmempoolaccept_package_precheck(mp, &decoded) {
         return Ok(rows);
@@ -1244,7 +1247,7 @@ pub async fn testmempoolaccept_async(
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "rawtx hex required"))?;
-        decoded.push(decode_tx_hex(hex)?);
+        decoded.push(decode_package_tx_hex(hex)?);
     }
     let mp_c = Arc::clone(&mp);
     let decoded_c = decoded.clone();
@@ -1635,20 +1638,7 @@ pub fn tx_confirmed_on_active_chain(ctx: &RpcContext, tx: &Transaction) -> Resul
 
 /// Core `ParseConfirmTarget`: an `int` (else `JSON integer out of range`) in `1..=1008`.
 pub fn parse_conf_target(v: &Value) -> Result<u32, Value> {
-    let Value::Number(n) = v else {
-        return Err(rpc_error(
-            ERR_TYPE_ERROR,
-            format!(
-                "JSON value of type {} is not of expected type number",
-                json_type_name(v)
-            ),
-        ));
-    };
-    let conf_target = n
-        .as_i64()
-        .and_then(|t| i32::try_from(t).ok())
-        .ok_or_else(|| rpc_error(ERR_MISC, "JSON integer out of range"))?;
-    u32::try_from(conf_target)
+    u32::try_from(core_json_int::<i32>(v)?)
         .ok()
         .filter(|t| (1..=1008).contains(t))
         .ok_or_else(|| {
@@ -1763,22 +1753,20 @@ pub fn smart_fee_result(ctx: &RpcContext, conf_target: u32) -> Result<Value, Val
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(json!({ "errors": ["mempool unavailable"], "blocks": blocks }));
     };
-    let rate = mp.estimate_fee_btc_per_kb(conf_target);
-    Ok(smart_fee_json(blocks, rate))
+    Ok(smart_fee_json(blocks, mp.estimate_fee_sat_kvb(conf_target)))
 }
 
-/// Core's result for `rate` (BTC/kvB; negative = no estimate): `feerate` and
+/// Core's result for `rate` (sat/kvB; `None` = no estimate): `feerate` and
 /// `blocks`, or `errors` and `blocks`.
 #[doc(hidden)]
-pub fn smart_fee_json(blocks: u32, rate: f64) -> Value {
-    if rate < 0.0 {
+pub fn smart_fee_json(blocks: u32, rate: Option<u64>) -> Value {
+    let Some(sat_kvb) = rate else {
         return json!({
             "errors": ["Insufficient data or no feerate found"],
             "blocks": blocks,
         });
-    }
-    let sat_kvb = (rate * 100_000_000.0).round() as i64;
-    json!({ "feerate": sat_btc_json(sat_kvb), "blocks": blocks })
+    };
+    json!({ "feerate": sat_btc_json(sat_kvb as i64), "blocks": blocks })
 }
 
 /// Same 10-minute product as [`estimatesmartfee`] under the Core name.
@@ -1791,8 +1779,8 @@ pub fn estimaterawfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
         return Err(rpc_error(ERR_MISC, method_help("estimaterawfee")));
     }
     let conf_target = parse_conf_target(params.get(0, "conf_target").unwrap())?;
-    if let Some(th) = params.get(1, "threshold") {
-        if !matches!(th, Value::Null) && json_u64(th).is_none() && th.as_f64().is_none() {
+    if let Some(th) = params.get(1, "threshold").filter(|th| !th.is_null()) {
+        let Some(threshold) = th.as_f64() else {
             return Err(rpc_error(
                 ERR_TYPE_ERROR,
                 format!(
@@ -1800,6 +1788,9 @@ pub fn estimaterawfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
                     json_type_name(th)
                 ),
             ));
+        };
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(rpc_error(ERR_INVALID_PARAMETER, "Invalid threshold"));
         }
     }
     estimate_fee_result(ctx, conf_target)
@@ -1813,16 +1804,15 @@ pub fn estimate_fee_result(ctx: &RpcContext, conf_target: u32) -> Result<Value, 
             "blocks": conf_target,
         }));
     };
-    let rate = mp.estimate_fee_btc_per_kb(conf_target);
-    if rate < 0.0 {
+    let Some(rate) = mp.estimate_fee_sat_kvb(conf_target) else {
         return Ok(json!({
             "feerate": -1.0,
             "errors": ["Insufficient data or empty mempool"],
             "blocks": conf_target.max(1),
         }));
-    }
+    };
     Ok(json!({
-        "feerate": rate,
+        "feerate": sat_btc_json(rate as i64),
         "blocks": conf_target.max(1),
         "errors": Value::Null,
         "rbitcoin_model": "10-minute inclusion frontier (not Core historical)",
@@ -1834,7 +1824,7 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
     let missing = params.get(0, "txid").is_none() || params.get(2, "fee_delta").is_none();
     let extra_pos = params.pos_len() > 3;
     if missing || extra_pos {
-        return Err(rpc_error(ERR_MISC, "prioritisetransaction"));
+        return Err(rpc_error(ERR_MISC, method_help("prioritisetransaction")));
     }
     let txid_s = params.req_str(0, "txid")?;
     if txid_s.len() != 64 {
@@ -1852,33 +1842,24 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
             format!("txid must be hexadecimal string (not '{txid_s}')"),
         ));
     }
-    if let Some(dummy) = params.get(1, "dummy") {
-        if dummy.as_i64() != Some(0) && dummy.as_u64() != Some(0) {
-            if dummy.as_i64().is_none() && dummy.as_u64().is_none() {
-                return Err(rpc_error(
-                    ERR_TYPE_ERROR,
-                    "JSON value of type string is not of expected type number",
-                ));
-            }
+    if let Some(dummy) = params.get(1, "dummy").filter(|d| !d.is_null()) {
+        let Some(dummy) = dummy.as_f64() else {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type number",
+                    json_type_name(dummy)
+                ),
+            ));
+        };
+        if dummy != 0.0 {
             return Err(rpc_error(
                 ERR_INVALID_PARAMETER,
                 "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.",
             ));
         }
     }
-    let fee_delta = params
-        .get(2, "fee_delta")
-        .and_then(json_i64)
-        .ok_or_else(|| {
-            if params.get(2, "fee_delta").is_some() {
-                rpc_error(
-                    ERR_TYPE_ERROR,
-                    "JSON value of type string is not of expected type number",
-                )
-            } else {
-                rpc_error(ERR_INVALID_PARAMS, "fee_delta required")
-            }
-        })?;
+    let fee_delta = core_json_int::<i64>(params.req(2, "fee_delta")?)?;
     let txid = Txid::from_byte_array(parse_hash32_display(txid_s)?);
     let mp = ctx
         .mempool
@@ -1891,7 +1872,10 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
 pub fn getprioritisedtransactions(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&[])?;
     if params.pos_len() != 0 {
-        return Err(rpc_error(ERR_MISC, "getprioritisedtransactions"));
+        return Err(rpc_error(
+            ERR_MISC,
+            method_help("getprioritisedtransactions"),
+        ));
     }
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(json!({}));
@@ -1912,6 +1896,88 @@ pub fn getprioritisedtransactions(ctx: &RpcContext, params: &RpcParams) -> Resul
         out.insert(txid.to_string(), row);
     }
     Ok(Value::Object(out))
+}
+
+/// Core `savemempool`: `{datadir}/mempool.dat`, version 2 with a fresh key.
+pub fn savemempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&[])?;
+    let mp = ctx
+        .mempool
+        .as_ref()
+        .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    let mut key = [0u8; 8];
+    getrandom::fill(&mut key).expect("CSPRNG for mempool.dat key");
+    let path = mp.save_core_mempool_dat(key).map_err(|e| {
+        rbitcoin_log::info!("Failed to dump mempool: {e}. Continuing anyway.");
+        rpc_error(ERR_MISC, "Unable to dump mempool to disk")
+    })?;
+    Ok(json!({ "filename": path.display().to_string() }))
+}
+
+/// Core `importmempool filepath (options)`. Each option may also be a
+/// top-level named parameter (Core `OBJ_NAMED_PARAMS`).
+pub fn importmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    const OPTIONS: [&str; 3] = [
+        "use_current_time",
+        "apply_fee_delta_priority",
+        "apply_unbroadcast_set",
+    ];
+    params.reject_unknown(&["filepath", "options", OPTIONS[0], OPTIONS[1], OPTIONS[2]])?;
+    let path = params.req_str(0, "filepath")?;
+    let options = match params.get(1, "options") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(m)) => Some(m),
+        Some(v) => {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type object",
+                    json_type_name(v)
+                ),
+            ))
+        }
+    };
+    let flag = |name: &str, default: bool| -> Result<bool, Value> {
+        let named = params.named.as_ref().and_then(|m| m.get(name));
+        match options.and_then(|m| m.get(name)).or(named) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(v) => Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type bool",
+                    json_type_name(v)
+                ),
+            )),
+        }
+    };
+    let opts = rbitcoin_net::CoreDatImport {
+        use_current_time: flag(OPTIONS[0], true)?,
+        apply_fee_delta_priority: flag(OPTIONS[1], false)?,
+        apply_unbroadcast_set: flag(OPTIONS[2], false)?,
+    };
+    let mp = ctx
+        .mempool
+        .as_ref()
+        .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    if matches!(ctx.pool_listing(), PoolListing::Downloading) {
+        return Err(rpc_error(
+            ERR_CLIENT_IN_INITIAL_DOWNLOAD,
+            "Can only import the mempool after the block download and sync is done.",
+        ));
+    }
+    let dat = std::fs::read(path)
+        .map_err(|e| format!("Failed to open mempool file: {e}"))
+        .and_then(|bytes| rbitcoin_net::CoreMempoolDat::decode(&bytes))
+        .map_err(|e| {
+            rbitcoin_log::info!("Failed to import mempool file {path}: {e}. Continuing anyway.");
+            rpc_error(
+                ERR_MISC,
+                "Unable to import mempool file, see debug.log for details.",
+            )
+        })?;
+    mp.load_core_mempool_dat(dat, opts);
+    Ok(json!({}))
 }
 
 pub fn getmempoolcluster(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
@@ -2039,14 +2105,8 @@ pub fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
             ),
         ));
     }
-    let mut txs = Vec::with_capacity(arr.len());
-    for v in arr {
-        let hex = v
-            .as_str()
-            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_tx_hex(hex)?);
-    }
-    if let Some(done) = submitpackage_screen(ctx, mp, &txs, max_feerate, max_burn)? {
+    let txs = submitpackage_txs(ctx, arr, max_burn)?;
+    if let Some(done) = submitpackage_screen(mp, &txs)? {
         return Ok(done);
     }
     Ok(submitpackage_admit(ctx, mp, &txs, max_feerate))
@@ -2076,33 +2136,42 @@ pub async fn submitpackage_async(
             ),
         ));
     }
-    let mut txs = Vec::with_capacity(arr.len());
-    for v in arr {
-        let hex = v
-            .as_str()
-            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_tx_hex(hex)?);
-    }
-    let ctx_s = Arc::clone(ctx);
+    let txs = submitpackage_txs(ctx, arr, max_burn)?;
     let mp_s = Arc::clone(&mp);
     let txs_s = txs.clone();
-    if let Some(done) = rbitcoin_net::off_pool_budgeted(move || {
-        submitpackage_screen(&ctx_s, &mp_s, &txs_s, max_feerate, max_burn)
-    })
-    .await?
+    if let Some(done) =
+        rbitcoin_net::off_pool_budgeted(move || submitpackage_screen(&mp_s, &txs_s)).await?
     {
         return Ok(done);
     }
     Ok(submitpackage_admit_async(ctx, &mp, txs, max_feerate).await)
 }
 
-fn submitpackage_screen(
+/// Core `submitpackage` decode: each member's `maxburnamount` as it decodes,
+/// then the topology gate.
+fn submitpackage_txs(
     ctx: &RpcContext,
-    mp: &MempoolHub,
-    txs: &[Transaction],
-    max_feerate: u64,
+    arr: &[Value],
     max_burn: u64,
-) -> Result<Option<Value>, Value> {
+) -> Result<Vec<Transaction>, Value> {
+    let mut txs = Vec::with_capacity(arr.len());
+    for v in arr {
+        let hex = v
+            .as_str()
+            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
+        let tx = decode_package_tx_hex(hex)?;
+        if burn_exceeds_max(&tx, max_burn) {
+            return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
+        }
+        txs.push(tx);
+    }
+    if submitpackage_topology_disallowed(&txs, ctx.package_dialect) {
+        return Err(rpc_error(ERR_VERIFY_ERROR, PACKAGE_TOPOLOGY_DISALLOWED));
+    }
+    Ok(txs)
+}
+
+fn submitpackage_screen(mp: &MempoolHub, txs: &[Transaction]) -> Result<Option<Value>, Value> {
     if !mp.relay_enabled() {
         return Err(rpc_error(
             ERR_MISC,
@@ -2114,12 +2183,6 @@ fn submitpackage_screen(
     }
     if package_has_conflicts(txs) {
         return Ok(Some(submitpackage_conflict_result(txs)));
-    }
-    if submitpackage_topology_disallowed(txs, ctx.package_dialect) {
-        return Err(rpc_error(ERR_VERIFY_ERROR, "package topology disallowed"));
-    }
-    if let Some(failed) = submitpackage_fee_burn_precheck(ctx, mp, txs, max_feerate, max_burn)? {
-        return Ok(Some(failed));
     }
     Ok(None)
 }
@@ -2144,55 +2207,6 @@ pub fn submitpackage_conflict_result(txs: &[Transaction]) -> Value {
 }
 
 #[doc(hidden)]
-pub fn submitpackage_fee_burn_precheck(
-    ctx: &RpcContext,
-    mp: &MempoolHub,
-    txs: &[Transaction],
-    max_feerate: u64,
-    max_burn: u64,
-) -> Result<Option<Value>, Value> {
-    let mut tx_results = serde_json::Map::new();
-    let mut pre_fail = false;
-    for tx in txs {
-        let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
-        let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
-        if burn_exceeds_max(tx, max_burn) {
-            return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
-        }
-        // Chain and mempool prevouts only; in-package parents wait for admit.
-        // A member already in the pool is not re-checked (Core `AcceptPackage`).
-        if !mp.contains(&tx.compute_txid())
-            && package_tx_fee_exceeds_max(ctx, mp, tx, &[], max_feerate)
-        {
-            pre_fail = true;
-            tx_results.insert(
-                wtxid,
-                json!({
-                    "txid": txid,
-                    "error": "max feerate exceeded",
-                }),
-            );
-        }
-    }
-    if !pre_fail {
-        return Ok(None);
-    }
-    for tx in txs {
-        let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
-        tx_results.entry(wtxid).or_insert_with(|| {
-            json!({
-                "txid": hash_hex_display(&tx.compute_txid().to_byte_array()),
-                "error": "bad-txns-inputs-missingorspent",
-            })
-        });
-    }
-    Ok(Some(json!({
-        "package_msg": "transaction failed",
-        "tx-results": tx_results,
-        "replaced-transactions": [],
-    })))
-}
-
 #[doc(hidden)]
 struct PackagePlan {
     tx_results: serde_json::Map<String, Value>,
@@ -2311,14 +2325,25 @@ fn submitpackage_plan(
     // that member can enter, including a parent that exists only in this
     // package. Such a member is not submitted: package feerate must not
     // rescue it, and it must not rescue the others (`rpc_packages.py`).
+    // Core tries each member alone in package order, so a member that
+    // spends a refused one (directly or through another) is missing inputs,
+    // not over the cap.
     let mut eval_txs = Vec::new();
     let mut over_max = Vec::new();
+    let mut refused = std::collections::HashSet::new();
     for tx in to_admit {
-        if package_tx_fee_exceeds_max(ctx, mp, &tx, txs, max_feerate) {
+        let spends_refused = tx
+            .input
+            .iter()
+            .any(|i| refused.contains(&i.previous_output.txid));
+        if spends_refused {
+            refused.insert(tx.compute_txid());
+        } else if package_tx_fee_exceeds_max(ctx, mp, &tx, txs, max_feerate) {
+            refused.insert(tx.compute_txid());
             over_max.push(tx);
-        } else {
-            eval_txs.push(tx);
+            continue;
         }
+        eval_txs.push(tx);
     }
     let package_eval = over_max.is_empty();
     PackagePlan {

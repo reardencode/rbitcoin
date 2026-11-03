@@ -2030,12 +2030,13 @@ fn duplicate_commit_after_prepare_is_duplicate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Core `IsChildWithParents` for `submitpackage` when
+/// Core `IsChildWithParentsTree` for `submitpackage` when
 /// `RpcContext::package_dialect` is on (the node's
 /// `RBITCOIN_RPC_PACKAGE_DIALECT`). A session with the flag rejects a package
-/// whose last tx does not spend every other member.
+/// whose last tx does not spend every other member, or whose parents spend
+/// each other.
 #[test]
-fn package_direct_parents_require_the_child_to_spend_each_member() {
+fn package_tree_requires_the_child_to_spend_each_member() {
     let (op, _, _) = chain_utxo(100_000);
     let parent = spend_tx(op, 90_000);
     let child = spend_tx(
@@ -2045,15 +2046,28 @@ fn package_direct_parents_require_the_child_to_spend_each_member() {
         },
         80_000,
     );
-    assert!(!ActiveMempool::package_is_child_with_direct_parents(
+    assert!(!ActiveMempool::package_is_child_with_parents_tree(
         std::slice::from_ref(&parent)
     ));
-    assert!(ActiveMempool::package_is_child_with_direct_parents(&[
+    assert!(ActiveMempool::package_is_child_with_parents_tree(&[
         parent.clone(),
         child.clone()
     ]));
-    assert!(!ActiveMempool::package_is_child_with_direct_parents(&[
-        child, parent
+    assert!(!ActiveMempool::package_is_child_with_parents_tree(&[
+        child.clone(),
+        parent.clone()
+    ]));
+    // The grandchild spends both, but `child` spends `parent`.
+    let mut grandchild = child.clone();
+    grandchild.input.push(TxIn {
+        previous_output: OutPoint {
+            txid: child.compute_txid(),
+            vout: 0,
+        },
+        ..child.input[0].clone()
+    });
+    assert!(!ActiveMempool::package_is_child_with_parents_tree(&[
+        parent, child, grandchild
     ]));
     // The index compare is gone. A one-tx self-spend is not a peer
     // message, because the txid commits to the prevout. `seen.contains`
@@ -2062,7 +2076,7 @@ fn package_direct_parents_require_the_child_to_spend_each_member() {
     let start = src.find("pub fn check_package_shape(").expect("shape");
     let end = start
         + src[start..]
-            .find("pub fn package_is_child_with_direct_parents(")
+            .find("pub fn package_is_child_with_parents_tree(")
             .expect("child");
     let shape = &src[start..end];
     assert!(!shape.contains("p <"), "index compare must stay deleted");

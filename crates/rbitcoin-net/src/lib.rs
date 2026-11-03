@@ -97,7 +97,9 @@ pub use peers::{
 };
 pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;
-pub use rbitcoin_mempool::{AcceptError, AcceptResult, SelectBudget, Selected};
+pub use rbitcoin_mempool::{
+    AcceptError, AcceptResult, CoreDatTx, CoreMempoolDat, SelectBudget, Selected,
+};
 pub use reactor::{
     acquire_armed_store_budget, hold_store_permit, off_pool, off_pool_budgeted,
     release_store_permit, spawn_with_store_budget, with_store_budget, BlockingRegion,
@@ -113,7 +115,7 @@ pub use serve_perf::{
 pub use service::{P2PNode, REDIAL_INTERVAL, REDIAL_INTERVAL_TEST};
 pub use socks::{install_i2p_dialer, Dialer, NetProxies};
 pub use tx_relay::{
-    arm_template_prev_sample, sample_template_prev_for_build, ElectrumMempoolItem,
+    arm_template_prev_sample, sample_template_prev_for_build, CoreDatImport, ElectrumMempoolItem,
     FeeHistoryBackfillStats, MempoolAnnounce, MempoolHub, MempoolPerfSample, MempoolTxSnapEntry,
     MempoolTxSnapshot, TemplateBuildSample, TxOrigin,
 };

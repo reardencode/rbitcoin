@@ -1,6 +1,7 @@
+use super::asm::{script_asm, SighashAsm};
 use super::descriptor::{bare_multisig, infer_descriptor, p2pk_key};
 use super::*;
-use bitcoin::consensus::{deserialize, encode::serialize_hex};
+use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash;
 use bitcoin::key::PublicKey;
 use bitcoin::script::Builder;
@@ -59,51 +60,90 @@ pub fn rpc_btc_network(n: Network) -> BtcNetwork {
     }
 }
 
-pub fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Value {
+/// Core `ScriptToUniv` with `hex`.
+pub fn script_pubkey_json(script: &bitcoin::Script, network: BtcNetwork) -> Value {
+    let mut obj = script_json(script, network);
+    obj["hex"] = json!(rbitcoin_primitives::hex_encode(script.as_bytes()));
+    obj
+}
+
+/// Core `ScriptToUniv` without `hex`, as `decodescript` prints its input.
+pub fn script_json(script: &bitcoin::Script, network: BtcNetwork) -> Value {
     let mut obj = json!({
-        "hex": rbitcoin_primitives::hex_encode(script.as_bytes() ),
-        "asm": script.to_asm_string(),
-        "type": script_core_type(script),
+        "asm": script_asm(script, SighashAsm::Hex),
+        "type": TxoutType::of(script).name(),
         "desc": infer_descriptor(script, network),
     });
     if let Ok(addr) = Address::from_script(script, network) {
-        if let Some(m) = obj.as_object_mut() {
-            m.insert("address".into(), json!(addr.to_string()));
-        }
+        obj["address"] = json!(addr.to_string());
     }
     obj
 }
 
-/// Core `decoderawtransaction` / `decodescript` `type` strings.
-pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
-    if script.is_p2pkh() {
-        "pubkeyhash"
-    } else if script.is_p2sh() {
-        "scripthash"
-    } else if script.is_p2wpkh() {
-        "witness_v0_keyhash"
-    } else if script.is_p2wsh() {
-        "witness_v0_scripthash"
-    } else if script.is_p2tr() {
-        "witness_v1_taproot"
-    } else if is_p2anchor(script) {
-        "anchor"
-    } else if let Some(version) = script.witness_version() {
-        if version == bitcoin::WitnessVersion::V0 {
-            "nonstandard"
+/// Core `TxoutType`, as `Solver` picks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxoutType {
+    NonStandard,
+    PubKey,
+    PubKeyHash,
+    ScriptHash,
+    Multisig,
+    NullData,
+    WitnessV0KeyHash,
+    WitnessV0ScriptHash,
+    WitnessV1Taproot,
+    WitnessUnknown,
+    Anchor,
+}
+
+impl TxoutType {
+    pub fn of(script: &bitcoin::Script) -> Self {
+        if script.is_p2pkh() {
+            Self::PubKeyHash
+        } else if script.is_p2sh() {
+            Self::ScriptHash
+        } else if script.is_p2wpkh() {
+            Self::WitnessV0KeyHash
+        } else if script.is_p2wsh() {
+            Self::WitnessV0ScriptHash
+        } else if script.is_p2tr() {
+            Self::WitnessV1Taproot
+        } else if is_p2anchor(script) {
+            Self::Anchor
+        } else if let Some(version) = script.witness_version() {
+            if version == bitcoin::WitnessVersion::V0 {
+                Self::NonStandard
+            } else {
+                Self::WitnessUnknown
+            }
+        } else if script.is_op_return()
+            && bitcoin::Script::from_bytes(&script.as_bytes()[1..]).is_push_only()
+        {
+            Self::NullData
+        } else if p2pk_key(script).is_some() {
+            Self::PubKey
+        } else if bare_multisig(script).is_some() {
+            Self::Multisig
         } else {
-            "witness_unknown"
+            Self::NonStandard
         }
-    } else if script.is_op_return()
-        && bitcoin::Script::from_bytes(&script.as_bytes()[1..]).is_push_only()
-    {
-        "nulldata"
-    } else if p2pk_key(script).is_some() {
-        "pubkey"
-    } else if bare_multisig(script).is_some() {
-        "multisig"
-    } else {
-        "nonstandard"
+    }
+
+    /// Core `GetTxnOutputType`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NonStandard => "nonstandard",
+            Self::PubKey => "pubkey",
+            Self::PubKeyHash => "pubkeyhash",
+            Self::ScriptHash => "scripthash",
+            Self::Multisig => "multisig",
+            Self::NullData => "nulldata",
+            Self::WitnessV0KeyHash => "witness_v0_keyhash",
+            Self::WitnessV0ScriptHash => "witness_v0_scripthash",
+            Self::WitnessV1Taproot => "witness_v1_taproot",
+            Self::WitnessUnknown => "witness_unknown",
+            Self::Anchor => "anchor",
+        }
     }
 }
 
@@ -115,7 +155,7 @@ pub fn is_p2anchor(script: &bitcoin::Script) -> bool {
 
 pub fn decode_output_script(ctx: &RpcContext, s: &str) -> Result<ScriptBuf, Value> {
     let btc_net = rpc_btc_network(ctx.network);
-    if let Ok(a) = s.parse::<Address<_>>() {
+    if let Some(a) = parse_address(s) {
         match a.require_network(btc_net) {
             Ok(addr) => return Ok(addr.script_pubkey()),
             Err(_) => {
@@ -219,7 +259,7 @@ pub async fn generate_async(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
         return Err(rpc_error(ERR_METHOD_NOT_FOUND, GENERATE_REPLACED));
     }
     let _miner = require_regtest_miner(ctx, "generate")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let _maxtries = params.opt_u64(1, "maxtries")?;
     let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
     generate_with_mempool_async(ctx, nblocks, script).await
@@ -228,7 +268,7 @@ pub async fn generate_async(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
 pub async fn generatetoaddress_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "address", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let addr = params.req_str(1, "address")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = decode_output_script(ctx, addr)?;
@@ -241,7 +281,7 @@ pub async fn generatetodescriptor_async(
 ) -> Result<Value, Value> {
     params.reject_unknown(&["num_blocks", "descriptor", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetodescriptor")?;
-    let nblocks = params.req_u64(0, "num_blocks")? as u32;
+    let nblocks = generate_count(params, "num_blocks")?;
     let desc = params.req_str(1, "descriptor")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = parse_output_descriptor(ctx, desc)?;
@@ -289,8 +329,8 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
                 }
             }
             match decode_tx_hex(s) {
-                Ok(tx) => extra.push(tx),
-                Err(_) => {
+                Some(tx) => extra.push(tx),
+                None => {
                     return Err(rpc_error(
                         ERR_DESERIALIZATION,
                         format!(
@@ -330,10 +370,16 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
     Ok(json!({ "hash": hash.to_string() }))
 }
 
+/// Core reads the count with `getInt<int>`, and `generateBlocks` mines
+/// nothing for a count at or below zero.
+fn generate_count(params: &RpcParams, name: &str) -> Result<u32, Value> {
+    Ok(params.req_core_int(0, name)?.max(0) as u32)
+}
+
 pub fn generatetoaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "address", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let addr = params.req_str(1, "address")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = decode_output_script(ctx, addr)?;
@@ -372,8 +418,8 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
                 }
             }
             match decode_tx_hex(s) {
-                Ok(tx) => extra.push(tx),
-                Err(_) => {
+                Some(tx) => extra.push(tx),
+                None => {
                     return Err(rpc_error(
                         ERR_DESERIALIZATION,
                         format!(
@@ -501,7 +547,7 @@ pub fn parse_generateblock_output(ctx: &RpcContext, output: &str) -> Result<Scri
         return Err(invalid());
     }
     let btc_net = rpc_btc_network(ctx.network);
-    if let Ok(a) = output.parse::<Address<_>>() {
+    if let Some(a) = parse_address(output) {
         if let Ok(addr) = a.require_network(btc_net) {
             return Ok(addr.script_pubkey());
         }
@@ -519,7 +565,7 @@ pub fn generate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         return Err(rpc_error(ERR_METHOD_NOT_FOUND, GENERATE_REPLACED));
     }
     let _miner = require_regtest_miner(ctx, "generate")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let _maxtries = params.opt_u64(1, "maxtries")?;
     let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
     generate_with_mempool(ctx, nblocks, script)
@@ -528,7 +574,7 @@ pub fn generate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
 pub fn generatetodescriptor(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["num_blocks", "descriptor", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetodescriptor")?;
-    let nblocks = params.req_u64(0, "num_blocks")? as u32;
+    let nblocks = generate_count(params, "num_blocks")?;
     let desc = params.req_str(1, "descriptor")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = parse_output_descriptor(ctx, desc)?;
@@ -1232,10 +1278,7 @@ pub fn gbt_proposal(
         .and_then(|o| o.get("data"))
         .and_then(Value::as_str)
         .ok_or_else(|| rpc_error(ERR_TYPE_ERROR, "Missing data String key for proposal"))?;
-    let raw = rbitcoin_primitives::hex_decode(data)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-    let block: Block =
-        deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let block = decode_block_hex(data)?;
     if let Some(known) = proposal_duplicate(ctx, &block.block_hash())? {
         return Ok(json!(known));
     }
@@ -1960,11 +2003,7 @@ pub fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
 
 pub fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexdata", "dummy"])?;
-    let hex = params.req_str(0, "hexdata")?;
-    let raw = rbitcoin_primitives::hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-    let block: Block =
-        deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let block = decode_block_hex(params.req_str(0, "hexdata")?)?;
     let outcome = if let Some(chain) = ctx.chain.as_ref() {
         submit_received_block(chain, block)
     } else if let Some(miner) = ctx.regtest.as_deref() {
@@ -1983,10 +2022,7 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
     };
     let chain_prep = std::sync::Arc::clone(&chain);
     let prepared = rbitcoin_net::off_pool_budgeted(move || -> Result<SubmitPrep, Value> {
-        let raw = rbitcoin_primitives::hex_decode(&hex)
-            .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-        let block: Block =
-            deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+        let block = decode_block_hex(&hex)?;
         Ok(prepare_submit(&chain_prep, block))
     })
     .await?;
@@ -2007,10 +2043,39 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
     submit_outcome_json(outcome)
 }
 
-pub fn decode_tx_hex(hex: &str) -> Result<Transaction, Value> {
-    let b = rbitcoin_primitives::hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))?;
-    deserialize(&b).map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))
+/// Core `DecodeHexBlk` for `submitblock` and proposals.
+pub fn decode_block_hex(hex: &str) -> Result<Block, Value> {
+    rbitcoin_primitives::hex_decode(hex)
+        .ok()
+        .and_then(|raw| rbitcoin_consensus::wire::decode_block(&raw).ok())
+        .ok_or_else(|| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))
+}
+
+/// Core `DecodeHexTx` with its defaults: the witness form only. Each caller
+/// words the failure as Core's method does.
+pub fn decode_tx_hex(hex: &str) -> Option<Transaction> {
+    let raw = rbitcoin_primitives::hex_decode(hex).ok()?;
+    rbitcoin_consensus::wire::decode_tx(&raw, false, true)
+}
+
+/// Core `sendrawtransaction` decode failure.
+pub fn decode_sendraw_tx_hex(hex: &str) -> Result<Transaction, Value> {
+    decode_tx_hex(hex).ok_or_else(|| {
+        rpc_error(
+            ERR_DESERIALIZATION,
+            "TX decode failed. Make sure the tx has at least one input.",
+        )
+    })
+}
+
+/// Core `testmempoolaccept` and `submitpackage` decode failure.
+pub fn decode_package_tx_hex(hex: &str) -> Result<Transaction, Value> {
+    decode_tx_hex(hex).ok_or_else(|| {
+        rpc_error(
+            ERR_DESERIALIZATION,
+            format!("TX decode failed: {hex} Make sure the tx has at least one input."),
+        )
+    })
 }
 
 pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -> Value {
@@ -2028,7 +2093,7 @@ pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -
                 "txid": hash_hex_display(&inp.previous_output.txid.to_byte_array()),
                 "vout": inp.previous_output.vout,
                 "scriptSig": {
-                    "asm": inp.script_sig.to_asm_string(),
+                    "asm": script_asm(&inp.script_sig, SighashAsm::Decode),
                     "hex": rbitcoin_primitives::hex_encode(inp.script_sig.as_bytes() ),
                 },
                 "sequence": inp.sequence.to_consensus_u32(),
@@ -2050,8 +2115,10 @@ pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -
     }
     let mut vout = Vec::new();
     for (i, out) in tx.output.iter().enumerate() {
+        // Core reads `nValue` as a signed `CAmount`: a decoded value above
+        // `i64::MAX` prints negative there too.
         vout.push(json!({
-            "value": out.value.to_btc(),
+            "value": sat_btc_json(out.value.to_sat() as i64),
             "n": i,
             "scriptPubKey": script_pubkey_json(&out.script_pubkey, network),
         }));

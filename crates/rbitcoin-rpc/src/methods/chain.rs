@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
+use bitcoin::{Block, BlockHash, ScriptBuf, Txid};
 use rbitcoin_primitives::{median_time_past_times, Fk, Height, MedianWindow};
 
 use serde_json::{json, Value};
@@ -1281,7 +1281,7 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
                     return Ok(json!({
                         "bestblock": getbestblockhash(ctx)?,
                         "confirmations": 0,
-                        "value": out.value.to_btc(),
+                        "value": sat_btc_json(out.value.to_sat() as i64),
                         "scriptPubKey": script_pubkey_json(&out.script_pubkey, rpc_btc_network(ctx.network)),
                         "coinbase": false,
                     }));
@@ -1344,7 +1344,7 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     Ok(json!({
         "bestblock": getbestblockhash(ctx)?,
         "confirmations": confs,
-        "value": Amount::from_sat(out.value).to_btc(),
+        "value": sat_btc_json(out.value as i64),
         "scriptPubKey": script_pubkey_json(&ScriptBuf::from_bytes(out.script), rpc_btc_network(ctx.network)),
         "coinbase": coinbase,
     }))

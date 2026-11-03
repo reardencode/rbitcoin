@@ -16,8 +16,23 @@ fn best_hash(ctx: &RpcContext) -> Value {
     dispatch(ctx, "getbestblockhash", vec![]).unwrap()
 }
 
+/// Core's bytes for `block`. rust-bitcoin writes a tx with no inputs in the
+/// witness form, which Core reads as a superfluous witness record. A tx with
+/// no inputs and no outputs is written as Core's null tx (flags 0) instead.
 fn block_hex(block: &Block) -> String {
-    rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(block))
+    use bitcoin::consensus::encode::{serialize, VarInt};
+    let mut bytes = serialize(&block.header);
+    bytes.extend(serialize(&VarInt(block.txdata.len() as u64)));
+    for tx in &block.txdata {
+        if tx.input.is_empty() && tx.output.is_empty() {
+            bytes.extend(serialize(&tx.version));
+            bytes.extend([0, 0]);
+            bytes.extend(serialize(&tx.lock_time));
+        } else {
+            bytes.extend(serialize(tx));
+        }
+    }
+    rbitcoin_primitives::hex_encode(bytes)
 }
 
 fn tx_hex(tx: &Transaction) -> String {
@@ -96,7 +111,99 @@ fn rpc_regtest_from_genesis() {
     chain_ops_submit_tx_shape(&ctx, &hub, &p2wpkh);
     chain_ops_echo_overlap(&ctx);
     chain_ops_reconsider_invalidated_side_block(&ctx, &hub);
+    chain_ops_decode_acceptance(&ctx, &hub);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bytes Core's decoders accept and refuse: `DecodeHexTx` tries the witness
+/// and legacy forms, `DecodeHexBlk` ignores trailing bytes, and a base58
+/// address may carry leading and trailing whitespace.
+fn chain_ops_decode_acceptance(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    let decode = |hex: &str, iswitness: Option<bool>| {
+        let mut params = vec![json!(hex)];
+        params.extend(iswitness.map(|w| json!(w)));
+        dispatch(ctx, "decoderawtransaction", params)
+    };
+    let null = decode(NULL_TX_HEX, None).unwrap();
+    assert_eq!((null["vin"].clone(), null["vout"].clone()), (json!([]), json!([])));
+    let output_only = decode(OUTPUT_ONLY_TX_HEX, None).unwrap();
+    assert_eq!(output_only["vin"], json!([]), "{output_only}");
+    assert_eq!(output_only["vout"][0]["scriptPubKey"]["hex"], "51");
+    assert!(decode(OUTPUT_ONLY_TX_HEX, Some(false)).is_ok());
+    for (hex, iswitness) in [
+        (OUTPUT_ONLY_TX_HEX, Some(true)),
+        (SUPERFLUOUS_WITNESS_TX_HEX, None),
+        (SUPERFLUOUS_WITNESS_TX_HEX, Some(true)),
+        (SUPERFLUOUS_WITNESS_TX_HEX, Some(false)),
+    ] {
+        let e = decode(hex, iswitness).unwrap_err();
+        assert_eq!(e["message"], "TX decode failed", "{hex} {iswitness:?}: {e}");
+    }
+
+    let submit = |hex: String| dispatch(ctx, "submitblock", vec![json!(hex)]);
+    let next = |txdata: Vec<Transaction>| {
+        let tip = hub.tip_header().unwrap();
+        rbitcoin_consensus::mine_regtest_paying(
+            tip.block_hash(),
+            tip.time + 1,
+            tip_count(ctx) as u32 + 1,
+            true_spk(),
+            txdata,
+        )
+    };
+    let null_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let with_null = next(vec![null_tx]);
+    assert!(block_hex(&with_null).ends_with(NULL_TX_HEX));
+    assert_eq!(
+        submit(block_hex(&with_null)).unwrap(),
+        "bad-txns-vin-empty",
+        "a null tx decodes inside a block"
+    );
+    let rust_bitcoin_bytes =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&with_null));
+    let e = submit(rust_bitcoin_bytes).unwrap_err();
+    assert_eq!(e["message"], "Block decode failed", "superfluous witness record: {e}");
+    let honest = next(vec![]);
+    let mut superfluous = block_hex(&honest);
+    superfluous.replace_range(160..162, "02");
+    superfluous.push_str(SUPERFLUOUS_WITNESS_TX_HEX);
+    let e = submit(superfluous).unwrap_err();
+    assert_eq!(e["message"], "Block decode failed", "{e}");
+
+    let proposal = proposal_on_tip(ctx, vec![]);
+    let req = |hex: String| json!({"mode": "proposal", "data": hex, "rules": ["segwit"]});
+    let plain = dispatch(ctx, "getblocktemplate", vec![req(block_hex(&proposal))]).unwrap();
+    let trailing =
+        dispatch(ctx, "getblocktemplate", vec![req(format!("{}00ff", block_hex(&proposal)))])
+            .unwrap();
+    assert_eq!(trailing, plain, "a proposal ignores trailing bytes");
+    let before = tip_count(ctx);
+    let r = submit(format!("{}00ff", block_hex(&honest))).unwrap();
+    assert!(r.is_null(), "submitblock ignores trailing bytes: {r}");
+    assert_eq!(tip_count(ctx), before + 1);
+
+    let p2pkh = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([7; 20]),
+        BtcNetwork::Regtest,
+    )
+    .to_string();
+    let spaced = format!(" \t\x0b{p2pkh}\r\n\x0c ");
+    let valid = dispatch(ctx, "validateaddress", vec![json!(spaced.clone())]).unwrap();
+    assert_eq!(valid["isvalid"], true, "{valid}");
+    assert_eq!(valid["address"], json!(p2pkh));
+    let inner = dispatch(ctx, "validateaddress", vec![json!(format!("{p2pkh} x"))]).unwrap();
+    assert_eq!(inner, json!({"isvalid": false}));
+    let (bech32, _) = p2wpkh_regtest();
+    let padded = dispatch(ctx, "validateaddress", vec![json!(format!(" {bech32}"))]).unwrap();
+    assert_eq!(padded, json!({"isvalid": false}), "bech32 keeps no whitespace");
+    let mined = dispatch(ctx, "generatetoaddress", vec![json!(1), json!(spaced)]).unwrap();
+    assert_eq!(mined.as_array().map(Vec::len), Some(1), "{mined}");
+    assert_eq!(tip_count(ctx), before + 2);
 }
 
 /// Param, help, stop, and network-identity outcomes on the hub this journey
@@ -112,6 +219,7 @@ fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
     chain_ops_unknown_named_param(ctx);
     chain_ops_wrong_json_types(ctx);
     chain_ops_regtest_type_errors(ctx);
+    chain_ops_generate_count_is_core_int(ctx);
     chain_ops_junk_tx_hex(ctx);
     chain_ops_network_identity(ctx);
     ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -396,17 +504,96 @@ fn chain_ops_regtest_type_errors(ctx: &RpcContext) {
     }
 }
 
-fn chain_ops_junk_tx_hex(ctx: &RpcContext) {
-    for (method, params) in [
-        ("sendrawtransaction", vec![json!("ff00baar")]),
-        ("testmempoolaccept", vec![json!(["ff00baar"])]),
-        ("submitpackage", vec![json!(["ff00baar"])]),
-        ("sendrawtransaction", vec![json!("00")]),
-    ] {
-        let e = dispatch(ctx, method, params).unwrap_err();
-        assert_eq!(e["code"], ERR_DESERIALIZATION, "{method}: {e}");
-        assert_eq!(e["message"], json!("TX decode failed:"), "{method}: {e}");
+/// Core reads the block count with `getInt<int>`: past `i32` is `-1`
+/// `JSON integer out of range` (not a truncated count), and a count at or
+/// below zero mines nothing.
+fn chain_ops_generate_count_is_core_int(ctx: &RpcContext) {
+    let (addr, _) = p2wpkh_regtest();
+    let calls = |count: Value| {
+        [
+            ("generate", vec![count.clone()]),
+            ("generatetoaddress", vec![count.clone(), json!(addr)]),
+            ("generatetodescriptor", vec![count, json!("raw(51)")]),
+        ]
+    };
+    let out_of_range = [
+        json!(4_294_967_297_u64),
+        json!(2_147_483_648_u64),
+        json!(-2_147_483_649_i64),
+        json_num("1.5"),
+    ];
+    for count in out_of_range {
+        for (method, params) in calls(count.clone()) {
+            let err = dispatch(ctx, method, params).unwrap_err();
+            assert_eq!(err["code"], ERR_MISC, "{method} {count}: {err}");
+            assert_eq!(err["message"], "JSON integer out of range", "{method} {count}: {err}");
+        }
     }
+    for count in [json!(-1), json!(-2_147_483_648_i64), json!(0)] {
+        for (method, params) in calls(count.clone()) {
+            let got = dispatch(ctx, method, params).unwrap();
+            assert_eq!(got, json!([]), "{method} {count}");
+        }
+    }
+    for (method, params) in calls(json!("1")) {
+        let err = dispatch(ctx, method, params).unwrap_err();
+        assert_eq!(err["code"], ERR_TYPE_ERROR, "{method}: {err}");
+        assert_eq!(
+            err["message"], "JSON value of type string is not of expected type number",
+            "{method}: {err}"
+        );
+    }
+    assert_eq!(tip_count(ctx), 0);
+}
+
+/// Version 2, an empty vin, flags 0, locktime 0. Core's witness decode reads
+/// no vout after flags 0.
+const NULL_TX_HEX: &str = "02000000000000000000";
+/// Legacy bytes of a tx with no inputs and one 1000-sat output. The witness
+/// decode reads the output count as flags 1 and runs out of inputs.
+const OUTPUT_ONLY_TX_HEX: &str = "020000000001e803000000000000015100000000";
+/// Flags 1 then an empty vin: Core's "Superfluous witness record". The
+/// legacy decode does not consume these bytes either.
+const SUPERFLUOUS_WITNESS_TX_HEX: &str = "02000000000100010000000000000000015100000000";
+
+/// Core `DecodeHexTx` per surface: raw submits try the witness decode only
+/// and name the input in the error text.
+fn chain_ops_junk_tx_hex(ctx: &RpcContext) {
+    const SUFFIX: &str = "Make sure the tx has at least one input.";
+    for hex in [
+        "ff00baar",
+        "00",
+        OUTPUT_ONLY_TX_HEX,
+        SUPERFLUOUS_WITNESS_TX_HEX,
+    ] {
+        for (method, params, want) in [
+            (
+                "sendrawtransaction",
+                vec![json!(hex)],
+                format!("TX decode failed. {SUFFIX}"),
+            ),
+            (
+                "testmempoolaccept",
+                vec![json!([hex])],
+                format!("TX decode failed: {hex} {SUFFIX}"),
+            ),
+            (
+                "submitpackage",
+                vec![json!([hex])],
+                format!("TX decode failed: {hex} {SUFFIX}"),
+            ),
+        ] {
+            let e = dispatch(ctx, method, params).unwrap_err();
+            assert_eq!(e["code"], ERR_DESERIALIZATION, "{method} {hex}: {e}");
+            assert_eq!(e["message"], json!(want), "{method} {hex}: {e}");
+        }
+    }
+    // A null tx decodes, so it is refused by validation, not as a decode.
+    let e = dispatch(ctx, "sendrawtransaction", vec![json!(NULL_TX_HEX)]).unwrap_err();
+    assert_eq!(e["code"], ERR_VERIFY_REJECTED, "a null tx decodes: {e}");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([NULL_TX_HEX])]).unwrap();
+    assert_eq!(tma[0]["allowed"], false, "{tma}");
+    assert!(tma[0]["reject-reason"].is_string(), "{tma}");
 }
 
 fn chain_ops_network_identity(ctx: &RpcContext) {
@@ -578,6 +765,8 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_prioritise(&ctx, &mut cbs);
     chain_ops_template_orders_rate_then_fee(&ctx, &mut cbs);
     chain_ops_deprioritised_child_keeps_parent(&ctx, &mut cbs);
+    chain_ops_deprioritised_parent_rides_child(&ctx, &mut cbs);
+    chain_ops_save_and_import_mempool(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
@@ -683,6 +872,15 @@ fn chain_ops_estimate_fee_param_gates(ctx: &RpcContext) {
         e["message"].as_str().unwrap().contains("JSON value of type number is not of expected type string"),
         "{e}"
     );
+    // Core `estimaterawfee`: a threshold outside `0..=1` is `-8`.
+    for threshold in [json_num("1.01"), json!(2), json_num("-0.5")] {
+        let e = dispatch(ctx, "estimaterawfee", vec![json!(2), threshold.clone()]).unwrap_err();
+        assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{threshold}: {e}");
+        assert_eq!(e["message"], "Invalid threshold", "{threshold}: {e}");
+    }
+    for threshold in [json!(0), json!(1), json_num("0.95")] {
+        dispatch(ctx, "estimaterawfee", vec![json!(2), threshold]).unwrap();
+    }
 }
 
 fn chain_ops_estimate_fee_options(ctx: &RpcContext) {
@@ -997,6 +1195,56 @@ fn chain_ops_at_genesis(
     reported
 }
 
+/// `prioritisetransaction` and `getprioritisedtransactions` argument shapes
+/// as Core reads them. The deltas net to zero on a txid the pool never saw.
+fn chain_ops_prioritise_params(ctx: &RpcContext) {
+    let e = dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!("11".repeat(32)), json!(1), json!(0)],
+    )
+    .unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(e["message"]
+        .as_str()
+        .unwrap()
+        .contains("Priority is no longer supported"));
+    // Core `RPCHelpMan`: a wrong argument count is `-1` with the method's
+    // help text, the same text `help prioritisetransaction` prints.
+    let help = dispatch(ctx, "help", vec![json!("prioritisetransaction")]).unwrap();
+    assert!(
+        help.as_str().unwrap().starts_with("prioritisetransaction txid (dummy) fee_delta\n"),
+        "{help}"
+    );
+    let txid = json!("11".repeat(32));
+    for params in [
+        RpcParams::from(vec![]),
+        RpcParams::from(vec![txid.clone()]),
+        RpcParams::from(vec![txid.clone(), json!(0)]),
+        RpcParams::from(vec![txid.clone(), json!(0), json!(0), json!(0)]),
+        RpcParams::named(json!({"txid": txid}).as_object().unwrap().clone()),
+    ] {
+        let missing = dispatch(ctx, "prioritisetransaction", params).unwrap_err();
+        assert_eq!(missing["code"], ERR_MISC, "{missing}");
+        assert_eq!(missing["message"], help, "{missing}");
+    }
+    // Core reads dummy as a double (`0.0` in its own help example) that
+    // may be null, and fee_delta with `getInt<int64_t>`.
+    for dummy in [json_num("0.0"), Value::Null] {
+        let ok = dispatch(ctx, "prioritisetransaction", vec![txid.clone(), dummy, json!(1)]);
+        assert_eq!(ok, Ok(json!(true)));
+    }
+    let frac = dispatch(ctx, "prioritisetransaction", vec![txid.clone(), json!(0), json_num("1.5")])
+        .unwrap_err();
+    assert_eq!(frac["code"], ERR_MISC, "{frac}");
+    assert_eq!(frac["message"], "JSON integer out of range", "{frac}");
+    dispatch(ctx, "prioritisetransaction", vec![txid, json!(0), json!(-2)]).unwrap();
+    let extra = dispatch(ctx, "getprioritisedtransactions", vec![json!(true)]).unwrap_err();
+    assert_eq!(extra["code"], ERR_MISC);
+    let help = dispatch(ctx, "help", vec![json!("getprioritisedtransactions")]).unwrap();
+    assert_eq!(extra["message"], help, "{extra}");
+}
+
 fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
     let mut named = serde_json::Map::new();
     named.insert("output".into(), json!("raw(55)"));
@@ -1010,22 +1258,7 @@ fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub)
     assert_eq!(e["code"], ERR_INVALID_PARAMETER);
     assert!(e["message"].as_str().unwrap().contains("segwit rule"));
 
-    let e = dispatch(
-        ctx,
-        "prioritisetransaction",
-        vec![json!("11".repeat(32)), json!(1), json!(0)],
-    )
-    .unwrap_err();
-    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
-    assert!(e["message"]
-        .as_str()
-        .unwrap()
-        .contains("Priority is no longer supported"));
-    let missing = dispatch(ctx, "prioritisetransaction", vec![]).unwrap_err();
-    assert_eq!(missing["code"], ERR_MISC);
-    assert_eq!(missing["message"], "prioritisetransaction");
-    let extra = dispatch(ctx, "getprioritisedtransactions", vec![json!(true)]).unwrap_err();
-    assert_eq!(extra["code"], ERR_MISC);
+    chain_ops_prioritise_params(ctx);
 
     let e = dispatch(ctx, "setmocktime", vec![json!(-1)]).unwrap_err();
     assert_eq!(e["code"], ERR_INVALID_PARAMETER);
@@ -1519,16 +1752,14 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     let mut young = mine(7);
     let cb = young.txdata[0].compute_txid();
     young.txdata.push(spend(OutPoint { txid: cb, vout: 0 }, 1));
-    // CheckTransaction rejects an empty vin before CheckTxInputs compares values.
+    // CheckTransaction rejects an empty vin before CheckTxInputs compares
+    // values. Core's bytes can carry an input-less tx only as a null tx.
     let mut no_vin = mine(8);
     no_vin.txdata.push(Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
         input: vec![],
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::new(),
-        }],
+        output: vec![],
     });
     // A confirmed coinbase is still immature here. CheckTxInputs reports that
     // before the value check, including when the outputs exceed the inputs.
@@ -2427,9 +2658,9 @@ fn send_tx(ctx: &RpcContext, tx: &Transaction) -> String {
         .to_string()
 }
 
-/// `getblocktemplate` lists a cluster in linearization order: higher rate,
-/// then higher fee, then the lesser txid. A negative `prioritisetransaction`
-/// drops that child from the template.
+/// `getblocktemplate` lists a cluster in Core's order: chunk by chunk, and
+/// inside a chunk higher exact feerate, then the lesser txid. A negative
+/// `prioritisetransaction` drops that child from the template.
 fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
     let h = cbs.take();
     let cb = generated_coinbase_value(ctx, h);
@@ -2488,8 +2719,9 @@ fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinb
     chain_ops_mine_pool_empty(ctx);
 
     // 400_000 sat at vsize 2000 and 200_000 sat at vsize 1000 floor to the
-    // same sat/kvB. The higher fee is the later txid, so the fee compare is
-    // what puts it first in the template.
+    // same sat/kvB, and both join the parent's chunk. Inside a chunk Core
+    // orders ready transactions by exact feerate, so the smaller child, whose
+    // exact feerate is higher, goes first even though the higher fee does not.
     let h = cbs.take();
     let cb = generated_coinbase_value(ctx, h);
     let each = (cb - 10_000) / 2;
@@ -2523,10 +2755,24 @@ fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinb
             (hi.compute_txid() > lo.compute_txid()).then_some((hi, lo))
         })
         .expect("higher-fee txid after the lower-fee sibling");
+    assert!(
+        200_000 * hi.weight().to_wu() > 400_000 * lo.weight().to_wu(),
+        "the smaller child has the higher exact feerate"
+    );
     let hi_id = send_tx(ctx, &hi);
     let lo_id = send_tx(ctx, &lo);
     let ids = gbt_txids(ctx);
-    assert_template_before(&ids, &hi_id, &lo_id);
+    assert_template_before(&ids, &lo_id, &hi_id);
+    let cluster = dispatch(ctx, "getmempoolcluster", vec![json!(lo_id.clone())]).unwrap();
+    assert_eq!(
+        cluster["chunks"],
+        json!([{
+            "chunkfee": cluster["chunks"][0]["chunkfee"],
+            "chunkweight": cluster["clusterweight"],
+            "txs": [pid.to_string(), lo_id, hi_id],
+        }]),
+        "{cluster}"
+    );
     chain_ops_mine_pool_empty(ctx);
 }
 
@@ -2600,6 +2846,306 @@ fn chain_ops_deprioritised_child_keeps_parent(ctx: &RpcContext, cbs: &mut TrueCo
     )
     .unwrap();
     chain_ops_mine_pool_empty(ctx);
+}
+
+/// A parent whose modified fee is negative chunks with the child that pays
+/// for it, ahead of a cheap sibling (Core ancestor-set candidate). With
+/// `-blockmintxfee` between the two, the template and `generate` take the
+/// parent and child and leave the sibling.
+fn chain_ops_deprioritised_parent_rides_child(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let each = (cb - 100_000) / 2;
+    let root = parent_paying(ctx, h, each, true_spk(), true_spk());
+    let root_id = send_tx(ctx, &root);
+    let parent_fee = 1_000u64;
+    let child_fee = 50_000u64;
+    let parent = op_true_child(&root, 0, parent_fee, 1);
+    let pid = send_tx(ctx, &parent);
+    let delta = -((parent_fee + 9_000) as i64);
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(pid.clone()), json!(0), json!(delta)],
+    )
+    .unwrap();
+    let cid = send_tx(ctx, &op_true_child(&parent, 0, child_fee, 2));
+    let sibling_fee = 400u64;
+    let mut sibling = op_true_child(&root, 1, sibling_fee, 3);
+    let outs = 200u64;
+    let share = sibling.output[0].value.to_sat() / outs;
+    sibling.output = (0..outs)
+        .map(|_| bitcoin::TxOut {
+            value: Amount::from_sat(share),
+            script_pubkey: true_spk(),
+        })
+        .collect();
+    let rest = each - sibling_fee - share * outs;
+    sibling.output[0].value += Amount::from_sat(rest);
+    let sid = send_tx(ctx, &sibling);
+
+    let chunk_sat = (parent_fee + child_fee) as i64 + delta;
+    let cluster = dispatch(ctx, "getmempoolcluster", vec![json!(pid.clone())]).unwrap();
+    let chunks = cluster["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 3, "{cluster}");
+    assert_eq!(chunks[0]["txs"], json!([root_id.clone()]));
+    assert_eq!(chunks[1]["txs"], json!([pid.clone(), cid.clone()]));
+    assert_eq!(chunks[2]["txs"], json!([sid.clone()]));
+    let entry = dispatch(ctx, "getmempoolentry", vec![json!(pid.clone())]).unwrap();
+    assert_eq!(
+        entry["fees"]["chunk"].as_f64().unwrap(),
+        Amount::from_sat(chunk_sat as u64).to_btc(),
+        "{entry}"
+    );
+
+    ctx.chain
+        .as_ref()
+        .unwrap()
+        .set_block_min_tx_fee_sat_kvb(100_000);
+    let ids = gbt_txids(ctx);
+    assert_template_before(&ids, &root_id, &pid);
+    assert_template_before(&ids, &pid, &cid);
+    assert!(!ids.contains(&sid), "the cheap sibling stays out: {ids:?}");
+    dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+    assert_eq!(
+        dispatch(ctx, "getrawmempool", vec![]).unwrap(),
+        json!([sid]),
+        "the deprioritised parent is mined with the child that pays for it"
+    );
+    chain_ops_restore_sigop_mining_knobs(ctx);
+    chain_ops_mine_pool_empty(ctx);
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn dat_tx(tx: &Transaction, time: i64, fee_delta: i64) -> rbitcoin_net::CoreDatTx {
+    rbitcoin_net::CoreDatTx {
+        tx: tx.clone(),
+        time,
+        fee_delta,
+    }
+}
+
+fn import_err(ctx: &RpcContext, params: Vec<Value>) -> Value {
+    dispatch(ctx, "importmempool", params).unwrap_err()
+}
+
+fn entry_time(ctx: &RpcContext, txid: &str) -> i64 {
+    dispatch(ctx, "getmempoolentry", vec![json!(txid)]).unwrap()["time"]
+        .as_i64()
+        .unwrap()
+}
+
+fn sorted_pool(ctx: &RpcContext) -> Vec<String> {
+    let mut pool: Vec<String> = dispatch(ctx, "getrawmempool", vec![])
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    pool.sort();
+    pool
+}
+
+/// A txid no file entry or pool member has.
+fn unknown_txid() -> Txid {
+    Txid::from_byte_array([0x99; 32])
+}
+
+/// Older than the default 336 h `-mempoolexpiry`.
+fn expired_time() -> i64 {
+    unix_now() - 15 * 86_400
+}
+
+/// Core `mempool_persist.py` shape over Core's `mempool.dat` bytes:
+/// `savemempool` writes the pool (entry times, fee deltas, the unbroadcast
+/// set) as a version 2 file, and `importmempool` admits a version 1 or 2
+/// file through normal admission under each of its three options.
+fn chain_ops_save_and_import_mempool(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    let (path, raw) = mempool_dat_save(ctx, cbs);
+    mempool_dat_import_defaults(ctx, cbs, &path);
+    mempool_dat_import_every_option(ctx, cbs, &path);
+    mempool_dat_import_rejects(ctx, &path, &raw);
+    chain_ops_mine_pool_empty(ctx);
+}
+
+fn mempool_dat_save(ctx: &RpcContext, cbs: &mut TrueCoinbases) -> (std::path::PathBuf, Vec<u8>) {
+    let mp = ctx.mempool.as_ref().unwrap();
+    let h = cbs.take();
+    let (parent_hex, parent) =
+        spend_generated_coinbase(ctx, h, generated_coinbase_value(ctx, h) - 1_000, true_spk());
+    let pid = dispatch(ctx, "sendrawtransaction", vec![json!(parent_hex)])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = op_true_child(&parent, 0, 2_000, 1);
+    let cid = send_tx(ctx, &child);
+    dispatch(ctx, "prioritisetransaction", vec![json!(cid.clone()), json!(0), json!(700)]).unwrap();
+    let absent = Txid::from_byte_array([0xab; 32]);
+    let prioritise_absent = |delta: i64| {
+        dispatch(
+            ctx,
+            "prioritisetransaction",
+            vec![json!(absent.to_string()), json!(0), json!(delta)],
+        )
+        .unwrap()
+    };
+    prioritise_absent(777);
+
+    let saved = dispatch(ctx, "savemempool", vec![]).unwrap();
+    let path = mp.core_mempool_dat_path();
+    assert_eq!(saved, json!({ "filename": path.display().to_string() }));
+    assert!(path.ends_with("mempool.dat"), "{}", path.display());
+    assert!(!path.with_file_name("mempool.dat.new").exists());
+    let raw = std::fs::read(&path).unwrap();
+    assert_eq!(raw[..8], 2u64.to_le_bytes(), "version 2");
+    assert_eq!(raw[8], 8, "compact size of the XOR key");
+    let key = &raw[9..17];
+    let count: Vec<u8> = (17..25).map(|i| raw[i] ^ key[i % 8]).collect();
+    assert_eq!(count, 2u64.to_le_bytes(), "count is XORed at its file offset");
+    let dat = rbitcoin_net::CoreMempoolDat::decode(&raw).unwrap();
+    assert_eq!(
+        dat.txs,
+        vec![
+            dat_tx(&parent, entry_time(ctx, &pid), 0),
+            dat_tx(&child, entry_time(ctx, &cid), 700),
+        ],
+        "parents first, with entry time and fee delta"
+    );
+    assert_eq!(dat.deltas, [(absent, 777)].into_iter().collect());
+    assert_eq!(
+        dat.unbroadcast,
+        [parent.compute_txid(), child.compute_txid()].into_iter().collect()
+    );
+    prioritise_absent(-777);
+    chain_ops_mine_pool_empty(ctx);
+    (path, raw)
+}
+
+/// Version 1, default options: current time, no deltas, no unbroadcast.
+fn mempool_dat_import_defaults(ctx: &RpcContext, cbs: &mut TrueCoinbases, path: &std::path::Path) {
+    let a = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let b = op_true_child(&a, 0, 1_000, 2);
+    let e = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let mut missing = op_true_child(&a, 0, 1_000, 3);
+    missing.input[0].previous_output.txid = Txid::from_byte_array([0xcd; 32]);
+    let old = expired_time();
+    let v1 = rbitcoin_net::CoreMempoolDat {
+        txs: vec![
+            dat_tx(&a, old, 500),
+            dat_tx(&b, old, 0),
+            dat_tx(&a, old, 0),
+            dat_tx(&e, old, 0),
+            dat_tx(&missing, old, 0),
+        ],
+        deltas: [(unknown_txid(), 999)].into_iter().collect(),
+        unbroadcast: [a.compute_txid()].into_iter().collect(),
+    };
+    let file = path.with_file_name("import-v1.dat");
+    std::fs::write(&file, v1.encode(None)).unwrap();
+    let before = unix_now();
+    let r = dispatch(ctx, "importmempool", vec![json!(file.display().to_string())]).unwrap();
+    assert_eq!(r, json!({}));
+    let after = unix_now();
+    let mut want: Vec<String> = [&a, &b, &e].iter().map(|t| t.compute_txid().to_string()).collect();
+    want.sort();
+    assert_eq!(sorted_pool(ctx), want, "the orphan fails; the duplicate is already there");
+    let a_time = entry_time(ctx, &a.compute_txid().to_string());
+    assert!((before..=after).contains(&a_time), "{a_time} in {before}..={after}");
+    assert_eq!(dispatch(ctx, "getprioritisedtransactions", vec![]).unwrap(), json!({}));
+    assert!(!ctx.mempool.as_ref().unwrap().is_unbroadcast(&a.compute_txid()));
+    chain_ops_mine_pool_empty(ctx);
+}
+
+/// Version 2, every option on: file times, deltas, and the unbroadcast set.
+/// A second `savemempool` writes back what was imported.
+fn mempool_dat_import_every_option(
+    ctx: &RpcContext,
+    cbs: &mut TrueCoinbases,
+    path: &std::path::Path,
+) {
+    let f = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let g = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let f_time = unix_now() - 3_600;
+    let unknown = unknown_txid();
+    let v2 = rbitcoin_net::CoreMempoolDat {
+        txs: vec![dat_tx(&f, f_time, 500), dat_tx(&g, expired_time(), 0)],
+        deltas: [(unknown, 999)].into_iter().collect(),
+        unbroadcast: [f.compute_txid(), g.compute_txid()].into_iter().collect(),
+    };
+    let file = path.with_file_name("import-v2.dat");
+    std::fs::write(&file, v2.encode(Some([1, 2, 3, 4, 5, 6, 7, 8]))).unwrap();
+    let opts = json!({
+        "use_current_time": false,
+        "apply_fee_delta_priority": true,
+        "apply_unbroadcast_set": true,
+    });
+    let r = dispatch(
+        ctx,
+        "importmempool",
+        vec![json!(file.display().to_string()), opts],
+    )
+    .unwrap();
+    assert_eq!(r, json!({}));
+    let fid = f.compute_txid().to_string();
+    assert_eq!(
+        sorted_pool(ctx),
+        vec![fid.clone()],
+        "an entry older than -mempoolexpiry is skipped"
+    );
+    assert_eq!(entry_time(ctx, &fid), f_time);
+    let entry = dispatch(ctx, "getmempoolentry", vec![json!(fid.clone())]).unwrap();
+    assert_eq!(entry["unbroadcast"], true);
+    let pri = dispatch(ctx, "getprioritisedtransactions", vec![]).unwrap();
+    assert_eq!(pri[&fid]["fee_delta"], 500);
+    assert_eq!(pri[&fid]["in_mempool"], true);
+    assert_eq!(pri[unknown.to_string()]["fee_delta"], 999);
+    assert_eq!(pri[unknown.to_string()]["in_mempool"], false);
+    dispatch(ctx, "savemempool", vec![]).unwrap();
+    let round = rbitcoin_net::CoreMempoolDat::decode(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(round.txs, vec![dat_tx(&f, f_time, 500)]);
+    assert_eq!(round.deltas, [(unknown, 999)].into_iter().collect());
+    assert_eq!(round.unbroadcast, [f.compute_txid()].into_iter().collect());
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(unknown.to_string()), json!(0), json!(-999)],
+    )
+    .unwrap();
+}
+
+/// Core's `-1` for a file that does not open or parse, and `-3` for an
+/// option of the wrong type.
+fn mempool_dat_import_rejects(ctx: &RpcContext, path: &std::path::Path, raw: &[u8]) {
+    let unable = "Unable to import mempool file, see debug.log for details.";
+    let gone = import_err(ctx, vec![json!(path.with_file_name("no-such.dat").display().to_string())]);
+    assert_eq!((gone["code"].clone(), gone["message"].clone()), (json!(ERR_MISC), json!(unable)));
+    let mut v3 = raw.to_vec();
+    v3[0] = 3;
+    let bad = path.with_file_name("import-v3.dat");
+    std::fs::write(&bad, v3).unwrap();
+    assert_eq!(import_err(ctx, vec![json!(bad.display().to_string())])["message"], unable);
+    let short = path.with_file_name("import-short.dat");
+    std::fs::write(&short, &raw[..raw.len() - 1]).unwrap();
+    assert_eq!(import_err(ctx, vec![json!(short.display().to_string())])["message"], unable);
+    let e = import_err(ctx, vec![json!(bad.display().to_string()), json!("x")]);
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    let e = import_err(
+        ctx,
+        vec![json!(bad.display().to_string()), json!({"use_current_time": "yes"})],
+    );
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert_eq!(
+        e["message"],
+        "JSON value of type string is not of expected type bool"
+    );
 }
 
 fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoinbases) -> u32 {

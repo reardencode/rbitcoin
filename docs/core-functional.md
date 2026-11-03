@@ -182,10 +182,10 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_gettxspendingprevout.py` | `rpc-dialect` | method shipped; field/error zoo |
 | `rpc_help.py` | `rpc-dialect` | `help` shipped; Core categories / converthelp |
 | `rpc_rawtransaction.py` | `rpc-dialect` | Class A always indexes; remaining type-check needles |
-| `rpc_decodescript.py` | `rpc-dialect` | node decode subset; no p2sh/segwit wrap, `desc`, Core asm |
+| `rpc_decodescript.py` | `rpc-dialect` | `segwit.desc` infers no miniscript beyond `multi` (`decodescript_miniscript`) |
 | `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset (`isvalid` only) |
 | `rpc_invalid_address_message.py` | `rpc-dialect` | same; no `error` / `error_locations` |
-| `mempool_persist.py` | `rpc-dialect` | our `{datadir}/mempool/` analog; not Core `mempool.dat` |
+| `mempool_persist.py` | `rpc-dialect` | `savemempool` / `importmempool` speak Core `mempool.dat`, but a restart reloads our `{datadir}/mempool/`, not `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).
 

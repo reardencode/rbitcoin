@@ -1,10 +1,10 @@
 use rbitcoin_rpc::methods::mempool::*;
 
-/// A session answers only once fee history or flow is warm (thousands
-/// of blocks or a minute of relay), so the success shape is pinned here.
+/// `btc_amounts_print_eight_decimals` reaches a warm estimate through the
+/// handler. This pins the success shape across targets.
 #[test]
 fn an_estimate_is_feerate_and_blocks() {
-    let r = smart_fee_json(2, 0.000_020_00);
+    let r = smart_fee_json(2, Some(2_000));
     assert_eq!(r["feerate"], sat_btc_json(2_000), "{r}");
     assert_eq!(r["blocks"], 2, "{r}");
     assert_eq!(
@@ -12,14 +12,14 @@ fn an_estimate_is_feerate_and_blocks() {
         2,
         "only feerate and blocks: {r}"
     );
-    let none = smart_fee_json(6, -1.0);
+    let none = smart_fee_json(6, None);
     assert!(none.get("feerate").is_none(), "{none}");
     assert_eq!(none["blocks"], 6, "{none}");
-    let off = smart_fee_json(12, 0.000_010_50);
+    let off = smart_fee_json(12, Some(1_050));
     assert_eq!(off["blocks"], 12, "{off}");
     assert!(off.get("feerate").is_some(), "{off}");
     assert!(off.get("errors").is_none(), "{off}");
-    let far = smart_fee_json(100, 0.000_008_00);
+    let far = smart_fee_json(100, Some(800));
     assert_eq!(far["blocks"], 100, "{far}");
     assert!(far.get("feerate").is_some(), "{far}");
 }

@@ -1,4 +1,4 @@
-//! In-memory TxGraph: clusters, topo linearization, chunk bounds.
+//! In-memory TxGraph: clusters, linearization, chunk bounds.
 //!
 //! Cluster = maximal connected component via in-mempool parent/child edges
 //! (spend of another mempool output). Caps: 64 txs / 101 kvB (plan §3.2).
@@ -7,6 +7,8 @@ use bitcoin::{OutPoint, Transaction, Txid, Wtxid};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use std::sync::Mutex;
+
+use crate::linearize::{chunk_lengths, DepGraph, FeeFrac};
 
 /// Hard cap on txs in one cluster.
 pub const MAX_CLUSTER_COUNT: usize = 64;
@@ -185,7 +187,7 @@ pub struct Cluster {
     pub members: BTreeSet<Txid>,
     /// Sum of members' raw weight (cluster size limit basis).
     pub total_weight: u64,
-    /// Mining linearization (topo, high fee-rate first among ready).
+    /// Mining linearization ([`crate::linearize`]).
     pub linearization: Vec<Txid>,
     pub chunks: Vec<Chunk>,
 }
@@ -343,7 +345,7 @@ impl TxGraph {
 
     #[doc(hidden)]
     pub fn cluster_rep(&self, txid: &Txid) -> Option<Txid> {
-        self.cluster_of(txid)?.members.iter().next().copied()
+        self.component_members(txid)?.0.iter().next().copied()
     }
 
     #[doc(hidden)]
@@ -883,8 +885,6 @@ impl TxGraph {
         count > self.cluster_count_limit || vsize > self.cluster_vsize_limit
     }
 
-    /// Topo linearization: among ready txs (parents already emitted or outside
-    /// cluster), pick highest fee_rate, then higher fee, then txid.
     #[doc(hidden)]
     pub fn modified_fee(&self, t: &Txid, delta: &impl Fn(Txid) -> i64) -> i64 {
         self.entries
@@ -894,101 +894,83 @@ impl TxGraph {
             .saturating_add(delta(*t))
     }
 
+    /// `members` (txid order) as a [`DepGraph`] on `base + delta` and
+    /// sigop-adjusted weight.
+    fn dep_graph(&self, members: &[Txid], delta: &impl Fn(Txid) -> i64) -> DepGraph {
+        let pos: HashMap<Txid, usize> = members.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let feerate = members
+            .iter()
+            .map(|t| {
+                let w = self.adjusted_weight_of(t);
+                FeeFrac::new(self.modified_fee(t, delta), w)
+            })
+            .collect();
+        let parents: Vec<Vec<usize>> = members
+            .iter()
+            .map(|t| {
+                self.entries
+                    .get(t)
+                    .map(|e| {
+                        e.parents
+                            .iter()
+                            .filter_map(|p| pos.get(p).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        DepGraph::new(feerate, &parents)
+    }
+
+    /// Mining linearization of `members` on `base + delta`
+    /// ([`crate::linearize`]).
     #[doc(hidden)]
     pub fn linearize_delta(
         &self,
         members: &BTreeSet<Txid>,
         delta: &impl Fn(Txid) -> i64,
     ) -> Vec<Txid> {
-        let mut remaining: BTreeSet<Txid> = members.clone();
-        let mut done: HashSet<Txid> = HashSet::new();
-        let mut out = Vec::with_capacity(members.len());
-        while !remaining.is_empty() {
-            let mut best_rate_fee_txid: Option<(u64, i64, Txid)> = None;
-            for t in &remaining {
-                let e = match self.entries.get(t) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                let ready = e
-                    .parents
-                    .iter()
-                    .all(|p| !members.contains(p) || done.contains(p));
-                if !ready {
-                    continue;
-                }
-                let mf = self.modified_fee(t, delta);
-                let rate = if mf <= 0 {
-                    0
-                } else {
-                    rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
-                        mf as u64,
-                        e.adjusted_weight(self.bytes_per_sigop),
-                    )
-                };
-                let key = (rate, mf, *t);
-                // Maximize rate, then fee. The walk is txid order, so an equal
-                // rate and fee keeps the lesser txid without a third compare.
-                let better = match &best_rate_fee_txid {
-                    None => true,
-                    Some((br, bf, _)) => rate > *br || (rate == *br && mf > *bf),
-                };
-                if better {
-                    best_rate_fee_txid = Some(key);
-                }
-            }
-            let pick = match best_rate_fee_txid {
-                Some((_, _, t)) => t,
-                None => {
-                    // Cycle or bug — emit remaining in txid order.
-                    let t = *remaining.iter().next().unwrap();
-                    t
-                }
-            };
-            remaining.remove(&pick);
-            done.insert(pick);
-            out.push(pick);
-        }
-        out
+        let ids: Vec<Txid> = members.iter().copied().collect();
+        self.dep_graph(&ids, delta)
+            .linearize()
+            .into_iter()
+            .map(|i| ids[i])
+            .collect()
     }
 
-    /// Split a linearization into prefix-maximal-feerate chunks (Core diagram).
+    /// Split a linearization into chunks (Core `ChunkLinearization`).
     ///
-    /// Each chunk is the longest remaining prefix whose combined feerate is
-    /// maximal. A cheap parent plus hot children is one chunk (CPFP); a hot
-    /// parent plus a cheap descendant stays split so the parent is not diluted.
+    /// A transaction joins the chunk before it only when the joined set has a
+    /// strictly higher feerate. A cheap parent plus hot children is one chunk
+    /// (CPFP); a hot parent plus a cheap descendant stays split so the parent
+    /// is not diluted; equal feerates stay split.
     #[doc(hidden)]
     pub fn chunkify_delta(&self, lin: &[Txid], delta: &impl Fn(Txid) -> i64) -> Vec<Chunk> {
+        let lin: Vec<Txid> = lin
+            .iter()
+            .copied()
+            .filter(|t| self.entries.contains_key(t))
+            .collect();
+        let feerates: Vec<FeeFrac> = lin
+            .iter()
+            .map(|t| FeeFrac::new(self.modified_fee(t, delta), self.adjusted_weight_of(t)))
+            .collect();
         let mut chunks = Vec::new();
-        let mut i = 0;
-        while i < lin.len() {
-            let mut acc_fee = 0i128;
-            let mut acc_w = 0u64;
-            let mut best_end = i;
-            let mut best_fee = 0i128;
-            let mut best_w = 0u64;
-            for (j, t) in lin.iter().enumerate().skip(i) {
-                let Some(e) = self.entries.get(t) else {
-                    continue;
-                };
-                acc_fee = acc_fee.saturating_add(i128::from(self.modified_fee(t, delta)));
-                acc_w = acc_w.saturating_add(e.adjusted_weight(self.bytes_per_sigop));
-                // acc/acc_w >= best/best_w  (longest prefix on a tie).
-                let better = best_w == 0
-                    || acc_fee.saturating_mul(i128::from(best_w))
-                        >= best_fee.saturating_mul(i128::from(acc_w));
-                if better {
-                    best_end = j;
-                    best_fee = acc_fee;
-                    best_w = acc_w;
-                }
-            }
-            chunks.push(Chunk {
-                txids: lin[i..=best_end].to_vec(),
-                fee_sat: best_fee.max(0) as u64,
-                weight: best_w,
+        let mut start = 0;
+        for len in chunk_lengths(&feerates) {
+            let txids = lin[start..start + len].to_vec();
+            start += len;
+            let (fee, weight) = txids.iter().fold((0i128, 0u64), |(f, w), t| {
+                (
+                    f.saturating_add(i128::from(self.modified_fee(t, delta))),
+                    w.saturating_add(self.adjusted_weight_of(t)),
+                )
             });
-            i = best_end + 1;
+            chunks.push(Chunk {
+                txids,
+                fee_sat: fee.clamp(0, i128::from(u64::MAX)) as u64,
+                weight,
+            });
         }
         chunks
     }
@@ -1066,6 +1048,24 @@ impl TxGraph {
         }
         sort_chunks_best_first(&mut chunks);
         chunks
+    }
+
+    /// Every live tx, best modified-fee chunk first, parents before
+    /// children (Core `GetSortedScoreWithTopology`, the `mempool.dat` order).
+    pub fn mining_order(&self, delta: &impl Fn(Txid) -> i64) -> Vec<Txid> {
+        let mut emitted = HashSet::new();
+        let mut out = Vec::with_capacity(self.entries.len());
+        for ch in self.mining_chunks_for_delta(delta) {
+            for t in &ch.txids {
+                let mut add = Vec::new();
+                self.collect_selected_with_ancestors(*t, &emitted, &mut add);
+                for a in add {
+                    emitted.insert(a);
+                    out.push(a);
+                }
+            }
+        }
+        out
     }
 
     /// Consensus max block weight (WU).

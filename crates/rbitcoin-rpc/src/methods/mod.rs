@@ -197,10 +197,6 @@ pub fn take_http_wait_snap() -> Option<(String, u32)> {
     HTTP_WAIT_SNAP.with(|c| c.borrow_mut().take())
 }
 
-pub fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
-    sat_kvb as f64 / 100_000_000.0
-}
-
 pub fn hash_hex_display(h: &[u8; 32]) -> String {
     rbitcoin_primitives::display_hash_hex(*h)
 }
@@ -221,6 +217,7 @@ pub fn genesis_coinbase_txid(ctx: &RpcContext) -> [u8; 32] {
         .to_byte_array()
 }
 
+mod asm;
 #[doc(hidden)]
 pub mod chain;
 #[doc(hidden)]
@@ -594,6 +591,10 @@ impl RpcParams {
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, format!("{name} must be an integer")))
     }
 
+    pub fn req_core_int(&self, index: usize, name: &str) -> Result<i32, Value> {
+        core_json_int(self.req(index, name)?)
+    }
+
     pub fn opt_u64(&self, index: usize, name: &str) -> Result<Option<u64>, Value> {
         match self.get(index, name) {
             None | Some(Value::Null) => Ok(None),
@@ -656,6 +657,23 @@ impl RpcParams {
 pub fn json_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+}
+
+/// Core `UniValue::getInt<T>`: a non-number is `-3`. A fraction, an
+/// exponent, or a value outside `T` is `-1` `JSON integer out of range`.
+pub fn core_json_int<T: TryFrom<i64>>(v: &Value) -> Result<T, Value> {
+    let Value::Number(n) = v else {
+        return Err(rpc_error(
+            ERR_TYPE_ERROR,
+            format!(
+                "JSON value of type {} is not of expected type number",
+                json_type_name(v)
+            ),
+        ));
+    };
+    n.as_i64()
+        .and_then(|t| T::try_from(t).ok())
+        .ok_or_else(|| rpc_error(ERR_MISC, "JSON integer out of range"))
 }
 
 pub fn json_i64(v: &Value) -> Option<i64> {
@@ -840,6 +858,8 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
         }
         "prioritisetransaction" => prioritisetransaction(ctx, &params),
         "getprioritisedtransactions" => getprioritisedtransactions(ctx, &params),
+        "savemempool" => savemempool(ctx, &params),
+        "importmempool" => importmempool(ctx, &params),
         "getmempoolcluster" => getmempoolcluster(ctx, &params),
         "getmempoolancestors" => getmempoolancestors(ctx, &params),
         "getmempooldescendants" => getmempooldescendants(ctx, &params),
@@ -996,6 +1016,8 @@ pub const METHOD_LIST: &[&str] = &[
     "getnetworkhashps",
     "prioritisetransaction",
     "getprioritisedtransactions",
+    "savemempool",
+    "importmempool",
     "getmempoolcluster",
     "getmempoolancestors",
     "getmempooldescendants",
@@ -1075,13 +1097,13 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
         "decoderawtransaction",
         "decoderawtransaction hexstring (iswitness)\n\
          Decode a serialized transaction. iswitness=false refuses the BIP141 marker. \
-         scriptSig asm is rust-bitcoin, not Core ScriptToAsmStr sighash suffixes.",
+         asm is Core ScriptToAsmStr; scriptSig signatures carry their sighash name.",
     ),
     (
         "decodescript",
         "decodescript hexstring\n\
-         asm, type, hex, address when standard, and desc. No p2sh wrap, \
-         segwit wrap, or miniscript.",
+         asm, desc, type, address when standard, and Core's p2sh and segwit \
+         wraps. segwit.desc infers wsh(multi(...)), not other miniscript.",
     ),
     (
         "validateaddress",
@@ -1130,7 +1152,7 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     ),
     (
         "prioritisetransaction",
-        "prioritisetransaction txid dummy fee_delta\nLocal mining fee delta (sat). dummy must be 0.",
+        "prioritisetransaction txid (dummy) fee_delta\nLocal mining fee delta (sat). dummy must be 0 or null.",
     ),
     (
         "getprioritisedtransactions",
