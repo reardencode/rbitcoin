@@ -1858,6 +1858,37 @@ fn purge_fault_unindexes_txs_that_already_left() {
     let _ = std::fs::remove_dir_all(&store);
 }
 
+/// An update that lands while a hold is out, and the hold never commits,
+/// still has to reach `template_watch`. A failed connect drops its hold
+/// with no commit. Swallowing the update leaves a longpoll asleep.
+#[test]
+fn dropped_hold_publishes_an_update_that_landed_without_a_commit() {
+    let dir = tmp();
+    let store_dir = tmp();
+    let q = Query::open_or_create_tiny(&store_dir).unwrap();
+    let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+    let watch = mp.subscribe_template();
+    let before = *watch.borrow();
+    {
+        let outer = mp.template_hold();
+        {
+            let _inner = mp.template_hold();
+            mp.note_template_update();
+            assert_eq!(
+                *watch.borrow(),
+                before,
+                "a nested hold must not publish the update"
+            );
+        }
+        assert_eq!(*watch.borrow(), before, "the outer hold is still out");
+        drop(outer);
+    }
+    assert_eq!(*watch.borrow(), mp.template_updates());
+    assert_ne!(*watch.borrow(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
 /// The maintained flag is the Ready bit for listing and `generate`. It must
 /// stay clear while `begin_pool_maintenance` is still waiting on the template
 /// lock, which it holds across the purge.

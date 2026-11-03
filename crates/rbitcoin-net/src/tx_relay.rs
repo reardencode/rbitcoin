@@ -1005,7 +1005,8 @@ pub struct CommitOutcome {
 
 std::thread_local! {
     /// Holds taken on this thread. A nested hold does not lock again and
-    /// does not publish; the outer drop sends the last commit.
+    /// does not publish. The outer drop sends the committed tip, or a
+    /// generation that moved while the hold was out and nothing committed.
     static TEMPLATE_HOLD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -1018,7 +1019,8 @@ fn template_hold_leave() {
 }
 
 /// Lock held for the whole of a block connect. `commit` records the hash
-/// whose pool strip has finished; the outer drop writes it.
+/// whose pool strip has finished. The outer drop writes that hash, and
+/// publishes when the generation moved while the hold was out.
 #[doc(hidden)]
 pub struct TemplateHold<'a> {
     updates: &'a AtomicU64,
@@ -1026,6 +1028,9 @@ pub struct TemplateHold<'a> {
     settle: &'a AtomicU64,
     slot: Option<std::sync::MutexGuard<'a, Option<[u8; 32]>>>,
     commit: &'a std::sync::Mutex<Option<[u8; 32]>>,
+    /// `template_updates` at enter, before `pool_settle` goes odd. A note
+    /// that races in before that increment still sends itself.
+    updates_at_enter: u64,
     /// This thread already holds the mark. Drop does not publish.
     nested: bool,
 }
@@ -1048,10 +1053,21 @@ impl Drop for TemplateHold<'_> {
                 if let Some(slot) = self.slot.as_mut() {
                     **slot = Some(hash);
                 }
-                let next = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
-                self.watch.send_replace(next);
+                // Before any send. A waiter blocked on this slot must read
+                // the committed tip, not the stump.
+                self.updates.fetch_add(1, Ordering::SeqCst);
+            }
+            // Settle stays odd across the first send. A concurrent note
+            // skips its own send, and this drop covers that generation.
+            let now = self.updates.load(Ordering::SeqCst);
+            if now != self.updates_at_enter {
+                self.watch.send_replace(now);
             }
             self.settle.fetch_add(1, Ordering::SeqCst);
+            let after = self.updates.load(Ordering::SeqCst);
+            if after != now {
+                self.watch.send_replace(after);
+            }
         }
         // After the publish, so a re-entrant hold sees this one and does not
         // lock `template_prev` again.
@@ -4078,7 +4094,9 @@ impl MempoolHub {
 
     #[doc(hidden)]
     pub fn note_template_update(&self) {
-        let next = self.template_updates.fetch_add(1, Ordering::Relaxed) + 1;
+        // SeqCst pairs with the loads in `TemplateHold::drop`, so a note
+        // that skips its send is visible to that drop.
+        let next = self.template_updates.fetch_add(1, Ordering::SeqCst) + 1;
         // A hold publishes once, on drop, for the tip it commits. Sending
         // here would wake a one-shot wait on the stump, or on an
         // intermediate block of a fork that is still connecting.
@@ -4114,10 +4132,12 @@ impl MempoolHub {
                 settle: &self.pool_settle,
                 slot: None,
                 commit: &self.template_commit,
+                updates_at_enter: 0,
                 nested: true,
             };
         }
         let slot = self.template_prev.lock().unwrap();
+        let updates_at_enter = self.template_updates.load(Ordering::SeqCst);
         self.pool_settle.fetch_add(1, Ordering::SeqCst);
         template_hold_enter();
         TemplateHold {
@@ -4126,6 +4146,7 @@ impl MempoolHub {
             settle: &self.pool_settle,
             slot: Some(slot),
             commit: &self.template_commit,
+            updates_at_enter,
             nested: false,
         }
     }

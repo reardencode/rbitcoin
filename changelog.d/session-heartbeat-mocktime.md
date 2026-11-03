@@ -11,3 +11,7 @@ Fixed
   eviction or admit while that call is still choosing the tip does not
   publish the stump. A pool that is still catching up publishes that same
   fork tip.
+- **A failed block connect still wakes a `getblocktemplate` longpoll.** An
+  admit or `prioritisetransaction` during that connect used to leave the
+  longpoll parked until the next tip or the two-minute timeout. Dropping
+  the template hold publishes the generation when it moved.
