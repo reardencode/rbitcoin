@@ -4824,6 +4824,30 @@ fn mempool_tx_snapshot_two_live_and_accept_while_held() {
 }
 
 #[test]
+fn snapshot_age_is_a_pure_stale_check() {
+    let now = Instant::now();
+    let max_age = FEE_SNAPSHOT_MAX_AGE;
+    let just_under = now - Duration::from_millis(999);
+    let one_second = now - max_age;
+    assert!(
+        !is_stale(just_under, now, false, max_age),
+        "a snapshot just under 1s old is fresh"
+    );
+    assert!(
+        is_stale(one_second, now, false, max_age),
+        "a snapshot computed 1s ago is stale"
+    );
+    assert!(
+        is_stale(just_under, now, true, max_age),
+        "dirty refreshes before the age"
+    );
+    assert!(
+        is_stale(now + Duration::from_secs(1), now, false, max_age),
+        "a computed_at in the future is stale"
+    );
+}
+
+#[test]
 fn mempool_tx_snapshot_refresh_reuses_tx_arc() {
     let (_store, owned_q, owned_cbs) = pad_cbs(3);
     let q = &owned_q;
@@ -4837,7 +4861,7 @@ fn mempool_tx_snapshot_refresh_reuses_tx_arc() {
     let aid = a.compute_txid();
     let e1 = snap1.get(&aid).expect("a in snap1");
     let _ = e1.json.set("keep-a".into());
-    std::thread::sleep(Duration::from_millis(1100));
+    hub.refresh_tx_snapshot();
     let snap2 = hub.mempool_tx_snapshot();
     let e2 = snap2.get(&aid).expect("a in snap2");
     assert!(

@@ -148,6 +148,17 @@ pub use parent_req::{DueParent, ParentNote};
 #[doc(hidden)]
 pub const FEE_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// Dirty, older than `max_age`, or computed after `now`. Shared by the fee
+/// and tx snapshot gates.
+#[doc(hidden)]
+pub fn is_stale(computed_at: Instant, now: Instant, dirty: bool, max_age: Duration) -> bool {
+    dirty
+        || now
+            .checked_duration_since(computed_at)
+            .map(|age| age >= max_age)
+            .unwrap_or(true)
+}
+
 #[doc(hidden)]
 pub fn load_unbroadcast_file(dir: &Path) -> HashSet<Txid> {
     let Ok(bytes) = std::fs::read(dir.join("unbroadcast")) else {
@@ -3178,11 +3189,7 @@ impl MempoolHub {
         refreshing: &AtomicBool,
         refresh: fn(&Self),
     ) {
-        let stale = Instant::now()
-            .checked_duration_since(computed_at)
-            .map(|d| d >= FEE_SNAPSHOT_MAX_AGE)
-            .unwrap_or(true);
-        if !dirty && !stale {
+        if !is_stale(computed_at, Instant::now(), dirty, FEE_SNAPSHOT_MAX_AGE) {
             return;
         }
         if refreshing
