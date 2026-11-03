@@ -111,7 +111,7 @@ Short sequence:
 |------|--------|
 | 1 | `Store::open` + schema gates |
 | 2 | Soft `tip_seal` clamp (if present) |
-| 3 | Trim trailing null `confirmed[]` slots, then tip-window revalidate. A missing `spend_durable` walks from genesis. A present marker widens the window to `(D, tip]` (6 stays the floor). `checkblocks=0` still walks from genesis. Shrink/clear on fail; rebuild fence. The walk logs `store: tip revalidate` and progress every 10 seconds |
+| 3 | Trim trailing null `confirmed[]` slots, then tip-window revalidate. A missing `spend_durable` walks from genesis. A present marker widens the window to `(D, tip]` (6 stays the floor). `checkblocks=0` still walks from genesis. Shrink/clear on a stored mismatch; rebuild fence. A failed read stops open and changes nothing. The walk logs `store: tip revalidate` and progress every 10 seconds |
 | 4 | One `repair_class_c_above_tip` (fence complement: holes + short suffix) |
 | 5 | Replay spend annotations above annotated-through. A missing marker replays from genesis. `sync_data` the stems that were rewritten, publish the marker at the surviving tip |
 | 6 | Then node may densify / extend tip |
