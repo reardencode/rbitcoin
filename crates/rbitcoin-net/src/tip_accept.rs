@@ -20,6 +20,14 @@ pub const TIP_ACCEPT_THREAD_NAME: &str = "tip-accept";
 #[doc(hidden)]
 pub const QUEUE_CAP: usize = 8;
 
+/// Sync senders blocked in the permit mutex. An async poll must not join them.
+#[doc(hidden)]
+pub static LANE_SEND_GUARD_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Sync `send` calls in progress. Stays non-zero while the queue is full.
+#[doc(hidden)]
+pub static LANE_BLOCKING_SENDS: AtomicUsize = AtomicUsize::new(0);
+
 /// Failed async `try_send`s on a full tip-accept queue. A parked sender
 /// records a handful. A yield loop keeps adding.
 #[doc(hidden)]
@@ -239,7 +247,9 @@ fn lane_send_guard(exempt: bool) -> Option<std::sync::MutexGuard<'static, ()>> {
     }
     let mut g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
     while LANE_EXCLUSIVE.load(Ordering::Acquire) {
+        LANE_SEND_GUARD_WAITERS.fetch_add(1, Ordering::SeqCst);
         g = LANE_EXCLUSIVE_CV.wait(g).unwrap_or_else(|p| p.into_inner());
+        LANE_SEND_GUARD_WAITERS.fetch_sub(1, Ordering::SeqCst);
     }
     Some(g)
 }
@@ -354,7 +364,12 @@ pub fn try_enqueue(job: Job) -> Result<(), TrySendError<Job>> {
 
 fn enqueue_blocking(job: Job) {
     note_queued();
-    if sender().send(job).is_err() {
+    // Stays raised while `send` waits for a queue slot, still holding the
+    // permit mutex. An async poll must not block on that lock.
+    LANE_BLOCKING_SENDS.fetch_add(1, Ordering::SeqCst);
+    let sent = sender().send(job);
+    LANE_BLOCKING_SENDS.fetch_sub(1, Ordering::SeqCst);
+    if sent.is_err() {
         note_dequeued();
         panic!("tip-accept thread");
     }

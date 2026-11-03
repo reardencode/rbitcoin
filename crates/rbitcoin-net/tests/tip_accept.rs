@@ -214,6 +214,108 @@ impl Drop for ReleaseOnDropSend {
     }
 }
 
+/// A sync `send` on a full queue holds the permit mutex. Another runtime's
+/// async entry must still be able to time out. The condvar wait releases
+/// that mutex; this pin is the `send`, not the wait.
+#[test]
+fn blocking_send_does_not_stall_another_runtime() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let _lane = LanePermit::take();
+    let (holder_tx, holder_rx) = mpsc::sync_channel(1);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let _wake = ReleaseOnDrop(Arc::clone(&release));
+    let rel = Arc::clone(&release);
+    let holder = thread::spawn(move || {
+        arm_lane_oneshot();
+        run_on_tip_accept(move || {
+            holder_tx.send(()).ok();
+            let (lock, cv) = &*rel;
+            let mut g = lock.lock().unwrap();
+            while !*g {
+                g = cv.wait(g).unwrap();
+            }
+        });
+    });
+    holder_rx.recv_timeout(Duration::from_secs(2)).expect("holder");
+    let mut releases = Vec::with_capacity(QUEUE_CAP);
+    for _ in 0..QUEUE_CAP {
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        assert!(
+            enqueue_or_full(Box::new(move || {
+                let _ = rx.recv();
+            })),
+            "queue filled before the cap"
+        );
+        releases.push(tx);
+    }
+    // The condvar wait releases the mutex. Drop the permit so the next
+    // send is the one that holds the mutex across a full queue.
+    drop(_lane);
+    let blocker = thread::spawn(|| run_on_tip_accept(|| ()));
+    let t0 = std::time::Instant::now();
+    while LANE_BLOCKING_SENDS.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "sync send did not block on a full queue"
+        );
+        thread::yield_now();
+    }
+    let (tx, rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let timed_out = rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+                .await
+                .is_err()
+        });
+        tx.send(timed_out).ok();
+    });
+    let reported = rx.recv_timeout(Duration::from_millis(800));
+    let finished_while_held = matches!(reported, Ok(true));
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    for tx in releases {
+        tx.send(()).ok();
+    }
+    drop(_wake);
+    holder.join().expect("holder");
+    blocker.join().expect("blocker");
+    waiter.join().expect("waiter");
+    assert!(
+        finished_while_held,
+        "an async entry blocked on the permit mutex held across a full-queue send"
+    );
+}
+
+/// The permit holder is one tokio task. Another task later polled on that
+/// same worker is not the holder and must not enqueue.
+#[tokio::test(flavor = "current_thread")]
+async fn lane_permit_does_not_exempt_another_task_on_the_holder_worker() {
+    use std::time::Duration;
+
+    let permit = LanePermit::take();
+    let task = tokio::spawn(async {
+        tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+            .await
+            .is_err()
+    });
+    let reported = tokio::time::timeout(Duration::from_millis(800), task).await;
+    let finished_while_held = matches!(reported, Ok(Ok(true)));
+    drop(permit);
+    assert!(
+        finished_while_held,
+        "another task on the permit worker enqueued while the permit was held"
+    );
+}
+
 /// Drop on the taking thread clears `LANE_HELD` there. Drop on another
 /// thread must not leave that take exempt for a later full-queue test.
 #[test]
