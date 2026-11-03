@@ -428,8 +428,12 @@ pub fn request_headers_from(
     Ok(s.cmd_tx.send(PeerCmd::GetHeaders { locator }).is_ok())
 }
 
-/// Locator for IBD getheaders: prefer the **work-path tip** (highest ordered /
-/// archived hash) ahead of the confirmed store tip.
+/// Locator for IBD getheaders: `refill`, then every other hash by descending
+/// height.
+///
+/// Core answers after the first hash on its chain and expects them to descend
+/// (`FindForkInGlobalIndex`). A checkpoint named before the confirmed tip gets
+/// a window the node already has, so a fork above it is never served.
 ///
 /// Signet bug: with only `query.locator_hashes()` (confirmed tip), when archive
 /// led tip by a full headers window (~2000), peers re-served that same window
@@ -437,33 +441,31 @@ pub fn request_headers_from(
 /// `max_peer_height` was still ~313k.
 pub fn ibd_header_locator(
     hub: &ChainHub,
-    work_tips: &[BlockHash],
-    confirmed_tail: &[BlockHash],
+    refill: &[BlockHash],
+    walk: &[(u32, BlockHash)],
+    confirmed_tail: &[(u32, BlockHash)],
 ) -> Vec<BlockHash> {
-    let mut locator = Vec::with_capacity(32);
-    // Eight hashes is the walk's own stop. This only enforces the protocol
-    // maximum, so a stored tip prepended in front does not drop the oldest
-    // checkpoint.
-    for h in work_tips {
-        if locator.len() >= rbitcoin_net::codec::MAX_LOCATOR_SZ {
-            break;
-        }
-        if !locator.contains(h) {
-            locator.push(*h);
-        }
-    }
     // In-memory snapshot. Not a header-store walk.
-    if let Some(t) = hub.tip_hash() {
-        if locator.len() < rbitcoin_net::codec::MAX_LOCATOR_SZ && !locator.contains(&t) {
-            locator.push(t);
-        }
-    }
-    for h in confirmed_tail {
+    let tip = hub.tip_height().zip(hub.tip_hash());
+    let mut ranked: Vec<(u32, BlockHash)> = walk
+        .iter()
+        .copied()
+        .chain(tip)
+        .chain(confirmed_tail.iter().copied())
+        .collect();
+    // Stable: at one height the candidate stays ahead of the confirmed chain.
+    ranked.sort_by_key(|(height, _)| std::cmp::Reverse(*height));
+    let mut locator = Vec::with_capacity(32);
+    let ordered = refill
+        .iter()
+        .copied()
+        .chain(ranked.into_iter().map(|(_, hash)| hash));
+    for hash in ordered {
         if locator.len() >= rbitcoin_net::codec::MAX_LOCATOR_SZ {
             break;
         }
-        if !locator.contains(h) {
-            locator.push(*h);
+        if !locator.contains(&hash) {
+            locator.push(hash);
         }
     }
     if locator.is_empty() {

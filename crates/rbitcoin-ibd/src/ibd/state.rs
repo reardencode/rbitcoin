@@ -134,13 +134,14 @@ impl InflightReq {
 
 /// Confirmed-chain `getheaders` tail for one published tip.
 ///
-/// Absent until the first catch-up ask. The next ask reuses `hashes` while
+/// Absent until the first catch-up ask. The next ask reuses `entries` while
 /// both `height` and `hash` still match `published_tip`. The work-path
 /// prefix is not stored here.
 pub struct ConfirmedLocatorTail {
     pub height: Option<u32>,
     pub hash: Option<[u8; 32]>,
-    pub hashes: Vec<BlockHash>,
+    /// Each locator hash with its height.
+    pub entries: Vec<(u32, BlockHash)>,
 }
 
 /// Core mutable state for the IBD event loop.
