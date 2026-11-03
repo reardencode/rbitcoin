@@ -225,6 +225,8 @@ pub fn waves_snap() -> &'static ArcSwap<Vec<Arc<Wave>>> {
 #[doc(hidden)]
 pub fn publish_waves(waves: &[Arc<Wave>]) {
     waves_snap().store(Arc::new(waves.to_vec()));
+    #[cfg(debug_assertions)]
+    note_script_progress();
 }
 
 /// Drops `in_wave` on the success path and on a panic inside the chunk.
@@ -565,7 +567,10 @@ pub fn unpark_idle_from(idle: &crate::sync::Mutex<Vec<crate::sync::thread::Threa
     for thread in taken {
         thread.unpark();
         #[cfg(debug_assertions)]
-        STEAL_UNPARKS.fetch_add(1, Ordering::Relaxed);
+        {
+            STEAL_UNPARKS.fetch_add(1, Ordering::Relaxed);
+            note_script_progress();
+        }
     }
 }
 
@@ -595,10 +600,16 @@ pub fn park_if_still_idle(
         return false;
     }
     #[cfg(debug_assertions)]
-    IDLE_WAITERS.fetch_add(1, Ordering::SeqCst);
+    {
+        IDLE_WAITERS.fetch_add(1, Ordering::SeqCst);
+        note_script_progress();
+    }
     crate::sync::thread::park();
     #[cfg(debug_assertions)]
-    IDLE_WAITERS.fetch_sub(1, Ordering::SeqCst);
+    {
+        IDLE_WAITERS.fetch_sub(1, Ordering::SeqCst);
+        note_script_progress();
+    }
     unregister_idle(idle);
     true
 }
@@ -666,6 +677,22 @@ pub fn idle_waiter_count() -> usize {
     IDLE_WAITERS.load(Ordering::SeqCst)
 }
 
+/// Test waits for idle, claim, and publish. Not a permit: the waiter holds
+/// [`SCRIPT_PROGRESS_MU`] across the check.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub static SCRIPT_PROGRESS_MU: Mutex<()> = Mutex::new(());
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub static SCRIPT_PROGRESS_CV: Condvar = Condvar::new();
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn note_script_progress() {
+    let _g = SCRIPT_PROGRESS_MU.lock().unwrap_or_else(|p| p.into_inner());
+    SCRIPT_PROGRESS_CV.notify_all();
+}
+
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub static DELAY_CLAIM: AtomicBool = AtomicBool::new(false);
@@ -689,6 +716,7 @@ pub fn maybe_delay_claim() {
         return;
     }
     DELAY_CLAIM_ENTERED.fetch_add(1, Ordering::SeqCst);
+    note_script_progress();
     let mut g = DELAY_CLAIM_MU.lock().unwrap_or_else(|p| p.into_inner());
     while !DELAY_CLAIM_GO.load(Ordering::SeqCst) {
         g = DELAY_CLAIM_CV.wait(g).unwrap_or_else(|p| p.into_inner());
@@ -718,6 +746,7 @@ pub fn maybe_delay_park() {
         return;
     }
     DELAY_PARK_ENTERED.fetch_add(1, Ordering::SeqCst);
+    note_script_progress();
     let mut g = DELAY_PARK_MU.lock().unwrap_or_else(|p| p.into_inner());
     while !DELAY_PARK_GO.load(Ordering::SeqCst) {
         g = DELAY_PARK_CV.wait(g).unwrap_or_else(|p| p.into_inner());
