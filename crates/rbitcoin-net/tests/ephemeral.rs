@@ -40,6 +40,14 @@ async fn wait_isolated_lap(
     }
 }
 
+/// `abort` only schedules cancellation. Until that task is polled, it is
+/// still the isolated loop: `notify_one` can hand it the next txid, and
+/// cancellation then drops the task before `note_isolated_lap`.
+async fn stop_task<T>(handle: tokio::task::JoinHandle<T>) {
+    handle.abort();
+    let _ = handle.await;
+}
+
 fn dummy_tx() -> Transaction {
     Transaction {
         version: TxVersion::TWO,
@@ -483,8 +491,8 @@ async fn ephemeral_broadcast() {
         late,
         "an idle loop wakes for the next local tx and resends nothing"
     );
-    sender.abort();
-    recipient.abort();
+    stop_task(sender).await;
+    stop_task(recipient).await;
 
     // Two peers per tx. A tx that leaves the mempool while its first send
     // is in flight is not dialed to the second peer.
@@ -524,8 +532,8 @@ async fn ephemeral_broadcast() {
         [kept.compute_txid(); 2],
         "a mined tx is not dialed to its second peer; a live one reaches both"
     );
-    sender.abort();
-    recipient.abort();
+    stop_task(sender).await;
+    stop_task(recipient).await;
 
     // A mempool write held across the loop's fetch (a block connect holds
     // it through persist) delays a local tx; it does not drop it. A marked
@@ -601,8 +609,8 @@ async fn ephemeral_broadcast() {
         mp.is_local_origin(&never_admitted),
         "a skipped txid stays marked, so it is not queued again"
     );
-    sender.abort();
-    recipient.abort();
+    stop_task(sender).await;
+    stop_task(recipient).await;
 
     let h = spawn_loop(AddrMan::new());
     let skipped = mp.isolated_laps().skipped_unknown;
