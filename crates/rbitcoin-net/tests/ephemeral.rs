@@ -558,11 +558,11 @@ async fn ephemeral_broadcast() {
         }
     });
     held_rx.recv().unwrap();
+    // Sample before the gate opens. The next read notes the lap as soon as
+    // the in-flight send returns, which can be before this task resumes.
+    let lagged = mp.isolated_laps().lagged;
     gate_tx.send(()).unwrap();
     assert_eq!(next_sent(&mut got_rx).await, first.compute_txid());
-    // The next read is in `spawn_blocking` against this held write. The lap
-    // fires there, before the write is released.
-    let lagged = mp.isolated_laps().lagged;
     wait_isolated_lap(
         &mp,
         lagged,

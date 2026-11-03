@@ -2173,12 +2173,20 @@ impl MempoolHub {
         self.lock_read().get_tx(txid).cloned()
     }
 
-    /// The isolated loop's read cannot start. A held mempool write looks the
-    /// same as a missing tx to `try_read`, so the loop notes the block and
-    /// then waits in [`Self::get_tx`].
+    /// The isolated loop's read. A held write is one lagged lap, then this
+    /// waits. A successful `try_read` keeps that guard: dropping it and
+    /// calling [`Self::get_tx`] lets a writer arrive in the gap and block
+    /// the wait with no lap.
     #[doc(hidden)]
-    pub fn isolated_read_blocked(&self) -> bool {
-        self.inner.try_read().is_err()
+    pub fn read_tx_for_isolated(&self, txid: &Txid) -> Option<Transaction> {
+        let guard = match self.inner.try_read() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.note_isolated_lap(IsolatedLap::Lagged);
+                self.lock_read()
+            }
+        };
+        guard.get_tx(txid).cloned()
     }
 
     /// Session getdata: never parks. Busy write → `None` (notfound this round).
