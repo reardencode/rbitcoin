@@ -1139,3 +1139,44 @@ fn regtest_pow_bits_from_argv_and_conf() {
     .is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn store_read_budget_formula_and_flag() {
+    assert_eq!(store_read_budget(true, 4, None), 1);
+    assert_eq!(store_read_budget(true, 4, Some(0)), 1);
+    assert_eq!(store_read_budget(false, 4, None), 3);
+    assert_eq!(store_read_budget(false, 4, Some(0)), 3);
+    assert_eq!(store_read_budget(false, 1, None), 1);
+    assert_eq!(store_read_budget(true, 64, Some(8)), 8);
+    assert_eq!(store_read_budget(false, 64, Some(8)), 8);
+
+    assert_eq!(ready_config(["rbitcoin-node"]).store_read_budget, None);
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--store-read-budget", "0"]).store_read_budget,
+        Some(0)
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--store-read-budget=12"]).store_read_budget,
+        Some(12)
+    );
+    let mut c = NodeConfig::default();
+    c.apply_kv("store_read_budget", "0").unwrap();
+    assert_eq!(c.store_read_budget, Some(0));
+    c.apply_kv("store_read_budget", "7").unwrap();
+    assert_eq!(c.store_read_budget, Some(7));
+    let bad = c.apply_kv("store_read_budget", "nope").unwrap_err();
+    assert!(format!("{bad}").contains("store_read_budget"), "{bad}");
+    let neg = c.apply_kv("store_read_budget", "-3").unwrap_err();
+    assert!(format!("{neg}").contains("store_read_budget"), "{neg}");
+    assert!(operator_config_from_args(
+        ["rbitcoin-node", "--store-read-budget=-1"],
+        &NodeEnv::default()
+    )
+    .is_err());
+    let h = operator_usage();
+    assert!(h.contains("--store-read-budget"), "{h}");
+    assert!(
+        h.contains("minimum 1"),
+        "help must state the default formula: {h}"
+    );
+}

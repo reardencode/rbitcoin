@@ -1179,6 +1179,7 @@ dependencies = [
  "rbitcoin-log",
  "rbitcoin-primitives",
  "rbitcoin-store",
+ "tokio",
 ]
 
 [[package]]

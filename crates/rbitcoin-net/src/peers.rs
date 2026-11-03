@@ -541,6 +541,19 @@ impl LivePeer {
         self.send_resume.notify_waiters();
     }
 
+    /// Wake a session that is blocked in a read or a send pause. The session
+    /// task is left running so it can apply frames already taken off the socket.
+    pub fn wake_for_disconnect(&self) {
+        self.request_disconnect();
+        if let Some(s) = self.take_tcp_shutdown() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        self.clear_out_tx();
+        if let Some(h) = self.take_writer_abort() {
+            h.abort();
+        }
+    }
+
     pub fn mark_handshake_complete(&self) {
         self.handshake_complete.store(true, Ordering::Release);
     }
@@ -830,10 +843,19 @@ impl LivePeer {
     }
 
     pub fn note_announced_wtx(&self, wtxid: Wtxid) {
-        self.announced_wtx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(wtxid, 50_000);
+        let _ = self.claim_announced_wtx(wtxid);
+    }
+
+    /// `true` when this call recorded `wtxid`. A flush and an announce can
+    /// both pass a separate `has_announced_wtx` check; only the claim that
+    /// wins may queue the INV.
+    pub fn claim_announced_wtx(&self, wtxid: Wtxid) -> bool {
+        let mut announced = self.announced_wtx.lock().unwrap_or_else(|e| e.into_inner());
+        if announced.contains(&wtxid) {
+            return false;
+        }
+        announced.insert(wtxid, 50_000);
+        true
     }
 
     pub fn has_announced_wtx(&self, wtxid: &Wtxid) -> bool {
@@ -991,7 +1013,7 @@ impl LivePeer {
     pub async fn wait_send_budget(&self) {
         loop {
             let notified = self.send_resume.notified();
-            if !self.send_over_budget() {
+            if self.stop.load(Ordering::SeqCst) || !self.send_over_budget() {
                 return;
             }
             self.send_budget_parks.fetch_add(1, Ordering::Release);
@@ -1079,7 +1101,11 @@ impl LivePeer {
     /// Core `m_last_block_time`: stamped only when a block from this peer
     /// is new to us, not for one we already had.
     pub fn note_last_block(&self) {
-        self.last_block.store(self.clock_now(), Ordering::Relaxed);
+        self.note_last_block_at(self.clock_now());
+    }
+
+    pub fn note_last_block_at(&self, now: u64) {
+        self.last_block.store(now, Ordering::Relaxed);
     }
 
     pub fn note_last_transaction(&self) {
@@ -1196,8 +1222,14 @@ impl LivePeer {
 
     /// Core `BlockRequested`: the first block in flight from this peer
     /// starts its download window. A re-ask of a block already in flight
-    /// keeps its place and does not restart the window.
+    /// keeps its place and does not restart the window. A peer already
+    /// leaving does not open a new window: its session still applies a
+    /// queued block, and that apply must not take a slot the final
+    /// unregister will not release.
     pub fn note_blocks_requested(&self, hashes: &[BlockHash]) {
+        if self.stop.load(Ordering::Relaxed) {
+            return;
+        }
         let now = self.clock_now();
         let mut d = self
             .block_download
@@ -2324,8 +2356,11 @@ impl PeerHub {
     }
 
     /// Core: only one initial headers-sync peer unless the tip is within 24h.
+    /// A peer already leaving must not take the slot. `disconnect_id` used
+    /// to release it, the drain then took it again, and the session's
+    /// unregister no longer saw the row.
     pub fn try_start_headers_sync(&self, peer: &LivePeer, now: u64, best_header_time: u64) -> bool {
-        if peer.sync_started.load(Ordering::Relaxed) {
+        if peer.stop.load(Ordering::Relaxed) || peer.sync_started.load(Ordering::Relaxed) {
             return false;
         }
         if !peer.can_serve_blocks() {
@@ -3655,23 +3690,15 @@ impl PeerHub {
         let Some(p) = self.get(id) else {
             return false;
         };
-        p.request_disconnect();
-        // Hard-close TCP first so the far side's read sees EOF inside the
-        // Core `disconnect_nodes` 5s wait (`mempool_reorg`).
-        if let Some(s) = p.take_tcp_shutdown() {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        // Do not abort the session. It still has to apply frames already
+        // read; aborting it forgets those getdata asks.
+        p.wake_for_disconnect();
+        // Handshake never finished: nothing will drain, so drop the row now.
+        // A handshaken session unregisters when it returns. Doing it here
+        // releases headers-sync and download slots that the drain takes again.
+        if !p.handshake_complete() {
+            self.unregister(id);
         }
-        // Drop writer channel + abort writer/session so local halves tear down
-        // even if the read loop is mid-frame.
-        p.clear_out_tx();
-        if let Some(h) = p.take_writer_abort() {
-            h.abort();
-        }
-        if let Some(h) = p.take_session_abort() {
-            h.abort();
-        }
-        // Drop from getpeerinfo before teardown finishes.
-        self.unregister(id);
         true
     }
 

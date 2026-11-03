@@ -438,7 +438,7 @@ impl P2PNode {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
         for p in self.peers.live_peers() {
-            p.request_disconnect();
+            p.wake_for_disconnect();
         }
         let mut join = Vec::new();
         join.append(&mut self.tasks);
@@ -577,6 +577,9 @@ pub fn spawn_inbound_accept(
                                 sess.id
                             );
                             peers.disconnect_id(sess.id);
+                            // Handshake finished, so disconnect_id leaves the
+                            // row. There is no session loop to unregister it.
+                            peers.unregister(sess.id);
                             return;
                         }
                         if let Ok(ah) = ah_rx.await {

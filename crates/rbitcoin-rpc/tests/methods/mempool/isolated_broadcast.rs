@@ -211,3 +211,46 @@ fn submitpackage_kicks_only_members_that_survive_the_trim() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// HTTP `submitpackage` awaits scripts on the request task, then trims.
+/// The kick is after that trim, same as the sync RPC.
+#[test]
+fn submitpackage_async_kicks_only_members_that_survive_the_trim() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let mp = Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.set_isolated_broadcast(true);
+    let (parent_hex, parent) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 10_000);
+    let cheap_child = child_of(&parent, 1_000);
+    mp.set_max_weight(parent.weight().to_wu() + cheap_child.weight().to_wu() / 2);
+    let queued = mp.isolated_queued();
+    let ctx = Arc::new(ctx);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!([
+        parent_hex,
+        serialize_hex(&cheap_child)
+    ])]);
+    let reply = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(rbitcoin_rpc::methods::mempool::submitpackage_async(
+            &ctx, &params,
+        ))
+        .unwrap();
+    assert!(mp.contains(&parent.compute_txid()), "{reply}");
+    assert!(
+        !mp.contains(&cheap_child.compute_txid()),
+        "the lower-feerate child is trimmed: {reply}"
+    );
+    assert_eq!(
+        mp.isolated_queued() - queued,
+        1,
+        "the trimmed member is never queued for the isolated loop"
+    );
+    assert_eq!(
+        drain_isolated(&mp),
+        vec![parent.compute_txid()],
+        "only the surviving member goes to the isolated loop, once"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

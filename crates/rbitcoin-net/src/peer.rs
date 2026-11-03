@@ -29,9 +29,11 @@ use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -206,6 +208,10 @@ pub async fn accept_received_from_peer(
     // Compact selection reads that bit afterwards.
     let peers = session.and_then(|s| s.peer_hub());
     let hb = session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)));
+    // The tip is visible before this await returns. Stamp the clock from
+    // before the wait so a caller that moves time once it sees the tip does
+    // not extend the post-block ping grace.
+    let received_at = session.map(|s| s.clock_now());
     let r = if let Some(hub) = hub.shared_arc() {
         crate::tip_accept::run_on_tip_accept_async(move || {
             let r = hub.accept_received_on_lane(block, waive);
@@ -226,8 +232,8 @@ pub async fn accept_received_from_peer(
             r
         })
     };
-    if let (Some(s), Ok(AcceptOutcome::Accepted { .. })) = (session, &r) {
-        s.note_last_block();
+    if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
+        s.note_last_block_at(at);
     }
     r
 }
@@ -270,6 +276,252 @@ pub fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetErr
         return threshold_disconnect(session);
     }
     NetError::Protocol("peer rate limit")
+}
+
+/// Heavy frames (`block`, `headers`, `notfound`) already read while a decode
+/// permit is held. Tip-follow asks for [`MAX_SERVE_BLOCKS`] bodies, and the
+/// reader can take one more message before that front decode is popped.
+/// Cheap frames (`tx`, `inv`, ping) use [`DECODE_Q_MAX_CHEAP_FRAMES`], so a
+/// burst behind one block is not a disconnect. Heavy bytes also share a
+/// process cap of the blocking-pool size times [`DECODE_Q_MAX_BYTES`].
+pub const DECODE_Q_MAX_FRAMES: usize = 32;
+pub const DECODE_Q_MAX_CHEAP_FRAMES: usize = 1024;
+pub const DECODE_Q_MAX_BYTES: usize =
+    (MAX_SERVE_BLOCKS + 1) * crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
+
+/// `true` when this queue, after accepting the frame, is over a cap.
+/// Comparison is `>`, so a queue sitting on the cap still fits.
+fn decode_queue_over_cap(
+    heavy_frames: usize,
+    heavy_bytes: usize,
+    cheap_frames: usize,
+    global_heavy: usize,
+    global_cap: usize,
+) -> bool {
+    heavy_frames > DECODE_Q_MAX_FRAMES
+        || cheap_frames > DECODE_Q_MAX_CHEAP_FRAMES
+        || heavy_bytes > DECODE_Q_MAX_BYTES
+        || global_heavy > global_cap
+}
+
+fn decode_q_global_byte_cap() -> usize {
+    crate::msg_decode::blocking_pool_size().saturating_mul(DECODE_Q_MAX_BYTES)
+}
+
+/// Heavy bytes queued for decode in this process. Pop and drop subtract.
+static DECODE_Q_HEAVY_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn add_decode_q_heavy(n: usize) {
+    if n == 0 {
+        return;
+    }
+    DECODE_Q_HEAVY_BYTES.fetch_add(n, Ordering::Relaxed);
+}
+
+fn sub_decode_q_heavy(n: usize) {
+    if n == 0 {
+        return;
+    }
+    let _ = DECODE_Q_HEAVY_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        Some(cur.saturating_sub(n))
+    });
+}
+
+/// Disconnect a peer that queued more heavy frames than
+/// [`DECODE_Q_MAX_FRAMES`], more cheap frames than
+/// [`DECODE_Q_MAX_CHEAP_FRAMES`], or more heavy bytes than the per-peer
+/// window or the process cap.
+#[doc(hidden)]
+pub fn decode_queue_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
+    if let Some(s) = session {
+        s.request_disconnect();
+    }
+    NetError::Protocol("decode queue full")
+}
+
+type DecodeRx = tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>;
+
+struct QueuedDecode {
+    rx: DecodeRx,
+    n: usize,
+    heavy: bool,
+}
+
+struct DecodeQueue {
+    q: VecDeque<QueuedDecode>,
+    heavy_frames: usize,
+    cheap_frames: usize,
+    heavy_bytes: usize,
+}
+
+impl DecodeQueue {
+    fn new() -> Self {
+        Self {
+            q: VecDeque::new(),
+            heavy_frames: 0,
+            cheap_frames: 0,
+            heavy_bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
+
+    fn front_mut(&mut self) -> Option<&mut DecodeRx> {
+        self.q.front_mut().map(|item| &mut item.rx)
+    }
+
+    fn front_len(&self) -> usize {
+        self.q.front().map(|item| item.n).unwrap_or(0)
+    }
+
+    fn front_heavy(&self) -> bool {
+        self.q.front().is_some_and(|item| item.heavy)
+    }
+
+    fn account(&mut self, n: usize, heavy: bool) {
+        if heavy {
+            self.heavy_frames = self.heavy_frames.saturating_add(1);
+            self.heavy_bytes = self.heavy_bytes.saturating_add(n);
+            add_decode_q_heavy(n);
+            return;
+        }
+        self.cheap_frames = self.cheap_frames.saturating_add(1);
+    }
+
+    fn release(&mut self, n: usize, heavy: bool) {
+        if heavy {
+            self.heavy_frames = self.heavy_frames.saturating_sub(1);
+            self.heavy_bytes = self.heavy_bytes.saturating_sub(n);
+            sub_decode_q_heavy(n);
+            return;
+        }
+        self.cheap_frames = self.cheap_frames.saturating_sub(1);
+    }
+
+    fn pop_front(&mut self) -> Option<DecodeRx> {
+        let item = self.q.pop_front()?;
+        self.release(item.n, item.heavy);
+        Some(item.rx)
+    }
+
+    /// Put a decoded frame back at the front. The caller already counted
+    /// these bytes, so this does not re-check the cap.
+    fn push_front_ready(
+        &mut self,
+        msg: Result<RawNetworkMessage, NetError>,
+        n: usize,
+        heavy: bool,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(msg);
+        self.q.push_front(QueuedDecode { rx, n, heavy });
+        self.account(n, heavy);
+    }
+
+    /// Queue one frame already taken off the socket. `heavy` matches the
+    /// spawn decision (`block`, `headers`, `notfound`). `true` when the peer
+    /// has now passed a cap and must be disconnected after a drain.
+    fn push(&mut self, rx: DecodeRx, n: usize, heavy: bool) -> bool {
+        self.q.push_back(QueuedDecode { rx, n, heavy });
+        self.account(n, heavy);
+        decode_queue_over_cap(
+            self.heavy_frames,
+            self.heavy_bytes,
+            self.cheap_frames,
+            DECODE_Q_HEAVY_BYTES.load(Ordering::Relaxed),
+            decode_q_global_byte_cap(),
+        )
+    }
+}
+
+impl Drop for DecodeQueue {
+    fn drop(&mut self) {
+        sub_decode_q_heavy(self.heavy_bytes);
+        self.heavy_bytes = 0;
+    }
+}
+
+/// Block, compact block, and blocktxn still apply on the way out. Anything
+/// else (ping, tx, getheaders) must not run after the peer is leaving or
+/// while the send budget is spent.
+fn queued_msg_is_block_body(msg: &RawNetworkMessage) -> bool {
+    matches!(
+        msg.payload(),
+        NetworkMessage::Block(_) | NetworkMessage::CmpctBlock(_) | NetworkMessage::BlockTxn(_)
+    )
+}
+
+#[cfg(test)]
+mod decode_queue_cap {
+    use super::{
+        decode_queue_over_cap, DecodeQueue, DECODE_Q_MAX_BYTES, DECODE_Q_MAX_CHEAP_FRAMES,
+        DECODE_Q_MAX_FRAMES, MAX_SERVE_BLOCKS,
+    };
+
+    fn parked() -> super::DecodeRx {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        rx
+    }
+
+    /// Tip-follow asks for [`MAX_SERVE_BLOCKS`] bodies and can read one more
+    /// message before the front decode is popped. That heavy window must not
+    /// be treated as a flood. Cheap frames are not under the heavy frame cap.
+    #[test]
+    fn byte_cap_fits_the_serve_window() {
+        let one = crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
+        let mut heavy = DecodeQueue::new();
+        for i in 0..(MAX_SERVE_BLOCKS + 1) {
+            assert!(
+                !heavy.push(parked(), one, true),
+                "heavy message {i} of a serve window overflowed the decode queue"
+            );
+        }
+        assert!(
+            heavy.push(parked(), 1, true),
+            "one heavy byte past the serve window must disconnect"
+        );
+
+        let mut cheap = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_FRAMES {
+            assert!(
+                !cheap.push(parked(), 1, false),
+                "a cheap frame under the heavy frame cap must stay"
+            );
+        }
+        assert!(
+            !cheap.push(parked(), 1, false),
+            "one more cheap frame still fits"
+        );
+        let mut cheap_cap = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_CHEAP_FRAMES {
+            assert!(!cheap_cap.push(parked(), 1, false));
+        }
+        assert!(
+            cheap_cap.push(parked(), 1, false),
+            "past the cheap frame cap must disconnect"
+        );
+
+        let mut heavy_frames = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_FRAMES {
+            assert!(!heavy_frames.push(parked(), 1, true));
+        }
+        assert!(
+            heavy_frames.push(parked(), 1, true),
+            "past the heavy frame cap must disconnect"
+        );
+
+        let cap = DECODE_Q_MAX_BYTES;
+        assert!(
+            !decode_queue_over_cap(1, cap, 0, cap, cap),
+            "a full window at the process cap still fits"
+        );
+        assert!(
+            decode_queue_over_cap(1, cap, 0, cap + 1, cap),
+            "one heavy byte past the process cap must disconnect"
+        );
+    }
 }
 
 /// Core `MaybeDiscourageAndDisconnect`: misbehavior never disconnects or
@@ -1423,6 +1675,7 @@ pub async fn run_writer_task(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub async fn on_heartbeat(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -1431,6 +1684,7 @@ pub async fn on_heartbeat(
     requested_since: &mut Option<std::time::Instant>,
     tx_announce_rx: &mut Option<broadcast::Receiver<crate::tx_relay::MempoolAnnounce>>,
     inv_flush_rx: &mut Option<broadcast::Receiver<()>>,
+    decode_queued: bool,
 ) -> Result<(), NetError> {
     if tx_announce_rx.is_none() {
         *tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
@@ -1448,13 +1702,22 @@ pub async fn on_heartbeat(
     }
     let now = s.clock_now();
     s.sync_block_download(now, |h| follow.block_in_flight(h));
-    // Blocks in flight suspend the ping timeout. A due ping still sends.
-    let ping_elapsed = if follow.has_blocks_in_flight() {
+    // Blocks in flight, or a frame already read and waiting to decode,
+    // suspend the ping timeout. A due ping still sends. The next TCP read
+    // stays armed, so this is the heartbeat side of that same wait.
+    let ping_elapsed = if decode_queued || follow.has_blocks_in_flight() {
         None
     } else {
         s.ping_timeout(now)
     };
-    if let Some(hash) = s.block_download_timed_out(now, hub.params.btc.pow_target_spacing) {
+    // A body already in `decode_q` is still the oldest block in flight.
+    // Timing that window out would drop the frame before it is applied.
+    let download_timed_out = if decode_queued {
+        None
+    } else {
+        s.block_download_timed_out(now, hub.params.btc.pow_target_spacing)
+    };
+    if let Some(hash) = download_timed_out {
         rbitcoin_log::info!("{}", block_download_timeout_log(hash, s.id));
         s.request_disconnect();
     } else if let Some(elapsed_secs) = ping_elapsed {
@@ -1467,28 +1730,32 @@ pub async fn on_heartbeat(
         ph.note_heartbeat_lap();
         ph.on_session_heartbeat();
     }
-    if maybe_expire_block_requests(
-        hub,
-        &mut follow.requested_blocks,
-        requested_since,
-        std::time::Instant::now(),
-        session,
-    ) {
-        drain_pending(
+    // A block or compact frame already sits in `decode_q`. Expiring the
+    // ask here forgets it before that frame is applied.
+    if !decode_queued {
+        if maybe_expire_block_requests(
             hub,
-            out_tx,
-            &mut follow.pending_blocks,
-            &mut follow.pending_headers,
             &mut follow.requested_blocks,
-            getdata_use_compact(hub, follow.cmpct_version),
+            requested_since,
+            std::time::Instant::now(),
             session,
-        )
-        .await?;
-        if !follow.requested_blocks.is_empty() {
-            *requested_since = Some(std::time::Instant::now());
+        ) {
+            drain_pending(
+                hub,
+                out_tx,
+                &mut follow.pending_blocks,
+                &mut follow.pending_headers,
+                &mut follow.requested_blocks,
+                getdata_use_compact(hub, follow.cmpct_version),
+                session,
+            )
+            .await?;
+            if !follow.requested_blocks.is_empty() {
+                *requested_since = Some(std::time::Instant::now());
+            }
         }
+        maybe_expire_pending_cmpct(hub, follow, session, out_tx, std::time::Instant::now())?;
     }
-    maybe_expire_pending_cmpct(hub, follow, session, out_tx, std::time::Instant::now())?;
     queue_due_tx_invs(hub, s, &follow.from_this_peer, out_tx);
     queue_due_parent_getdata(hub, s, out_tx);
     let _ = maybe_queue_local_addr(hub, s, out_tx);
@@ -1628,6 +1895,13 @@ pub fn on_tx_announce_ok(
         return Ok(());
     }
     let inv = tx_announce_inv(mp, &txid);
+    // A later rebroadcast still reaches a peer that has not heard this
+    // wtxid. The claim is shared with flush, so the two cannot both queue.
+    if let Inventory::WTx(w) = inv {
+        if session.is_some_and(|s| !s.claim_announced_wtx(w)) {
+            return Ok(());
+        }
+    }
     tx_announce_note_wtx(session, mp, inv);
     queue_out(out_tx, NetworkMessage::Inv(vec![inv]))
 }
@@ -1767,15 +2041,19 @@ pub fn on_inv_flush(
     }
 }
 
-pub async fn peer_session_with(
-    mut reader: V2Reader,
+struct OpenedPeerWriter {
+    peer_s: String,
+    out_tx: mpsc::UnboundedSender<PeerOut>,
+    writer_task: tokio::task::JoinHandle<()>,
+}
+
+/// Handshake bytes and the writer task. The read loop starts only after this
+/// returns, so a pong can land before the first inbound frame is applied.
+async fn open_peer_writer(
     mut writer: V2Writer,
-    magic: Magic,
-    hub: Arc<ChainHub>,
-    mut tip_rx: broadcast::Receiver<crate::chain::TipEvent>,
-    meta: FollowSessionMeta,
-) -> Result<(), NetError> {
-    let _live_dec = LiveFollowDec(meta.live.clone());
+    hub: &ChainHub,
+    meta: &FollowSessionMeta,
+) -> OpenedPeerWriter {
     let peer_s = meta
         .peer
         .map(|p| p.to_string())
@@ -1801,7 +2079,7 @@ pub async fn peer_session_with(
     if let Some(n) = keepalive {
         let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(n)).await;
     }
-    if let Some(fee_sat) = outbound_feefilter_sats(&hub, meta.session.as_deref()) {
+    if let Some(fee_sat) = outbound_feefilter_sats(hub, meta.session.as_deref()) {
         if write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat))
             .await
             .is_ok()
@@ -1815,21 +2093,42 @@ pub async fn peer_session_with(
     let (out_tx, out_rx) = mpsc::unbounded_channel::<PeerOut>();
     if let Some(s) = meta.session.as_ref() {
         s.attach_out(out_tx.clone());
-        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
+        let _ = maybe_queue_local_addr(hub, s, &out_tx);
     }
 
     let writer_session = meta.session.clone();
-    let mut writer_task = tokio::spawn(run_writer_task(writer, out_rx, writer_session));
+    let writer_task = tokio::spawn(run_writer_task(writer, out_rx, writer_session));
     if let Some(s) = meta.session.as_ref() {
         s.set_writer_abort(writer_task.abort_handle());
     }
 
     if let Some(s) = meta.session.as_ref() {
         let _ = maybe_queue_addrfetch_getaddr(&out_tx, s);
-        let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
-    } else if let Err(e) = queue_getheaders(&out_tx, hub.as_ref(), None, true, None) {
+        let _ = maybe_queue_initial_getheaders(&out_tx, hub, s);
+    } else if let Err(e) = queue_getheaders(&out_tx, hub, None, true, None) {
         rbitcoin_log::warn!("p2p: {peer_s} initial getheaders queue failed: {e}");
     }
+
+    OpenedPeerWriter {
+        peer_s,
+        out_tx,
+        writer_task,
+    }
+}
+
+pub async fn peer_session_with(
+    mut reader: V2Reader,
+    writer: V2Writer,
+    magic: Magic,
+    hub: Arc<ChainHub>,
+    mut tip_rx: broadcast::Receiver<crate::chain::TipEvent>,
+    meta: FollowSessionMeta,
+) -> Result<(), NetError> {
+    let _live_dec = LiveFollowDec(meta.live.clone());
+    let opened = open_peer_writer(writer, hub.as_ref(), &meta).await;
+    let peer_s = opened.peer_s;
+    let out_tx = opened.out_tx;
+    let mut writer_task = opened.writer_task;
 
     let mut owned_follow = SessionFollow {
         hub: hub.clone(),
@@ -1840,6 +2139,14 @@ pub async fn peer_session_with(
         follow.wtxid_relay = s.wtxid_relay();
     }
     let mut requested_since: Option<std::time::Instant> = None;
+    // Heavy decodes wait for a pool-sized permit on the decode task. This
+    // loop keeps reading: a ping or pong already on the socket must not sit
+    // in the kernel buffer until a permit frees. Later frames stay behind
+    // earlier ones in `decode_q`. The queue is capped; a peer that fills it
+    // is disconnected. Timeouts stay suspended only while that capped queue
+    // still holds a frame, so a pong already read is not dropped.
+    let mut decode_q = DecodeQueue::new();
+    let mut decode_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut rate = PeerRateLimiter::default_limits();
     let decoy_score = AtomicU32::new(0);
     let mut logged_invalid_v2 = false;
@@ -1856,12 +2163,26 @@ pub async fn peer_session_with(
         .map(|peers| peers.subscribe_session_heartbeat());
     let mut pending_tip: Option<Result<crate::chain::TipEvent, broadcast::error::RecvError>> = None;
     let mut tip_deadline: Option<tokio::time::Instant> = None;
+    // The decode arm consumes a ready oneshot. A non-block frame at the
+    // front waits here until the send budget clears, so a later frame
+    // cannot pass it and the request is not dropped.
+    let mut hold_front = false;
     let result = async {
         loop {
             if session
                 .as_ref()
                 .is_some_and(|s| s.stop.load(Ordering::Relaxed))
             {
+                apply_queued_decodes(
+                    &mut decode_q,
+                    hub.as_ref(),
+                    &out_tx,
+                    follow,
+                    session.as_deref(),
+                    &mut requested_since,
+                    &peer_s,
+                )
+                .await?;
                 return Ok(());
             }
             // Core `fPauseSend`: no inbound message is read while the writer
@@ -1869,6 +2190,9 @@ pub async fn peer_session_with(
             // for serve room. Heartbeat (ping timeout, block-request expiry)
             // still runs.
             let over_budget = session.as_ref().is_some_and(|s| s.send_over_budget());
+            if !over_budget {
+                hold_front = false;
+            }
             let tail_pending =
                 !follow.getdata_tail.is_empty() || !follow.getblocktxn_tail.is_empty();
             let reading = !over_budget && !tail_pending;
@@ -1878,8 +2202,51 @@ pub async fn peer_session_with(
                 biased;
                 // Peer half-close / write failure: tear down so getpeerinfo
                 // clears without waiting on a stuck read/decode arm.
+                decoded = std::future::poll_fn(|cx| {
+                    let Some(rx) = decode_q.front_mut() else {
+                        return Poll::Pending;
+                    };
+                    std::pin::Pin::new(rx).poll(cx)
+                }), if !decode_q.is_empty() && !hold_front => {
+                    let n = decode_q.front_len();
+                    let heavy = decode_q.front_heavy();
+                    let _ = decode_q.pop_front();
+                    if over_budget
+                        && matches!(&decoded, Ok(Ok(msg)) if !queued_msg_is_block_body(msg))
+                    {
+                        if let Ok(msg) = decoded {
+                            decode_q.push_front_ready(msg, n, heavy);
+                            hold_front = true;
+                            continue;
+                        }
+                    }
+                    let mut slot = ReadyDecode {
+                        queue: &mut decode_q,
+                        requested_since: &mut requested_since,
+                        peer: &peer_s,
+                    };
+                    apply_ready_decode(
+                        decoded,
+                        &mut slot,
+                        hub.as_ref(),
+                        &out_tx,
+                        follow,
+                        session.as_deref(),
+                    )
+                    .await?;
+                }
                 writer_done = &mut writer_task => {
                     let _ = writer_done;
+                    apply_queued_decodes(
+                        &mut decode_q,
+                        hub.as_ref(),
+                        &out_tx,
+                        follow,
+                        session.as_deref(),
+                        &mut requested_since,
+                        &peer_s,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 // Inbound before local tip announce so GetData during a
@@ -1904,8 +2271,30 @@ pub async fn peer_session_with(
                         Ok(f) => f,
                         // Any socket Io means the peer is gone — exit cleanly so
                         // unregister runs inside the Core disconnect_nodes 5s wait.
-                        Err(NetError::Io(_)) => return Ok(()),
+                        Err(NetError::Io(_)) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
                         Err(NetError::Protocol("peer misbehavior threshold")) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             return Err(threshold_disconnect(session.as_deref()));
                         }
                         Err(NetError::MessageTooLarge(n)) => {
@@ -1914,6 +2303,16 @@ pub async fn peer_session_with(
                                 "p2p: {peer_s} oversize frame ({n}) misbehavior={}",
                                 follow.ban_score
                             );
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             if follow.ban_score >= BAN_SCORE_THRESHOLD {
                                 return Err(threshold_disconnect(session.as_deref()));
                             }
@@ -1939,12 +2338,34 @@ pub async fn peer_session_with(
                                     follow.ban_score
                                 );
                                 if follow.ban_score >= BAN_SCORE_THRESHOLD {
+                                    apply_queued_decodes(
+                                        &mut decode_q,
+                                        hub.as_ref(),
+                                        &out_tx,
+                                        follow,
+                                        session.as_deref(),
+                                        &mut requested_since,
+                                        &peer_s,
+                                    )
+                                    .await?;
                                     return Err(threshold_disconnect(session.as_deref()));
                                 }
                             }
                             continue;
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
+                            return Err(e);
+                        }
                     };
                     if let Some(ref sess) = session {
                         sess.note_recv(&framed_cmd(&frame), frame.payload_len() as u64);
@@ -1957,12 +2378,55 @@ pub async fn peer_session_with(
                             follow.ban_score
                         );
                         if follow.ban_score >= BAN_SCORE_THRESHOLD {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             return Err(threshold_disconnect(session.as_deref()));
                         }
+                        apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await?;
                         // Close to free this session's asks. A second strike refuses the address.
                         return Err(rate_limit_disconnect(session.as_deref()));
                     }
-                    // Ping/pong: cheap 8-byte path — never leave the I/O task for decode.
+                    // Ping/pong stays on this task when nothing is queued. A
+                    // frame already in `decode_q` must be applied first, or a
+                    // later pong updates the clock ahead of an earlier block.
+                    if (frame.is_ping() || frame.is_pong()) && !decode_q.is_empty() {
+                        let n = frame.payload_len();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(frame.try_decode());
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            false,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
+                                follow,
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
                     if frame.is_ping() {
                         if let Some(n) = frame.ping_nonce() {
                             queue_out(&out_tx, NetworkMessage::Pong(n))?;
@@ -1978,6 +2442,56 @@ pub async fn peer_session_with(
                         continue;
                     }
                     let n_req = follow.requested_blocks.len();
+                    if frame.is_block() || frame.decode_is_cpu_heavy() {
+                        let n = frame.payload_len();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let task = tokio::spawn(async move {
+                            let _ = tx.send(decode_framed_offload(frame).await);
+                        });
+                        decode_tasks.retain(|t| !t.is_finished());
+                        decode_tasks.push(task);
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            true,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
+                                follow,
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                    if !decode_q.is_empty() {
+                        // A heavy decode is still in flight. This frame is
+                        // cheap (no permit). Hold it behind the frames already
+                        // queued so a block is not overtaken by the tx or inv
+                        // that followed it on the wire.
+                        let n = frame.payload_len();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(frame.try_decode());
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            false,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
+                                follow,
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
                     handle_peer_frame(
                         frame,
                         hub.as_ref(),
@@ -2098,6 +2612,7 @@ pub async fn peer_session_with(
                         &mut requested_since,
                         &mut tx_announce_rx,
                         &mut inv_flush_rx,
+                        !decode_q.is_empty(),
                     )
                     .await?;
                     last_hb = std::time::Instant::now();
@@ -2117,26 +2632,84 @@ pub async fn peer_session_with(
                     }
                 }, if tail_pending => {
                     if !room {
+                        apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await?;
                         return Ok(());
                     }
                     if !follow.getdata_tail.is_empty() {
-                        serve_getdata_tail(hub.as_ref(), &out_tx, follow, session.as_deref())
-                            .await?;
-                    }
-                    if !follow.getblocktxn_tail.is_empty() {
-                        serve_getblocktxn_tail(
+                        if let Err(e) = serve_getdata_tail(
                             hub.as_ref(),
                             &out_tx,
                             follow,
                             session.as_deref(),
                         )
-                        .await?;
+                        .await
+                        {
+                            let _ = apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                            return Err(e);
+                        }
+                    }
+                    if !follow.getblocktxn_tail.is_empty() {
+                        if let Err(e) = serve_getblocktxn_tail(
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                        )
+                        .await
+                        {
+                            let _ = apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                            return Err(e);
+                        }
                     }
                 }
             }
         }
     }
     .await;
+
+    // A `?` in the tip or tx-announce arm leaves frames that were already
+    // read. Apply them before `SessionFollow` forgets their getdata.
+    let drained = apply_queued_decodes(
+        &mut decode_q,
+        hub.as_ref(),
+        &out_tx,
+        follow,
+        session.as_deref(),
+        &mut requested_since,
+        &peer_s,
+    )
+    .await;
+    let result = match (result, drained) {
+        (Err(e), _) => Err(e),
+        (Ok(()), drained) => drained,
+    };
 
     drop(out_tx);
     // If select! already joined the writer, do not await again (would pend).
@@ -2567,9 +3140,6 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         if !tx_inv_peer_ok(&s, mp, &txid) {
             continue;
         }
-        if s.has_announced_wtx(&w) {
-            continue;
-        }
         let peer_min = s.minfeefilter_sat_kvb();
         if peer_min > 0 && announce_fee_rate_sat_kvb(mp, &txid).is_some_and(|rate| rate < peer_min)
         {
@@ -2578,7 +3148,9 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         let Some(out) = s.writer() else {
             continue;
         };
-        s.note_announced_wtx(w);
+        if !s.claim_announced_wtx(w) {
+            continue;
+        }
         queue_tx_inv_batches(&s, &out, vec![Inventory::WTx(w)]);
         if let Some(seq) = mp.relay_seq_of(&w) {
             s.note_tx_inv_seq(s.last_inv_sequence().max(seq.saturating_add(1)));
@@ -2652,9 +3224,6 @@ pub fn tx_inv_candidate_ok(
     if !mp.relay_enabled() && !mp.is_unbroadcast(&txid) {
         return false;
     }
-    if session.has_announced_wtx(&w) {
-        return false;
-    }
     if mp
         .accept_gen(&w)
         .is_some_and(|g| g < session.inv_gen_floor())
@@ -2674,7 +3243,9 @@ pub fn tx_inv_candidate_ok(
     } else if !clock_due && !local && !age_due_this {
         return false;
     }
-    true
+    // Every `true` is queued. The claim is the only insert, so a flush and
+    // an announce cannot both pass and each send an INV.
+    session.claim_announced_wtx(w)
 }
 
 #[doc(hidden)]
@@ -2723,7 +3294,6 @@ pub fn queue_due_tx_invs(
             ) {
                 continue;
             }
-            session.note_announced_wtx(w);
             due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
@@ -2752,7 +3322,6 @@ pub fn queue_due_tx_invs(
             ) {
                 continue;
             }
-            session.note_announced_wtx(w);
             due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
@@ -2877,6 +3446,210 @@ pub fn serve_mempool_getdata(
     Ok(false)
 }
 
+fn note_block_request_window(
+    follow: &PeerFollowState,
+    n_req: usize,
+    requested_since: &mut Option<std::time::Instant>,
+) {
+    let n_after = follow.requested_blocks.len();
+    if n_after == 0 {
+        *requested_since = None;
+    } else if n_after < n_req || n_req == 0 {
+        *requested_since = Some(std::time::Instant::now());
+    }
+}
+
+struct ReadyDecode<'a> {
+    queue: &'a mut DecodeQueue,
+    requested_since: &'a mut Option<std::time::Instant>,
+    peer: &'a str,
+}
+
+struct DecodeDrain<'a> {
+    hub: &'a ChainHub,
+    out_tx: &'a mpsc::UnboundedSender<PeerOut>,
+    follow: &'a mut PeerFollowState,
+    session: Option<&'a crate::peers::LivePeer>,
+    requested_since: &'a mut Option<std::time::Instant>,
+    peer: &'a str,
+}
+
+async fn push_decode_frame(
+    decode_q: &mut DecodeQueue,
+    rx: DecodeRx,
+    n: usize,
+    heavy: bool,
+    drain: DecodeDrain<'_>,
+) -> Result<(), NetError> {
+    if !decode_q.push(rx, n, heavy) {
+        return Ok(());
+    }
+    finish_decode_queue_full(
+        decode_q,
+        drain.hub,
+        drain.out_tx,
+        drain.follow,
+        drain.session,
+        drain.requested_since,
+        drain.peer,
+    )
+    .await
+}
+
+async fn finish_decode_queue_full(
+    decode_q: &mut DecodeQueue,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    requested_since: &mut Option<std::time::Instant>,
+    peer_s: &str,
+) -> Result<(), NetError> {
+    rbitcoin_log::warn!("p2p: {peer_s} decode queue full");
+    apply_queued_decodes(
+        decode_q,
+        hub,
+        out_tx,
+        follow,
+        session,
+        requested_since,
+        peer_s,
+    )
+    .await?;
+    Err(decode_queue_disconnect(session))
+}
+
+/// Apply one frame that already left the socket. A dropped decode task or a
+/// failed apply still drains frames behind it, so `SessionFollow` does not
+/// forget their getdata.
+async fn apply_ready_decode(
+    decoded: Result<Result<RawNetworkMessage, NetError>, tokio::sync::oneshot::error::RecvError>,
+    slot: &mut ReadyDecode<'_>,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<(), NetError> {
+    let decoded = match decoded {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = apply_queued_decodes(
+                slot.queue,
+                hub,
+                out_tx,
+                follow,
+                session,
+                slot.requested_since,
+                slot.peer,
+            )
+            .await;
+            return Err(NetError::Protocol("decode task dropped"));
+        }
+    };
+    let n_req = follow.requested_blocks.len();
+    let applied = apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await;
+    note_block_request_window(follow, n_req, slot.requested_since);
+    if let Err(e) = applied {
+        let _ = apply_queued_decodes(
+            slot.queue,
+            hub,
+            out_tx,
+            follow,
+            session,
+            slot.requested_since,
+            slot.peer,
+        )
+        .await;
+        return Err(e);
+    }
+    if misbehavior_disconnects(follow.ban_score, session) {
+        rbitcoin_log::warn!(
+            "{}",
+            misbehavior_disconnect_log(slot.peer, follow.ban_score)
+        );
+        let _ = apply_queued_decodes(
+            slot.queue,
+            hub,
+            out_tx,
+            follow,
+            session,
+            slot.requested_since,
+            slot.peer,
+        )
+        .await;
+        return Err(threshold_disconnect(session));
+    }
+    Ok(())
+}
+
+/// Apply frames already taken off the socket, in order, before a later read
+/// error tears the session down. `SessionFollow`'s drop would otherwise
+/// forget getdata for a block that is still sitting in `decode_q`.
+async fn apply_queued_decodes(
+    decode_q: &mut DecodeQueue,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    requested_since: &mut Option<std::time::Instant>,
+    peer_s: &str,
+) -> Result<(), NetError> {
+    // Blocks already off the socket still apply. Ping, tx, and getheaders
+    // do not: they would start headers sync or a download window on a peer
+    // that is about to unregister.
+    if let Some(s) = session {
+        s.request_disconnect();
+    }
+    let mut first_err: Option<NetError> = None;
+    while let Some(rx) = decode_q.pop_front() {
+        let decoded = match rx.await {
+            Ok(r) => r,
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some(NetError::Protocol("decode task dropped"));
+                }
+                continue;
+            }
+        };
+        if matches!(&decoded, Ok(msg) if !queued_msg_is_block_body(msg)) {
+            continue;
+        }
+        let n_req = follow.requested_blocks.len();
+        if let Err(e) = apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+        note_block_request_window(follow, n_req, requested_since);
+        if misbehavior_disconnects(follow.ban_score, session) && first_err.is_none() {
+            rbitcoin_log::warn!("{}", misbehavior_disconnect_log(peer_s, follow.ban_score));
+            first_err = Some(threshold_disconnect(session));
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+async fn apply_decoded_peer_msg(
+    decoded: Result<RawNetworkMessage, NetError>,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<(), NetError> {
+    let msg = match decoded {
+        Ok(m) => m,
+        Err(NetError::MessageTooLarge(n)) => {
+            follow.ban_score = follow.ban_score.saturating_add(OVERSIZE_BAN_SCORE);
+            return Err(NetError::MessageTooLarge(n));
+        }
+        Err(e) => return Err(e),
+    };
+    handle_decoded_peer_msg(msg, hub, out_tx, follow, session).await
+}
+
 pub async fn handle_peer_frame(
     frame: FramedMessage,
     hub: &ChainHub,
@@ -2962,7 +3735,16 @@ pub fn handle_peer_control_msg(
         NetworkMessage::Version(_) => on_redundant_version(session),
         NetworkMessage::Verack => on_redundant_verack(session),
         NetworkMessage::Ping(n) => on_ping(hub, out_tx, follow, session, *n)?,
-        NetworkMessage::Pong(_) => {}
+        // A pong that waited behind `decode_q` is applied here. The read arm
+        // only handles a pong when that queue is empty.
+        NetworkMessage::Pong(n) => {
+            if let Some(s) = session {
+                let payload = n.to_le_bytes();
+                if let Some(line) = s.on_pong(&payload, s.clock_now()) {
+                    rbitcoin_log::info!("{line}");
+                }
+            }
+        }
         NetworkMessage::FeeFilter(amt) => on_feefilter(session, *amt),
         NetworkMessage::SendHeaders => on_sendheaders(follow),
         NetworkMessage::SendCmpct(sc) => on_sendcmpct(follow, session, sc),
@@ -5099,6 +5881,21 @@ pub fn queue_due_parent_getdata(
     let _ = queue_accounted(Some(session), out_tx, NetworkMessage::GetData(inv));
 }
 
+/// Flush walks every writer with an empty from-this-peer set. The sender
+/// already has the tx, so that INV must not come back.
+fn note_blocksonly_sender(
+    mp: &crate::tx_relay::MempoolHub,
+    session: Option<&crate::peers::LivePeer>,
+    wtxid: bitcoin::Wtxid,
+) {
+    if mp.relay_enabled() {
+        return;
+    }
+    if let Some(s) = session {
+        s.note_announced_wtx(wtxid);
+    }
+}
+
 pub async fn on_tx(
     hub: &ChainHub,
     _out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -5136,25 +5933,41 @@ pub async fn on_tx(
             if trusted {
                 mp.set_trusted_session(from);
             }
-            match mp
-                .accept_tx_from_async(tx.clone(), crate::tx_relay::TxOrigin::Relay(from))
-                .await
-            {
-                Ok(r) => {
+            note_blocksonly_sender(mp, session, wtxid);
+            let mp_task = Arc::clone(mp);
+            let tx_task = tx.clone();
+            let peers = session.and_then(|s| s.peer_hub());
+            let hub_arc = hub.shared_arc();
+            // The blocksonly note shares the admit task. Aborting this
+            // session during script verify must not skip the rebroadcast.
+            let admitted = crate::reactor::spawn_with_store_budget(async move {
+                let result = mp_task
+                    .accept_tx_from_work(tx_task, crate::tx_relay::TxOrigin::Relay(from))
+                    .await;
+                if let Ok(r) = &result {
+                    if !mp_task.relay_enabled() {
+                        mp_task.note_unbroadcast(r.txid);
+                        mp_task.rebroadcast_unbroadcast();
+                        mp_task.notify_inv_flush();
+                        if let (Some(h), Some(ph)) = (hub_arc.as_ref(), peers.as_ref()) {
+                            flush_tx_invs(h, ph.as_ref());
+                        }
+                    }
+                }
+                result
+            })
+            .await
+            .expect("tx admit");
+            match admitted {
+                Ok(_r) => {
                     mp.resolve_tx_request(&txid, &wtxid, true);
                     if let Some(s) = session {
                         s.note_last_transaction();
                     }
-                    // Only when P2P relay is off: accept-time announce
-                    // is skipped (not yet unbroadcast). Re-announce so
-                    // other tx-relay peers INV (`p2p_blocksonly` :74).
-                    // Do not do this when relay is on — that INVs every
-                    // accepted tx back at the sender and broke
-                    // feature_csv_activation (P2PInterface getdata storm).
-                    if !mp.relay_enabled() {
-                        mp.note_unbroadcast(r.txid);
-                        mp.rebroadcast_unbroadcast();
-                        mp.notify_inv_flush();
+                    // A hub that is not `into_arc` has no detached handle.
+                    // Flush here so the other inbound still sees the INV.
+                    // An `into_arc` hub already flushed inside the admit task.
+                    if !mp.relay_enabled() && hub.shared_arc().is_none() {
                         if let Some(s) = session {
                             if let Some(ph) = s.peer_hub() {
                                 flush_tx_invs(hub, ph.as_ref());
