@@ -766,6 +766,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_template_orders_rate_then_fee(&ctx, &mut cbs);
     chain_ops_deprioritised_child_keeps_parent(&ctx, &mut cbs);
     chain_ops_deprioritised_parent_rides_child(&ctx, &mut cbs);
+    chain_ops_save_and_import_mempool(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
@@ -2913,6 +2914,238 @@ fn chain_ops_deprioritised_parent_rides_child(ctx: &RpcContext, cbs: &mut TrueCo
     );
     chain_ops_restore_sigop_mining_knobs(ctx);
     chain_ops_mine_pool_empty(ctx);
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn dat_tx(tx: &Transaction, time: i64, fee_delta: i64) -> rbitcoin_net::CoreDatTx {
+    rbitcoin_net::CoreDatTx {
+        tx: tx.clone(),
+        time,
+        fee_delta,
+    }
+}
+
+fn import_err(ctx: &RpcContext, params: Vec<Value>) -> Value {
+    dispatch(ctx, "importmempool", params).unwrap_err()
+}
+
+fn entry_time(ctx: &RpcContext, txid: &str) -> i64 {
+    dispatch(ctx, "getmempoolentry", vec![json!(txid)]).unwrap()["time"]
+        .as_i64()
+        .unwrap()
+}
+
+fn sorted_pool(ctx: &RpcContext) -> Vec<String> {
+    let mut pool: Vec<String> = dispatch(ctx, "getrawmempool", vec![])
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    pool.sort();
+    pool
+}
+
+/// A txid no file entry or pool member has.
+fn unknown_txid() -> Txid {
+    Txid::from_byte_array([0x99; 32])
+}
+
+/// Older than the default 336 h `-mempoolexpiry`.
+fn expired_time() -> i64 {
+    unix_now() - 15 * 86_400
+}
+
+/// Core `mempool_persist.py` shape over Core's `mempool.dat` bytes:
+/// `savemempool` writes the pool (entry times, fee deltas, the unbroadcast
+/// set) as a version 2 file, and `importmempool` admits a version 1 or 2
+/// file through normal admission under each of its three options.
+fn chain_ops_save_and_import_mempool(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    let (path, raw) = mempool_dat_save(ctx, cbs);
+    mempool_dat_import_defaults(ctx, cbs, &path);
+    mempool_dat_import_every_option(ctx, cbs, &path);
+    mempool_dat_import_rejects(ctx, &path, &raw);
+    chain_ops_mine_pool_empty(ctx);
+}
+
+fn mempool_dat_save(ctx: &RpcContext, cbs: &mut TrueCoinbases) -> (std::path::PathBuf, Vec<u8>) {
+    let mp = ctx.mempool.as_ref().unwrap();
+    let h = cbs.take();
+    let (parent_hex, parent) =
+        spend_generated_coinbase(ctx, h, generated_coinbase_value(ctx, h) - 1_000, true_spk());
+    let pid = dispatch(ctx, "sendrawtransaction", vec![json!(parent_hex)])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = op_true_child(&parent, 0, 2_000, 1);
+    let cid = send_tx(ctx, &child);
+    dispatch(ctx, "prioritisetransaction", vec![json!(cid.clone()), json!(0), json!(700)]).unwrap();
+    let absent = Txid::from_byte_array([0xab; 32]);
+    let prioritise_absent = |delta: i64| {
+        dispatch(
+            ctx,
+            "prioritisetransaction",
+            vec![json!(absent.to_string()), json!(0), json!(delta)],
+        )
+        .unwrap()
+    };
+    prioritise_absent(777);
+
+    let saved = dispatch(ctx, "savemempool", vec![]).unwrap();
+    let path = mp.core_mempool_dat_path();
+    assert_eq!(saved, json!({ "filename": path.display().to_string() }));
+    assert!(path.ends_with("mempool.dat"), "{}", path.display());
+    assert!(!path.with_file_name("mempool.dat.new").exists());
+    let raw = std::fs::read(&path).unwrap();
+    assert_eq!(raw[..8], 2u64.to_le_bytes(), "version 2");
+    assert_eq!(raw[8], 8, "compact size of the XOR key");
+    let key = &raw[9..17];
+    let count: Vec<u8> = (17..25).map(|i| raw[i] ^ key[i % 8]).collect();
+    assert_eq!(count, 2u64.to_le_bytes(), "count is XORed at its file offset");
+    let dat = rbitcoin_net::CoreMempoolDat::decode(&raw).unwrap();
+    assert_eq!(
+        dat.txs,
+        vec![
+            dat_tx(&parent, entry_time(ctx, &pid), 0),
+            dat_tx(&child, entry_time(ctx, &cid), 700),
+        ],
+        "parents first, with entry time and fee delta"
+    );
+    assert_eq!(dat.deltas, [(absent, 777)].into_iter().collect());
+    assert_eq!(
+        dat.unbroadcast,
+        [parent.compute_txid(), child.compute_txid()].into_iter().collect()
+    );
+    prioritise_absent(-777);
+    chain_ops_mine_pool_empty(ctx);
+    (path, raw)
+}
+
+/// Version 1, default options: current time, no deltas, no unbroadcast.
+fn mempool_dat_import_defaults(ctx: &RpcContext, cbs: &mut TrueCoinbases, path: &std::path::Path) {
+    let a = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let b = op_true_child(&a, 0, 1_000, 2);
+    let e = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let mut missing = op_true_child(&a, 0, 1_000, 3);
+    missing.input[0].previous_output.txid = Txid::from_byte_array([0xcd; 32]);
+    let old = expired_time();
+    let v1 = rbitcoin_net::CoreMempoolDat {
+        txs: vec![
+            dat_tx(&a, old, 500),
+            dat_tx(&b, old, 0),
+            dat_tx(&a, old, 0),
+            dat_tx(&e, old, 0),
+            dat_tx(&missing, old, 0),
+        ],
+        deltas: [(unknown_txid(), 999)].into_iter().collect(),
+        unbroadcast: [a.compute_txid()].into_iter().collect(),
+    };
+    let file = path.with_file_name("import-v1.dat");
+    std::fs::write(&file, v1.encode(None)).unwrap();
+    let before = unix_now();
+    let r = dispatch(ctx, "importmempool", vec![json!(file.display().to_string())]).unwrap();
+    assert_eq!(r, json!({}));
+    let after = unix_now();
+    let mut want: Vec<String> = [&a, &b, &e].iter().map(|t| t.compute_txid().to_string()).collect();
+    want.sort();
+    assert_eq!(sorted_pool(ctx), want, "the orphan fails; the duplicate is already there");
+    let a_time = entry_time(ctx, &a.compute_txid().to_string());
+    assert!((before..=after).contains(&a_time), "{a_time} in {before}..={after}");
+    assert_eq!(dispatch(ctx, "getprioritisedtransactions", vec![]).unwrap(), json!({}));
+    assert!(!ctx.mempool.as_ref().unwrap().is_unbroadcast(&a.compute_txid()));
+    chain_ops_mine_pool_empty(ctx);
+}
+
+/// Version 2, every option on: file times, deltas, and the unbroadcast set.
+/// A second `savemempool` writes back what was imported.
+fn mempool_dat_import_every_option(
+    ctx: &RpcContext,
+    cbs: &mut TrueCoinbases,
+    path: &std::path::Path,
+) {
+    let f = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let g = spend_generated_coinbase(ctx, cbs.take(), 50_000, true_spk()).1;
+    let f_time = unix_now() - 3_600;
+    let unknown = unknown_txid();
+    let v2 = rbitcoin_net::CoreMempoolDat {
+        txs: vec![dat_tx(&f, f_time, 500), dat_tx(&g, expired_time(), 0)],
+        deltas: [(unknown, 999)].into_iter().collect(),
+        unbroadcast: [f.compute_txid(), g.compute_txid()].into_iter().collect(),
+    };
+    let file = path.with_file_name("import-v2.dat");
+    std::fs::write(&file, v2.encode(Some([1, 2, 3, 4, 5, 6, 7, 8]))).unwrap();
+    let opts = json!({
+        "use_current_time": false,
+        "apply_fee_delta_priority": true,
+        "apply_unbroadcast_set": true,
+    });
+    let r = dispatch(
+        ctx,
+        "importmempool",
+        vec![json!(file.display().to_string()), opts],
+    )
+    .unwrap();
+    assert_eq!(r, json!({}));
+    let fid = f.compute_txid().to_string();
+    assert_eq!(
+        sorted_pool(ctx),
+        vec![fid.clone()],
+        "an entry older than -mempoolexpiry is skipped"
+    );
+    assert_eq!(entry_time(ctx, &fid), f_time);
+    let entry = dispatch(ctx, "getmempoolentry", vec![json!(fid.clone())]).unwrap();
+    assert_eq!(entry["unbroadcast"], true);
+    let pri = dispatch(ctx, "getprioritisedtransactions", vec![]).unwrap();
+    assert_eq!(pri[&fid]["fee_delta"], 500);
+    assert_eq!(pri[&fid]["in_mempool"], true);
+    assert_eq!(pri[unknown.to_string()]["fee_delta"], 999);
+    assert_eq!(pri[unknown.to_string()]["in_mempool"], false);
+    dispatch(ctx, "savemempool", vec![]).unwrap();
+    let round = rbitcoin_net::CoreMempoolDat::decode(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(round.txs, vec![dat_tx(&f, f_time, 500)]);
+    assert_eq!(round.deltas, [(unknown, 999)].into_iter().collect());
+    assert_eq!(round.unbroadcast, [f.compute_txid()].into_iter().collect());
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(unknown.to_string()), json!(0), json!(-999)],
+    )
+    .unwrap();
+}
+
+/// Core's `-1` for a file that does not open or parse, and `-3` for an
+/// option of the wrong type.
+fn mempool_dat_import_rejects(ctx: &RpcContext, path: &std::path::Path, raw: &[u8]) {
+    let unable = "Unable to import mempool file, see debug.log for details.";
+    let gone = import_err(ctx, vec![json!(path.with_file_name("no-such.dat").display().to_string())]);
+    assert_eq!((gone["code"].clone(), gone["message"].clone()), (json!(ERR_MISC), json!(unable)));
+    let mut v3 = raw.to_vec();
+    v3[0] = 3;
+    let bad = path.with_file_name("import-v3.dat");
+    std::fs::write(&bad, v3).unwrap();
+    assert_eq!(import_err(ctx, vec![json!(bad.display().to_string())])["message"], unable);
+    let short = path.with_file_name("import-short.dat");
+    std::fs::write(&short, &raw[..raw.len() - 1]).unwrap();
+    assert_eq!(import_err(ctx, vec![json!(short.display().to_string())])["message"], unable);
+    let e = import_err(ctx, vec![json!(bad.display().to_string()), json!("x")]);
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    let e = import_err(
+        ctx,
+        vec![json!(bad.display().to_string()), json!({"use_current_time": "yes"})],
+    );
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert_eq!(
+        e["message"],
+        "JSON value of type string is not of expected type bool"
+    );
 }
 
 fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoinbases) -> u32 {

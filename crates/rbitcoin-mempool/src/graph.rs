@@ -1050,6 +1050,24 @@ impl TxGraph {
         chunks
     }
 
+    /// Every live tx, best modified-fee chunk first, parents before
+    /// children (Core `GetSortedScoreWithTopology`, the `mempool.dat` order).
+    pub fn mining_order(&self, delta: &impl Fn(Txid) -> i64) -> Vec<Txid> {
+        let mut emitted = HashSet::new();
+        let mut out = Vec::with_capacity(self.entries.len());
+        for ch in self.mining_chunks_for_delta(delta) {
+            for t in &ch.txids {
+                let mut add = Vec::new();
+                self.collect_selected_with_ancestors(*t, &emitted, &mut add);
+                for a in add {
+                    emitted.insert(a);
+                    out.push(a);
+                }
+            }
+        }
+        out
+    }
+
     /// Consensus max block weight (WU).
     pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
     /// Core `DEFAULT_BLOCK_RESERVED_WEIGHT` (coinbase / witness reserved).

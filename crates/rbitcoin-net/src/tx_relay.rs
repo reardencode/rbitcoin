@@ -834,6 +834,27 @@ impl RecentConfirmed {
     }
 }
 
+/// Core `ImportMempoolOptions` (`importmempool` options).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreDatImport {
+    /// Stamp every entry with the current time instead of the file's.
+    pub use_current_time: bool,
+    /// Add the file's fee deltas to `prioritisetransaction`.
+    pub apply_fee_delta_priority: bool,
+    /// Mark the file's unbroadcast txids that are now in the pool.
+    pub apply_unbroadcast_set: bool,
+}
+
+/// Counts for Core's `importmempool` log line.
+#[derive(Debug, Default)]
+struct CoreDatImported {
+    succeeded: u64,
+    failed: u64,
+    expired: u64,
+    already_there: u64,
+    unbroadcast: u64,
+}
+
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct AdmitSpec {
@@ -2829,8 +2850,48 @@ impl MempoolHub {
                 return self.finish_accept_err(us, e);
             }
         };
-
         self.commit_admitted(tx, prep, utxo, origin, defer_trim, stages, lock_us, t0)
+    }
+
+    /// Core `LoadMempool` admit of one `mempool.dat` entry: the relay admit,
+    /// with no orphan parking or 1p1c, stamped at `accept_secs`.
+    pub fn import_tx(
+        &self,
+        tx: &Transaction,
+        accept_secs: u64,
+    ) -> Result<AcceptResult, AcceptError> {
+        crate::reactor::assert_not_reactor("mempool import");
+        let utxo = self.utxo_provider();
+        utxo.note_spender(tx);
+        let t0 = Instant::now();
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let spec = AdmitSpec {
+            report_orphans: false,
+            fee_delta: self.fee_delta(&tx.compute_txid()),
+            time_prepare_lock: false,
+            min_relay: None,
+            waive: false,
+        };
+        let mut prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
+            Ok(p) => p,
+            Err(e) => {
+                self.note_if_accept_failure(tx, &e);
+                self.meter_accept_stages(lock_us, stages);
+                return self.finish_accept_err(t0.elapsed().as_micros() as u64, e);
+            }
+        };
+        prep.keep_accept_secs = Some(accept_secs);
+        self.commit_admitted(
+            tx,
+            prep,
+            &utxo,
+            TxOrigin::Relay(None),
+            false,
+            stages,
+            lock_us,
+            t0,
+        )
     }
 
     /// Recheck coins and commit. Does not publish, restore, or promote.
@@ -5905,6 +5966,112 @@ impl MempoolHub {
         // cluster-limit basis, chunk weights are adjusted.
         let adjusted = chunks.iter().fold(0u64, |w, ch| w.saturating_add(ch.1));
         Some((adjusted, c.members.len(), chunks))
+    }
+
+    /// Core `MempoolPath`: `{datadir}/mempool.dat`, beside this pool's
+    /// `{datadir}/mempool/`.
+    pub fn core_mempool_dat_path(&self) -> PathBuf {
+        self.dir.with_file_name("mempool.dat")
+    }
+
+    /// Core `DumpMempool`: write [`Self::core_mempool_dat_path`] as a
+    /// version 2 file obfuscated with `key`, through `mempool.dat.new`, a
+    /// sync and a rename.
+    pub fn save_core_mempool_dat(&self, key: [u8; 8]) -> std::io::Result<PathBuf> {
+        use std::io::Write;
+        let bytes = self.core_mempool_dat().encode(Some(key));
+        let path = self.core_mempool_dat_path();
+        let tmp = path.with_file_name("mempool.dat.new");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &path)?;
+        rbitcoin_log::info!(
+            "Dumped mempool: {} transactions, {} bytes dumped to file",
+            self.live_count(),
+            bytes.len()
+        );
+        Ok(path)
+    }
+
+    /// Core `LoadMempool` over a decoded `mempool.dat`. Each entry goes
+    /// through [`Self::import_tx`]; one older than `-mempoolexpiry` is skipped.
+    pub fn load_core_mempool_dat(
+        &self,
+        dat: rbitcoin_mempool::CoreMempoolDat,
+        opts: CoreDatImport,
+    ) {
+        let now = self.relay_now_secs() as i64;
+        let oldest = now.saturating_sub(self.expiry_secs.load(Ordering::Relaxed) as i64);
+        let mut done = CoreDatImported::default();
+        for e in dat.txs {
+            let txid = e.tx.compute_txid();
+            let time = if opts.use_current_time { now } else { e.time };
+            if e.fee_delta != 0 && opts.apply_fee_delta_priority {
+                self.prioritise_tx(txid, e.fee_delta);
+            }
+            if time <= oldest {
+                done.expired += 1;
+                continue;
+            }
+            match self.import_tx(&e.tx, time.max(0) as u64) {
+                Ok(_) => done.succeeded += 1,
+                Err(_) if self.contains(&txid) => done.already_there += 1,
+                Err(_) => done.failed += 1,
+            }
+        }
+        if opts.apply_fee_delta_priority {
+            for (txid, delta) in dat.deltas {
+                self.prioritise_tx(txid, delta);
+            }
+        }
+        if opts.apply_unbroadcast_set {
+            done.unbroadcast = dat.unbroadcast.len() as u64;
+            for txid in dat.unbroadcast {
+                if self.contains(&txid) {
+                    self.note_unbroadcast(txid);
+                }
+            }
+        }
+        rbitcoin_log::info!(
+            "Imported mempool transactions from file: {} succeeded, {} failed, {} expired, {} already there, {} waiting for initial broadcast",
+            done.succeeded,
+            done.failed,
+            done.expired,
+            done.already_there,
+            done.unbroadcast
+        );
+    }
+
+    /// Core `DumpMempool` contents: live txs in mining order with their
+    /// accept time and fee delta, the deltas of txids not in the pool, and
+    /// the unbroadcast set.
+    fn core_mempool_dat(&self) -> rbitcoin_mempool::CoreMempoolDat {
+        let mut deltas: BTreeMap<Txid, i64> = self.prioritised_txs().into_iter().collect();
+        let live: Vec<(Txid, Transaction)> = {
+            let g = self.lock_read();
+            let delta = |id: Txid| deltas.get(&id).copied().unwrap_or(0);
+            g.graph
+                .mining_order(&delta)
+                .into_iter()
+                .filter_map(|t| g.get_tx(&t).map(|tx| (t, tx.clone())))
+                .collect()
+        };
+        let txs = live
+            .into_iter()
+            .map(|(txid, tx)| rbitcoin_mempool::CoreDatTx {
+                tx,
+                time: self.accept_time_txid(&txid).unwrap_or(0) as i64,
+                fee_delta: deltas.remove(&txid).unwrap_or(0),
+            })
+            .collect();
+        let unbroadcast = self.unbroadcast.lock().unwrap().iter().copied().collect();
+        rbitcoin_mempool::CoreMempoolDat {
+            txs,
+            deltas,
+            unbroadcast,
+        }
     }
 
     /// `sendrawtransaction` origin: rebroadcast until a peer getdata's it.

@@ -858,6 +858,8 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
         }
         "prioritisetransaction" => prioritisetransaction(ctx, &params),
         "getprioritisedtransactions" => getprioritisedtransactions(ctx, &params),
+        "savemempool" => savemempool(ctx, &params),
+        "importmempool" => importmempool(ctx, &params),
         "getmempoolcluster" => getmempoolcluster(ctx, &params),
         "getmempoolancestors" => getmempoolancestors(ctx, &params),
         "getmempooldescendants" => getmempooldescendants(ctx, &params),
@@ -1014,6 +1016,8 @@ pub const METHOD_LIST: &[&str] = &[
     "getnetworkhashps",
     "prioritisetransaction",
     "getprioritisedtransactions",
+    "savemempool",
+    "importmempool",
     "getmempoolcluster",
     "getmempoolancestors",
     "getmempooldescendants",

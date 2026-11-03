@@ -41,6 +41,7 @@
 
 #[doc(hidden)]
 pub mod accept;
+mod core_dat;
 #[doc(hidden)]
 pub mod error;
 #[doc(hidden)]
@@ -67,6 +68,7 @@ pub use accept::{
     PrepareOpts, PreparedAdmit, UtxoProvider, DEFAULT_MAX_MEMPOOL_WEIGHT, MAX_PACKAGE_COUNT,
     MAX_PACKAGE_WEIGHT,
 };
+pub use core_dat::{CoreDatTx, CoreMempoolDat};
 pub use error::MempoolError;
 pub use fee_analog::{AnalogHistory, HISTORICAL_CONFIDENCE_FAR};
 pub use fee_est::{

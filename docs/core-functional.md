@@ -185,7 +185,7 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_decodescript.py` | `rpc-dialect` | `segwit.desc` infers no miniscript beyond `multi` (`decodescript_miniscript`) |
 | `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset (`isvalid` only) |
 | `rpc_invalid_address_message.py` | `rpc-dialect` | same; no `error` / `error_locations` |
-| `mempool_persist.py` | `rpc-dialect` | our `{datadir}/mempool/` analog; not Core `mempool.dat` |
+| `mempool_persist.py` | `rpc-dialect` | `savemempool` / `importmempool` speak Core `mempool.dat`, but a restart reloads our `{datadir}/mempool/`, not `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).
 

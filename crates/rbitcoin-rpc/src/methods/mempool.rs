@@ -1898,6 +1898,88 @@ pub fn getprioritisedtransactions(ctx: &RpcContext, params: &RpcParams) -> Resul
     Ok(Value::Object(out))
 }
 
+/// Core `savemempool`: `{datadir}/mempool.dat`, version 2 with a fresh key.
+pub fn savemempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&[])?;
+    let mp = ctx
+        .mempool
+        .as_ref()
+        .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    let mut key = [0u8; 8];
+    getrandom::fill(&mut key).expect("CSPRNG for mempool.dat key");
+    let path = mp.save_core_mempool_dat(key).map_err(|e| {
+        rbitcoin_log::info!("Failed to dump mempool: {e}. Continuing anyway.");
+        rpc_error(ERR_MISC, "Unable to dump mempool to disk")
+    })?;
+    Ok(json!({ "filename": path.display().to_string() }))
+}
+
+/// Core `importmempool filepath (options)`. Each option may also be a
+/// top-level named parameter (Core `OBJ_NAMED_PARAMS`).
+pub fn importmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    const OPTIONS: [&str; 3] = [
+        "use_current_time",
+        "apply_fee_delta_priority",
+        "apply_unbroadcast_set",
+    ];
+    params.reject_unknown(&["filepath", "options", OPTIONS[0], OPTIONS[1], OPTIONS[2]])?;
+    let path = params.req_str(0, "filepath")?;
+    let options = match params.get(1, "options") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(m)) => Some(m),
+        Some(v) => {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type object",
+                    json_type_name(v)
+                ),
+            ))
+        }
+    };
+    let flag = |name: &str, default: bool| -> Result<bool, Value> {
+        let named = params.named.as_ref().and_then(|m| m.get(name));
+        match options.and_then(|m| m.get(name)).or(named) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(v) => Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type bool",
+                    json_type_name(v)
+                ),
+            )),
+        }
+    };
+    let opts = rbitcoin_net::CoreDatImport {
+        use_current_time: flag(OPTIONS[0], true)?,
+        apply_fee_delta_priority: flag(OPTIONS[1], false)?,
+        apply_unbroadcast_set: flag(OPTIONS[2], false)?,
+    };
+    let mp = ctx
+        .mempool
+        .as_ref()
+        .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    if matches!(ctx.pool_listing(), PoolListing::Downloading) {
+        return Err(rpc_error(
+            ERR_CLIENT_IN_INITIAL_DOWNLOAD,
+            "Can only import the mempool after the block download and sync is done.",
+        ));
+    }
+    let dat = std::fs::read(path)
+        .map_err(|e| format!("Failed to open mempool file: {e}"))
+        .and_then(|bytes| rbitcoin_net::CoreMempoolDat::decode(&bytes))
+        .map_err(|e| {
+            rbitcoin_log::info!("Failed to import mempool file {path}: {e}. Continuing anyway.");
+            rpc_error(
+                ERR_MISC,
+                "Unable to import mempool file, see debug.log for details.",
+            )
+        })?;
+    mp.load_core_mempool_dat(dat, opts);
+    Ok(json!({}))
+}
+
 pub fn getmempoolcluster(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["txid"])?;
     let hex = params.req_str(0, "txid")?;
