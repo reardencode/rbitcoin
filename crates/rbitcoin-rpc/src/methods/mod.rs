@@ -47,6 +47,27 @@ pub fn request_task_method(name: &str) -> bool {
     tip_connect_method(name) || script_admit_method(name)
 }
 
+/// `false` when `method` does not read the store, so the HTTP handler does
+/// not take a `--store-read-budget` permit. An unknown name returns `true`:
+/// the call still runs, and it must not skip the budget by being unrecognized.
+pub fn rpc_call_reads_store(method: &str) -> bool {
+    !matches!(
+        method,
+        "help"
+            | "echo"
+            | "echojson"
+            | "getrpcinfo"
+            | "uptime"
+            | "stop"
+            | "getblockcount"
+            | "getconnectioncount"
+            | "getnettotals"
+            | "getpeerinfo"
+            | "ping"
+            | "outboundpass"
+    )
+}
+
 pub async fn dispatch_tip_connect(
     ctx: &Arc<RpcContext>,
     method: &str,

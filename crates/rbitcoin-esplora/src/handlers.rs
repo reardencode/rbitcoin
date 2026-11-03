@@ -819,7 +819,7 @@ pub async fn block_template(State(st): State<AppState>) -> Response {
         rbitcoin_net::sample_template_prev_for_build(st.mempool.as_ref().map(Arc::clone)).await;
     match tokio::task::spawn_blocking(move || {
         let _g = rbitcoin_net::BlockingRegion::enter();
-        let _store = sample.permit;
+        let _store = rbitcoin_net::hold_store_permit(sample.permit);
         let _prev = sample.armed.map(rbitcoin_net::arm_template_prev_sample);
         block_template_sync(&st)
     })
@@ -848,12 +848,16 @@ pub fn block_template_sync(st: &AppState) -> Response {
         .as_ref()
         .map(|m| m.template_updates())
         .unwrap_or(0);
-    let mut cache = st.gbt_cache.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(c) = cache.as_ref() {
-        if c.tip == tip && c.updates == updates && c.at.elapsed() < Duration::from_secs(15) {
-            return gbt_json(&c.body);
+    {
+        let cache = st.gbt_cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = cache.as_ref() {
+            if c.tip == tip && c.updates == updates && c.at.elapsed() < Duration::from_secs(15) {
+                return gbt_json(&c.body);
+            }
         }
     }
+    // The cache lock is not held across selection. A second template would
+    // otherwise take the disk permit and then wait on this lock for the build.
     match (fun.0)() {
         Ok(body) => {
             let body = Arc::new(body);
@@ -864,6 +868,7 @@ pub fn block_template_sync(st: &AppState) -> Response {
                 None => true,
             };
             if same_tip {
+                let mut cache = st.gbt_cache.lock().unwrap_or_else(|p| p.into_inner());
                 *cache = Some(GbtCache {
                     at: Instant::now(),
                     tip,

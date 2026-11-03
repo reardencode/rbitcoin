@@ -11,7 +11,7 @@ use rbitcoin_query::ThresholdState;
 
 use serde_json::{json, Value};
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub fn require_regtest(ctx: &RpcContext, method: &str) -> Result<(), Value> {
@@ -966,7 +966,109 @@ fn gbt_params(ctx: &RpcContext) -> rbitcoin_consensus::ChainParams {
         .unwrap_or_else(|| rbitcoin_consensus::ChainParams::for_network(ctx.network))
 }
 
-pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct GbtRenderWait {
+    entered: bool,
+    release: bool,
+}
+
+/// Pauses template selection so a test can take the store permit.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub struct GbtRenderGate {
+    state: std::sync::Mutex<GbtRenderWait>,
+    cv: std::sync::Condvar,
+}
+
+#[cfg(debug_assertions)]
+impl Default for GbtRenderGate {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(GbtRenderWait::default()),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl GbtRenderGate {
+    pub fn wait_entered(&self, timeout: std::time::Duration) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        while !state.entered {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (next, timed_out) = self
+                .cv
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next;
+            if timed_out.timed_out() && !state.entered {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn release(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.release = true;
+        self.cv.notify_all();
+    }
+}
+
+#[cfg(debug_assertions)]
+static GBT_RENDER_ARMED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(debug_assertions)]
+static GBT_RENDER_GATE: std::sync::Mutex<Option<Arc<GbtRenderGate>>> = std::sync::Mutex::new(None);
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_gbt_render_gate(gate: Option<Arc<GbtRenderGate>>) {
+    *GBT_RENDER_GATE.lock().unwrap_or_else(|e| e.into_inner()) = gate.clone();
+    GBT_RENDER_ARMED.store(gate.is_some(), Ordering::Release);
+}
+
+#[cfg(debug_assertions)]
+fn wait_gbt_render_gate() {
+    if !GBT_RENDER_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let gate = GBT_RENDER_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(gate) = gate else {
+        return;
+    };
+    let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.entered = true;
+    gate.cv.notify_all();
+    while !state.release {
+        state = gate.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+struct GbtSketch {
+    prev_hex: String,
+    updates: u32,
+    next_h: u32,
+    params: rbitcoin_consensus::ChainParams,
+    pre_segwit: bool,
+    legacy_scale: u64,
+    testdummy: Option<rbitcoin_query::DeploymentState>,
+    mintime: u32,
+    curtime: u32,
+    bits: u32,
+    warnings: Vec<String>,
+}
+
+/// Header and version-bit reads. The caller still holds the store permit.
+fn gbt_sketch(ctx: &RpcContext) -> Result<GbtSketch, Value> {
     refuse_unmaintained_template(ctx)?;
     let GbtTip::Ready(tip_h, prev_hex, tip_bits) = gbt_tip(ctx)? else {
         return Err(rpc_error(ERR_MISC, "template tip is not on the best chain"));
@@ -989,6 +1091,44 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         curtime,
         bits,
     } = next_block(ctx, &params, tip_h, tip_bits)?;
+    Ok(GbtSketch {
+        prev_hex,
+        updates,
+        next_h,
+        params,
+        pre_segwit,
+        legacy_scale,
+        testdummy,
+        mintime,
+        curtime,
+        bits,
+        warnings: rpc_warnings(ctx),
+    })
+}
+
+pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
+    let sketch = gbt_sketch(ctx)?;
+    // Selection and the transaction JSON do not read the store.
+    rbitcoin_net::release_store_permit();
+    #[cfg(debug_assertions)]
+    wait_gbt_render_gate();
+    gbt_render(ctx, sketch)
+}
+
+fn gbt_render(ctx: &RpcContext, sketch: GbtSketch) -> Result<Value, Value> {
+    let GbtSketch {
+        prev_hex,
+        updates,
+        next_h,
+        params,
+        pre_segwit,
+        legacy_scale,
+        testdummy,
+        mintime,
+        curtime,
+        bits,
+        warnings,
+    } = sketch;
     let selected = mempool_block_txs(ctx);
     let mut fees = 0u64;
     let mut tx_json = Vec::with_capacity(selected.len());
@@ -1076,7 +1216,6 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
     if let Some(challenge) = &params.signet_challenge {
         template["signet_challenge"] = json!(rbitcoin_primitives::hex_encode(challenge.as_bytes()));
     }
-    let warnings = rpc_warnings(ctx);
     if !warnings.is_empty() {
         template["warnings"] = json!(warnings);
     }

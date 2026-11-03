@@ -99,8 +99,9 @@ pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;
 pub use rbitcoin_mempool::{AcceptError, AcceptResult, SelectBudget, Selected};
 pub use reactor::{
-    acquire_armed_store_budget, off_pool, off_pool_budgeted, spawn_with_store_budget,
-    with_store_budget, BlockingRegion,
+    acquire_armed_store_budget, hold_store_permit, off_pool, off_pool_budgeted,
+    release_store_permit, spawn_with_store_budget, with_store_budget, BlockingRegion,
+    StorePermitGuard,
 };
 pub use seeds::{
     default_port, default_rpc_port, dns_seeds, resolve_dns_seeds, socks_dns_seed_dests, AddrMan,
