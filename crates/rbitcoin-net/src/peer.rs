@@ -4940,10 +4940,9 @@ pub fn on_inv_txid(
         if let Some(s) = session {
             let _ = mp.add_orphan_announcer(txid, s.id);
         }
-        if asks_back_local_tx(mp, session, txid) {
-            return Some(Inventory::WitnessTransaction(*txid));
+        if !asks_back_local_tx(mp, session, txid) || session.is_some_and(|s| s.wtxid_relay()) {
+            return None;
         }
-        return None;
     }
     if let Some(s) = session {
         match mp.note_inv_tx_requested(s.id, txid.to_byte_array(), s.inbound, s.clock_now(), false)
@@ -4982,7 +4981,10 @@ pub fn on_inv_wtxid(
         return None;
     }
     let mp = hub.mempool()?;
-    if !mp.try_contains_wtxid(wtxid) {
+    let ask_back = mp
+        .try_txid_for_wtxid(wtxid)
+        .is_some_and(|txid| asks_back_local_tx(mp, session, &txid));
+    if ask_back || !mp.try_contains_wtxid(wtxid) {
         if let Some(s) = session {
             match mp.note_inv_tx_requested(
                 s.id,
@@ -5001,12 +5003,6 @@ pub fn on_inv_wtxid(
                 }
             }
         }
-        return Some(Inventory::WTx(*wtxid));
-    }
-    if mp
-        .try_txid_for_wtxid(wtxid)
-        .is_some_and(|txid| asks_back_local_tx(mp, session, &txid))
-    {
         return Some(Inventory::WTx(*wtxid));
     }
     let s = session?;

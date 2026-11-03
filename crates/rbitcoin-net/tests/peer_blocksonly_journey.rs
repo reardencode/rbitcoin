@@ -525,10 +525,25 @@ async fn returned_tx_ends_the_private_broadcast(
         assert!(getdata_txs(&mut block_rx).is_empty(), "no getdata to a block-relay peer");
         assert!(mp.is_local_origin(&txid));
 
+        if by_txid {
+            let wtxid_peer = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+            wtxid_peer.set_wtxid_relay();
+            let (w_out, mut w_rx) = mpsc::unbounded_channel();
+            let mut w_follow = PeerFollowState::new();
+            push(hub, &w_out, &mut w_follow, Some(wtxid_peer.as_ref()), NetworkMessage::Inv(vec![item])).await;
+            assert!(getdata_txs(&mut w_rx).is_empty(), "a wtxid-relay peer's txid inv is ignored");
+            peers.unregister(wtxid_peer.id);
+        }
+
         let (echo_out, mut echo_rx) = mpsc::unbounded_channel();
         let mut follow = PeerFollowState::new();
         push(hub, &echo_out, &mut follow, Some(echo.as_ref()), NetworkMessage::Inv(vec![item])).await;
         assert_eq!(getdata_txs(&mut echo_rx), vec![item], "ask the peer for our tx");
+        push(hub, &echo_out, &mut follow, Some(echo.as_ref()), NetworkMessage::Inv(vec![item])).await;
+        assert!(
+            getdata_txs(&mut echo_rx).is_empty(),
+            "a repeated inv waits like any other tx request"
+        );
         assert!(
             mp.is_local_origin(&txid),
             "an inv alone does not end the private broadcast"
