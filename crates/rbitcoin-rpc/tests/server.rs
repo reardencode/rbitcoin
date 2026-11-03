@@ -1483,7 +1483,25 @@ fn waitfor_does_not_hold_the_blocking_pool() {
             let mut buf = Vec::new();
             let _ = stream.read_to_end(&mut buf).await;
         });
-            let t0 = std::time::Instant::now();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let parked = handle
+                .active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot()
+                .iter()
+                .any(|(method, _)| method == "waitforblock");
+            if parked {
+                break;
+            }
+            assert!(
+                !waiter.is_finished() && std::time::Instant::now() < deadline,
+                "waitforblock never reached the server"
+            );
+            tokio::task::yield_now().await;
+        }
+        let t0 = std::time::Instant::now();
         tokio::task::spawn_blocking(|| ()).await.unwrap();
         assert!(
             t0.elapsed() < std::time::Duration::from_millis(400),
@@ -2412,4 +2430,39 @@ async fn http_wait_unmet_height_and_same_tip_use_the_timeout() {
         dt >= std::time::Duration::from_millis(100),
         "the tip did not move, waited {dt:?}"
     );
+}
+
+/// The accept loop leaves when shutdown is stored, without the 50 ms tick.
+#[tokio::test]
+async fn accept_loop_leaves_when_shutdown_is_signaled() {
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    tokio::time::pause();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (tx, _) = tokio::sync::watch::channel(());
+    let flag = Arc::clone(&shutdown);
+    let tx_task = tx.clone();
+    let task = tokio::spawn(async move {
+        serve_rpc(
+            listener,
+            Router::new(),
+            Arc::new(Semaphore::new(4)),
+            flag,
+            tx_task,
+        )
+        .await;
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    shutdown.store(true, Ordering::SeqCst);
+    tx.send(()).unwrap();
+    tokio::task::yield_now().await;
+    let joined = tokio::time::timeout(std::time::Duration::ZERO, task).await;
+    tokio::time::resume();
+    joined
+        .expect("accept loop stayed in the 50 ms shutdown poll")
+        .expect("serve task");
 }
