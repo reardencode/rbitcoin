@@ -169,9 +169,10 @@ pub fn on_tip_accept_thread() -> bool {
 /// Debug builds take [`LANE_EXCLUSIVE_MU`] across each enqueue only after
 /// [`enable_lane_test_gate`]. Release accepts do not. A test holds
 /// [`LanePermit`] for its whole body. Other enqueues wait until that permit
-/// drops, unless the caller is the permit thread or armed
-/// [`arm_lane_oneshot`] for this entry. Production never sets the flag, so
-/// the accept path does not take the lock.
+/// drops, unless the caller is the task that took it (or the plain thread,
+/// when `take` was not inside a task) or armed [`arm_lane_oneshot`] for this
+/// entry. A later task on that same worker is not exempt. Production never
+/// sets the flag, so the accept path does not take the lock.
 #[cfg(debug_assertions)]
 static LANE_GATE_ON: AtomicBool = AtomicBool::new(false);
 #[cfg(debug_assertions)]
@@ -182,9 +183,19 @@ static LANE_EXCLUSIVE_MU: Mutex<()> = Mutex::new(());
 static LANE_EXCLUSIVE_CV: Condvar = Condvar::new();
 
 #[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+enum LaneOwner {
+    Empty,
+    /// `take` ran outside a tokio task. That thread is the holder.
+    PlainThread,
+    Task(tokio::task::Id),
+}
+
+#[cfg(debug_assertions)]
 thread_local! {
     static LANE_HELD: Cell<u32> = const { Cell::new(0) };
     static LANE_ONESHOT: Cell<bool> = const { Cell::new(false) };
+    static LANE_OWNER: Cell<LaneOwner> = const { Cell::new(LaneOwner::Empty) };
 }
 
 #[cfg(debug_assertions)]
@@ -229,7 +240,20 @@ fn take_lane_exemption() -> bool {
         return true;
     }
     let oneshot = LANE_ONESHOT.with(|c| c.replace(false));
-    oneshot || lane_held_after_revoke() > 0
+    if oneshot {
+        return true;
+    }
+    if lane_held_after_revoke() == 0 {
+        return false;
+    }
+    // `LANE_HELD` is the worker thread. Another task polled there is not
+    // the holder. A plain-thread take has no task id to compare.
+    match LANE_OWNER.with(|c| c.get()) {
+        LaneOwner::Empty => false,
+        // A task polled on this thread is not the plain-thread holder.
+        LaneOwner::PlainThread => tokio::task::try_id().is_none(),
+        LaneOwner::Task(id) => tokio::task::try_id() == Some(id),
+    }
 }
 
 #[cfg(not(debug_assertions))]
@@ -272,7 +296,13 @@ fn lane_poll_gate(exempt: bool) -> LaneGate {
     if exempt || !LANE_GATE_ON.load(Ordering::Acquire) {
         return LaneGate::Clear(None);
     }
-    let g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+    // `try_lock`: a sync `send` on a full queue holds this mutex. Blocking
+    // here parks the worker inside `timeout`'s future.
+    let g = match LANE_EXCLUSIVE_MU.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return LaneGate::Busy,
+    };
     if LANE_EXCLUSIVE.load(Ordering::Acquire) {
         LaneGate::Busy
     } else {
@@ -292,11 +322,23 @@ fn lane_exclusive_notify() -> &'static tokio::sync::Notify {
 async fn wait_lane_permit() {
     let notified = lane_exclusive_notify().notified();
     tokio::pin!(notified);
-    {
-        let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
-        if !LANE_EXCLUSIVE.load(Ordering::Acquire) {
-            return;
+    let still_blocked = match LANE_EXCLUSIVE_MU.try_lock() {
+        Ok(g) => {
+            let busy = LANE_EXCLUSIVE.load(Ordering::Acquire);
+            drop(g);
+            busy
         }
+        Err(std::sync::TryLockError::Poisoned(p)) => {
+            let g = p.into_inner();
+            let busy = LANE_EXCLUSIVE.load(Ordering::Acquire);
+            drop(g);
+            busy
+        }
+        // The sync sender still holds the mutex across `send`. Sleep.
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    };
+    if !still_blocked {
+        return;
     }
     tokio::select! {
         _ = notified => {}
@@ -362,17 +404,19 @@ pub fn try_enqueue(job: Job) -> Result<(), TrySendError<Job>> {
     }
 }
 
-fn enqueue_blocking(job: Job) {
-    note_queued();
-    // Stays raised while `send` waits for a queue slot, still holding the
-    // permit mutex. An async poll must not block on that lock.
-    LANE_BLOCKING_SENDS.fetch_add(1, Ordering::SeqCst);
-    let sent = sender().send(job);
-    LANE_BLOCKING_SENDS.fetch_sub(1, Ordering::SeqCst);
-    if sent.is_err() {
-        note_dequeued();
-        panic!("tip-accept thread");
+/// Hold the permit mutex without releasing it on the exclusive condvar.
+/// Async polls use `try_lock` and must time out while this runs.
+#[doc(hidden)]
+pub fn hold_lane_mutex_for_tests(release: &std::sync::Arc<(Mutex<bool>, Condvar)>) {
+    #[cfg(debug_assertions)]
+    let _gate = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+    LANE_SEND_GUARD_WAITERS.fetch_add(1, Ordering::SeqCst);
+    let (lock, cv) = &**release;
+    let mut w = lock.lock().unwrap_or_else(|p| p.into_inner());
+    while !*w {
+        w = cv.wait(w).unwrap_or_else(|p| p.into_inner());
     }
+    LANE_SEND_GUARD_WAITERS.fetch_sub(1, Ordering::SeqCst);
 }
 
 fn poll_try_enqueue(exempt: bool, job: Job) -> PollEnqueue {
@@ -425,7 +469,7 @@ impl LanePermit {
             // A permit dropped on another thread left a revoke for us.
             // Clear it before this take adds its own hold.
             let _ = lane_held_after_revoke();
-            LANE_HELD.with(|c| c.set(c.get().saturating_add(1)));
+            hold_lane();
             // Same drain the waiter test calls. It does not publish
             // `note_wait_seen`.
             quiet_drain_for_tests();
@@ -442,7 +486,7 @@ impl Drop for LanePermit {
         #[cfg(debug_assertions)]
         {
             if thread::current().id() == self.owner {
-                LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+                release_lane_hold();
             } else {
                 revoke_lane_held(self.owner);
             }
@@ -474,7 +518,36 @@ fn apply_lane_held_revoke() {
     let mut revoked = LANE_HELD_REVOKES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(i) = revoked.iter().position(|held| *held == id) {
         revoked.swap_remove(i);
-        LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+        release_lane_hold();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn hold_lane() {
+    let n = LANE_HELD.with(|c| {
+        let n = c.get().saturating_add(1);
+        c.set(n);
+        n
+    });
+    if n != 1 {
+        return;
+    }
+    let owner = match tokio::task::try_id() {
+        Some(id) => LaneOwner::Task(id),
+        None => LaneOwner::PlainThread,
+    };
+    LANE_OWNER.with(|c| c.set(owner));
+}
+
+#[cfg(debug_assertions)]
+fn release_lane_hold() {
+    let n = LANE_HELD.with(|c| {
+        let n = c.get().saturating_sub(1);
+        c.set(n);
+        n
+    });
+    if n == 0 {
+        LANE_OWNER.with(|c| c.set(LaneOwner::Empty));
     }
 }
 
@@ -655,8 +728,18 @@ pub fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         let _ = tx.send(r);
     }));
     {
-        let _gate = lane_send_guard(exempt);
-        enqueue_blocking(job);
+        // Count under the mutex, then drop it before `send`. A full queue
+        // blocks, and the async poll must still be able to `try_lock`.
+        let gate = lane_send_guard(exempt);
+        note_queued();
+        drop(gate);
+        LANE_BLOCKING_SENDS.fetch_add(1, Ordering::SeqCst);
+        let sent = sender().send(job);
+        LANE_BLOCKING_SENDS.fetch_sub(1, Ordering::SeqCst);
+        if sent.is_err() {
+            note_dequeued();
+            panic!("tip-accept thread");
+        }
     }
     match rx.recv().expect("tip-accept job") {
         Ok(v) => v,
