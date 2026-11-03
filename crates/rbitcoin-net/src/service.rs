@@ -577,6 +577,9 @@ pub fn spawn_inbound_accept(
                                 sess.id
                             );
                             peers.disconnect_id(sess.id);
+                            // Handshake finished, so disconnect_id leaves the
+                            // row. There is no session loop to unregister it.
+                            peers.unregister(sess.id);
                             return;
                         }
                         if let Ok(ah) = ah_rx.await {

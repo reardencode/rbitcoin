@@ -278,17 +278,59 @@ pub fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetErr
     NetError::Protocol("peer rate limit")
 }
 
-/// Frames already read while a decode permit is held. Tip-follow asks for
-/// [`MAX_SERVE_BLOCKS`] bodies, and the reader can take one more message
-/// before that front decode is popped. A smaller byte cap drops the peer
-/// that answered the getdata. Past the window the peer is dropped. The
-/// rate limiter does not bound a peer that stays under it.
+/// Heavy frames (`block`, `headers`, `notfound`) already read while a decode
+/// permit is held. Tip-follow asks for [`MAX_SERVE_BLOCKS`] bodies, and the
+/// reader can take one more message before that front decode is popped.
+/// Cheap frames (`tx`, `inv`, ping) use [`DECODE_Q_MAX_CHEAP_FRAMES`], so a
+/// burst behind one block is not a disconnect. Heavy bytes also share a
+/// process cap of the blocking-pool size times [`DECODE_Q_MAX_BYTES`].
 pub const DECODE_Q_MAX_FRAMES: usize = 32;
+pub const DECODE_Q_MAX_CHEAP_FRAMES: usize = 1024;
 pub const DECODE_Q_MAX_BYTES: usize =
     (MAX_SERVE_BLOCKS + 1) * crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
 
-/// Disconnect a peer that queued more decoded-or-waiting frames than
-/// [`DECODE_Q_MAX_FRAMES`] or [`DECODE_Q_MAX_BYTES`].
+/// `true` when this queue, after accepting the frame, is over a cap.
+/// Comparison is `>`, so a queue sitting on the cap still fits.
+fn decode_queue_over_cap(
+    heavy_frames: usize,
+    heavy_bytes: usize,
+    cheap_frames: usize,
+    global_heavy: usize,
+    global_cap: usize,
+) -> bool {
+    heavy_frames > DECODE_Q_MAX_FRAMES
+        || cheap_frames > DECODE_Q_MAX_CHEAP_FRAMES
+        || heavy_bytes > DECODE_Q_MAX_BYTES
+        || global_heavy > global_cap
+}
+
+fn decode_q_global_byte_cap() -> usize {
+    crate::msg_decode::blocking_pool_size().saturating_mul(DECODE_Q_MAX_BYTES)
+}
+
+/// Heavy bytes queued for decode in this process. Pop and drop subtract.
+static DECODE_Q_HEAVY_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn add_decode_q_heavy(n: usize) {
+    if n == 0 {
+        return;
+    }
+    DECODE_Q_HEAVY_BYTES.fetch_add(n, Ordering::Relaxed);
+}
+
+fn sub_decode_q_heavy(n: usize) {
+    if n == 0 {
+        return;
+    }
+    let _ = DECODE_Q_HEAVY_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        Some(cur.saturating_sub(n))
+    });
+}
+
+/// Disconnect a peer that queued more heavy frames than
+/// [`DECODE_Q_MAX_FRAMES`], more cheap frames than
+/// [`DECODE_Q_MAX_CHEAP_FRAMES`], or more heavy bytes than the per-peer
+/// window or the process cap.
 #[doc(hidden)]
 pub fn decode_queue_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
     if let Some(s) = session {
@@ -299,18 +341,26 @@ pub fn decode_queue_disconnect(session: Option<&crate::peers::LivePeer>) -> NetE
 
 type DecodeRx = tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>;
 
+struct QueuedDecode {
+    rx: DecodeRx,
+    n: usize,
+    heavy: bool,
+}
+
 struct DecodeQueue {
-    q: VecDeque<DecodeRx>,
-    nbytes: VecDeque<usize>,
-    bytes: usize,
+    q: VecDeque<QueuedDecode>,
+    heavy_frames: usize,
+    cheap_frames: usize,
+    heavy_bytes: usize,
 }
 
 impl DecodeQueue {
     fn new() -> Self {
         Self {
             q: VecDeque::new(),
-            nbytes: VecDeque::new(),
-            bytes: 0,
+            heavy_frames: 0,
+            cheap_frames: 0,
+            heavy_bytes: 0,
         }
     }
 
@@ -319,30 +369,96 @@ impl DecodeQueue {
     }
 
     fn front_mut(&mut self) -> Option<&mut DecodeRx> {
-        self.q.front_mut()
+        self.q.front_mut().map(|item| &mut item.rx)
+    }
+
+    fn front_len(&self) -> usize {
+        self.q.front().map(|item| item.n).unwrap_or(0)
+    }
+
+    fn front_heavy(&self) -> bool {
+        self.q.front().is_some_and(|item| item.heavy)
+    }
+
+    fn account(&mut self, n: usize, heavy: bool) {
+        if heavy {
+            self.heavy_frames = self.heavy_frames.saturating_add(1);
+            self.heavy_bytes = self.heavy_bytes.saturating_add(n);
+            add_decode_q_heavy(n);
+            return;
+        }
+        self.cheap_frames = self.cheap_frames.saturating_add(1);
+    }
+
+    fn release(&mut self, n: usize, heavy: bool) {
+        if heavy {
+            self.heavy_frames = self.heavy_frames.saturating_sub(1);
+            self.heavy_bytes = self.heavy_bytes.saturating_sub(n);
+            sub_decode_q_heavy(n);
+            return;
+        }
+        self.cheap_frames = self.cheap_frames.saturating_sub(1);
     }
 
     fn pop_front(&mut self) -> Option<DecodeRx> {
-        let rx = self.q.pop_front()?;
-        if let Some(n) = self.nbytes.pop_front() {
-            self.bytes = self.bytes.saturating_sub(n);
-        }
-        Some(rx)
+        let item = self.q.pop_front()?;
+        self.release(item.n, item.heavy);
+        Some(item.rx)
     }
 
-    /// Queue one frame already taken off the socket. `true` when the peer
-    /// has now passed the cap and must be disconnected after a drain.
-    fn push(&mut self, rx: DecodeRx, n: usize) -> bool {
-        self.q.push_back(rx);
-        self.nbytes.push_back(n);
-        self.bytes = self.bytes.saturating_add(n);
-        self.q.len() > DECODE_Q_MAX_FRAMES || self.bytes > DECODE_Q_MAX_BYTES
+    /// Put a decoded frame back at the front. The caller already counted
+    /// these bytes, so this does not re-check the cap.
+    fn push_front_ready(
+        &mut self,
+        msg: Result<RawNetworkMessage, NetError>,
+        n: usize,
+        heavy: bool,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(msg);
+        self.q.push_front(QueuedDecode { rx, n, heavy });
+        self.account(n, heavy);
     }
+
+    /// Queue one frame already taken off the socket. `heavy` matches the
+    /// spawn decision (`block`, `headers`, `notfound`). `true` when the peer
+    /// has now passed a cap and must be disconnected after a drain.
+    fn push(&mut self, rx: DecodeRx, n: usize, heavy: bool) -> bool {
+        self.q.push_back(QueuedDecode { rx, n, heavy });
+        self.account(n, heavy);
+        decode_queue_over_cap(
+            self.heavy_frames,
+            self.heavy_bytes,
+            self.cheap_frames,
+            DECODE_Q_HEAVY_BYTES.load(Ordering::Relaxed),
+            decode_q_global_byte_cap(),
+        )
+    }
+}
+
+impl Drop for DecodeQueue {
+    fn drop(&mut self) {
+        sub_decode_q_heavy(self.heavy_bytes);
+        self.heavy_bytes = 0;
+    }
+}
+
+/// Block, compact block, and blocktxn still apply on the way out. Anything
+/// else (ping, tx, getheaders) must not run after the peer is leaving or
+/// while the send budget is spent.
+fn queued_msg_is_block_body(msg: &RawNetworkMessage) -> bool {
+    matches!(
+        msg.payload(),
+        NetworkMessage::Block(_) | NetworkMessage::CmpctBlock(_) | NetworkMessage::BlockTxn(_)
+    )
 }
 
 #[cfg(test)]
 mod decode_queue_cap {
-    use super::{DecodeQueue, DECODE_Q_MAX_FRAMES, MAX_SERVE_BLOCKS};
+    use super::{
+        decode_queue_over_cap, DecodeQueue, DECODE_Q_MAX_BYTES, DECODE_Q_MAX_CHEAP_FRAMES,
+        DECODE_Q_MAX_FRAMES, MAX_SERVE_BLOCKS,
+    };
 
     fn parked() -> super::DecodeRx {
         let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -350,27 +466,61 @@ mod decode_queue_cap {
     }
 
     /// Tip-follow asks for [`MAX_SERVE_BLOCKS`] bodies and can read one more
-    /// message before the front decode is popped. That window must not be
-    /// treated as a flood.
+    /// message before the front decode is popped. That heavy window must not
+    /// be treated as a flood. Cheap frames are not under the heavy frame cap.
     #[test]
     fn byte_cap_fits_the_serve_window() {
         let one = crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
-        let mut q = DecodeQueue::new();
+        let mut heavy = DecodeQueue::new();
         for i in 0..(MAX_SERVE_BLOCKS + 1) {
             assert!(
-                !q.push(parked(), one),
-                "message {i} of a serve window overflowed the decode queue"
+                !heavy.push(parked(), one, true),
+                "heavy message {i} of a serve window overflowed the decode queue"
             );
         }
         assert!(
-            q.push(parked(), 1),
-            "one byte past the serve window must disconnect"
+            heavy.push(parked(), 1, true),
+            "one heavy byte past the serve window must disconnect"
         );
-        let mut frames = DecodeQueue::new();
+
+        let mut cheap = DecodeQueue::new();
         for _ in 0..DECODE_Q_MAX_FRAMES {
-            assert!(!frames.push(parked(), 1));
+            assert!(
+                !cheap.push(parked(), 1, false),
+                "a cheap frame under the heavy frame cap must stay"
+            );
         }
-        assert!(frames.push(parked(), 1));
+        assert!(
+            !cheap.push(parked(), 1, false),
+            "one more cheap frame still fits"
+        );
+        let mut cheap_cap = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_CHEAP_FRAMES {
+            assert!(!cheap_cap.push(parked(), 1, false));
+        }
+        assert!(
+            cheap_cap.push(parked(), 1, false),
+            "past the cheap frame cap must disconnect"
+        );
+
+        let mut heavy_frames = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_FRAMES {
+            assert!(!heavy_frames.push(parked(), 1, true));
+        }
+        assert!(
+            heavy_frames.push(parked(), 1, true),
+            "past the heavy frame cap must disconnect"
+        );
+
+        let cap = DECODE_Q_MAX_BYTES;
+        assert!(
+            !decode_queue_over_cap(1, cap, 0, cap, cap),
+            "a full window at the process cap still fits"
+        );
+        assert!(
+            decode_queue_over_cap(1, cap, 0, cap + 1, cap),
+            "one heavy byte past the process cap must disconnect"
+        );
     }
 }
 
@@ -2013,6 +2163,10 @@ pub async fn peer_session_with(
         .map(|peers| peers.subscribe_session_heartbeat());
     let mut pending_tip: Option<Result<crate::chain::TipEvent, broadcast::error::RecvError>> = None;
     let mut tip_deadline: Option<tokio::time::Instant> = None;
+    // The decode arm consumes a ready oneshot. A non-block frame at the
+    // front waits here until the send budget clears, so a later frame
+    // cannot pass it and the request is not dropped.
+    let mut hold_front = false;
     let result = async {
         loop {
             if session
@@ -2036,6 +2190,9 @@ pub async fn peer_session_with(
             // for serve room. Heartbeat (ping timeout, block-request expiry)
             // still runs.
             let over_budget = session.as_ref().is_some_and(|s| s.send_over_budget());
+            if !over_budget {
+                hold_front = false;
+            }
             let tail_pending =
                 !follow.getdata_tail.is_empty() || !follow.getblocktxn_tail.is_empty();
             let reading = !over_budget && !tail_pending;
@@ -2050,8 +2207,19 @@ pub async fn peer_session_with(
                         return Poll::Pending;
                     };
                     std::pin::Pin::new(rx).poll(cx)
-                }), if !decode_q.is_empty() => {
+                }), if !decode_q.is_empty() && !hold_front => {
+                    let n = decode_q.front_len();
+                    let heavy = decode_q.front_heavy();
                     let _ = decode_q.pop_front();
+                    if over_budget
+                        && matches!(&decoded, Ok(Ok(msg)) if !queued_msg_is_block_body(msg))
+                    {
+                        if let Ok(msg) = decoded {
+                            decode_q.push_front_ready(msg, n, heavy);
+                            hold_front = true;
+                            continue;
+                        }
+                    }
                     let mut slot = ReadyDecode {
                         queue: &mut decode_q,
                         requested_since: &mut requested_since,
@@ -2246,6 +2414,7 @@ pub async fn peer_session_with(
                             &mut decode_q,
                             rx,
                             n,
+                            false,
                             DecodeDrain {
                                 hub: hub.as_ref(),
                                 out_tx: &out_tx,
@@ -2285,6 +2454,7 @@ pub async fn peer_session_with(
                             &mut decode_q,
                             rx,
                             n,
+                            true,
                             DecodeDrain {
                                 hub: hub.as_ref(),
                                 out_tx: &out_tx,
@@ -2309,6 +2479,7 @@ pub async fn peer_session_with(
                             &mut decode_q,
                             rx,
                             n,
+                            false,
                             DecodeDrain {
                                 hub: hub.as_ref(),
                                 out_tx: &out_tx,
@@ -3307,9 +3478,10 @@ async fn push_decode_frame(
     decode_q: &mut DecodeQueue,
     rx: DecodeRx,
     n: usize,
+    heavy: bool,
     drain: DecodeDrain<'_>,
 ) -> Result<(), NetError> {
-    if !decode_q.push(rx, n) {
+    if !decode_q.push(rx, n, heavy) {
         return Ok(());
     }
     finish_decode_queue_full(
@@ -3422,6 +3594,12 @@ async fn apply_queued_decodes(
     requested_since: &mut Option<std::time::Instant>,
     peer_s: &str,
 ) -> Result<(), NetError> {
+    // Blocks already off the socket still apply. Ping, tx, and getheaders
+    // do not: they would start headers sync or a download window on a peer
+    // that is about to unregister.
+    if let Some(s) = session {
+        s.request_disconnect();
+    }
     let mut first_err: Option<NetError> = None;
     while let Some(rx) = decode_q.pop_front() {
         let decoded = match rx.await {
@@ -3433,6 +3611,9 @@ async fn apply_queued_decodes(
                 continue;
             }
         };
+        if matches!(&decoded, Ok(msg) if !queued_msg_is_block_body(msg)) {
+            continue;
+        }
         let n_req = follow.requested_blocks.len();
         if let Err(e) = apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await {
             if first_err.is_none() {

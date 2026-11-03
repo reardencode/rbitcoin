@@ -219,9 +219,13 @@ pins.
 
 Block-decode permits equal that pool. Header-decode permits are
 `min(max(cores * 2, 8), pool)`, so a header storm cannot take block permits
-or outnumber pool threads. Frames already requested still sit in the async
-task until a permit is free; the getdata window, not the semaphore, bounds
-that RAM. The reader does not await a decode permit before the next TCP read.
+or outnumber pool threads. Frames already read sit in the async task until a
+permit is free. Each peer may queue one getdata window of heavy frames
+(`block`, `headers`, `notfound`). Cheap frames have a separate cap of 1024,
+so a `tx` or `inv` burst behind one block is not a disconnect. Heavy bytes
+also share a process cap of the blocking-pool size times that window, which
+covers unsolicited bodies the getdata window does not. The reader does not
+await a decode permit before the next TCP read.
 A heartbeat does not apply the ping timeout while a frame is still queued
 for decode.
 

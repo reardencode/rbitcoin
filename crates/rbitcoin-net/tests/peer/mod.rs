@@ -1031,7 +1031,8 @@ async fn ping_behind_a_queued_block_does_not_pong_early() {
 }
 
 /// A peer that keeps sending while every decode permit is held must not
-/// grow `decode_q` without a bound. Past the cap the session drops it.
+/// grow `decode_q` without a bound. Past the heavy-frame cap the session
+/// ends. Cheap frames are not in that cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decode_queue_full_disconnects() {
     use bitcoin::blockdata::constants::genesis_block;
@@ -1081,42 +1082,22 @@ async fn decode_queue_full_disconnects() {
     tokio::time::timeout(Duration::from_secs(2), drain_startup)
         .await
         .expect("startup frames drain");
-    write_v2_msg(
-        &mut c_writer,
-        NetworkMessage::Block(genesis_block(Network::Regtest)),
-    )
-    .await
-    .unwrap();
-    let extra = rbitcoin_net::peer::DECODE_Q_MAX_FRAMES + 5;
-    for i in 0..extra {
-        write_v2_msg(&mut c_writer, NetworkMessage::Ping(0x5100_0000 + i as u64))
+    let blocks = rbitcoin_net::peer::DECODE_Q_MAX_FRAMES + 1;
+    let genesis = genesis_block(Network::Regtest);
+    for _ in 0..blocks {
+        write_v2_msg(&mut c_writer, NetworkMessage::Block(genesis.clone()))
             .await
             .unwrap();
     }
+    // Permits stay held until the reader has taken every body. Releasing
+    // them as the writes return lets the front decode finish and the rest
+    // of the burst apply without crossing the cap.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     drop(held);
-    let mut pongs = 0usize;
-    let mut closed = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(left, read_v2_frame(&mut c_reader, magic)).await {
-            Ok(Ok(frame)) if frame.is_pong() => pongs += 1,
-            Ok(Ok(_)) => {}
-            _ => {
-                closed = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        closed,
-        "a full decode queue must drop the peer, pongs={pongs}"
-    );
-    assert!(
-        pongs < extra,
-        "every ping was applied ({pongs}); the queue was not capped"
-    );
-    session.abort();
+    tokio::time::timeout(Duration::from_secs(8), session)
+        .await
+        .expect("a full heavy decode queue must end the session")
+        .expect("session join");
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
@@ -1204,6 +1185,123 @@ async fn disconnect_applies_a_block_already_queued() {
         applied,
         "disconnect must apply a block already taken off the socket"
     );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+/// `disconnect_id` hides the peer and leaves headers-sync accounting to the
+/// session's final unregister. A ping queued behind a block must not take
+/// that slot on the way out: the second unregister would not release it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_drain_does_not_take_headers_sync() {
+    use bitcoin::blockdata::constants::genesis_block;
+    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
+    use tokio::net::TcpListener;
+
+    let n = rbitcoin_net::block_decode_permits();
+    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
+    let mut held = Vec::with_capacity(n);
+    for _ in 0..n {
+        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
+    }
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-disconnect-sync");
+    hub.ensure_genesis().unwrap();
+    // The body must decode without a tip accept on the reactor thread.
+    hub.set_minimum_chain_work(Some([0xff; 32]));
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let live = outbound_test_peer(&peers, 18453);
+    assert!(live.can_serve_blocks());
+    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), 0);
+    let magic = Magic::from(Network::Regtest);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client_magic = magic;
+    let client = tokio::spawn(async move {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        open_v2(stream, client_magic, false).await.unwrap()
+    });
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
+    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
+    let tip_rx = hub.subscribe_tips();
+    let session_peer = Arc::clone(&live);
+    let session_id = live.id;
+    let session = tokio::spawn(async move {
+        let _ = peer_session_with(
+            reader,
+            writer,
+            magic,
+            Arc::new(hub),
+            tip_rx,
+            FollowSessionMeta {
+                peer: Some(addr),
+                live: None,
+                session: Some(session_peer),
+            },
+        )
+        .await;
+    });
+    live.set_session_abort(session.abort_handle());
+    let drain_startup = async {
+        while let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_millis(40),
+            read_v2_frame(&mut c_reader, magic),
+        )
+        .await
+        {}
+    };
+    tokio::time::timeout(Duration::from_secs(2), drain_startup)
+        .await
+        .expect("startup frames drain");
+    let block = genesis_block(Network::Regtest);
+    write_v2_msg(&mut c_writer, NetworkMessage::Block(block))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    write_v2_msg(&mut c_writer, NetworkMessage::Ping(1))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let slots = peers.headers_sync_peers.load(Ordering::Relaxed);
+    let downloading = peers.peers_downloading_from.load(Ordering::Relaxed);
+    let started = live.is_sync_started();
+    assert!(peers.disconnect_id(live.id), "the peer is registered");
+    assert!(
+        peers.get(live.id).is_some(),
+        "disconnect hides the peer and leaves the row until the session ends"
+    );
+    assert_eq!(
+        live.is_sync_started(),
+        started,
+        "disconnect must not release headers sync"
+    );
+    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), slots);
+    drop(held);
+    drop(c_writer);
+    tokio::time::timeout(Duration::from_secs(5), session)
+        .await
+        .expect("session drains")
+        .expect("session task");
+    assert_eq!(
+        live.is_sync_started(),
+        started,
+        "a queued ping must not start headers sync on the way out"
+    );
+    assert_eq!(
+        peers.headers_sync_peers.load(Ordering::Relaxed),
+        slots,
+        "the drain must not take a headers-sync slot"
+    );
+    assert_eq!(
+        peers.peers_downloading_from.load(Ordering::Relaxed),
+        downloading
+    );
+    peers.unregister(session_id);
+    assert!(
+        !live.is_sync_started(),
+        "the session unregister releases headers sync once"
+    );
+    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), 0);
+    assert_eq!(peers.peers_downloading_from.load(Ordering::Relaxed), 0);
     let _ = std::fs::remove_dir_all(dir.path());
 }
 

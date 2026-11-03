@@ -1222,8 +1222,14 @@ impl LivePeer {
 
     /// Core `BlockRequested`: the first block in flight from this peer
     /// starts its download window. A re-ask of a block already in flight
-    /// keeps its place and does not restart the window.
+    /// keeps its place and does not restart the window. A peer already
+    /// leaving does not open a new window: its session still applies a
+    /// queued block, and that apply must not take a slot the final
+    /// unregister will not release.
     pub fn note_blocks_requested(&self, hashes: &[BlockHash]) {
+        if self.stop.load(Ordering::Relaxed) {
+            return;
+        }
         let now = self.clock_now();
         let mut d = self
             .block_download
@@ -2350,8 +2356,11 @@ impl PeerHub {
     }
 
     /// Core: only one initial headers-sync peer unless the tip is within 24h.
+    /// A peer already leaving must not take the slot. `disconnect_id` used
+    /// to release it, the drain then took it again, and the session's
+    /// unregister no longer saw the row.
     pub fn try_start_headers_sync(&self, peer: &LivePeer, now: u64, best_header_time: u64) -> bool {
-        if peer.sync_started.load(Ordering::Relaxed) {
+        if peer.stop.load(Ordering::Relaxed) || peer.sync_started.load(Ordering::Relaxed) {
             return false;
         }
         if !peer.can_serve_blocks() {
@@ -3684,8 +3693,12 @@ impl PeerHub {
         // Do not abort the session. It still has to apply frames already
         // read; aborting it forgets those getdata asks.
         p.wake_for_disconnect();
-        // Drop from getpeerinfo before teardown finishes.
-        self.unregister(id);
+        // Handshake never finished: nothing will drain, so drop the row now.
+        // A handshaken session unregisters when it returns. Doing it here
+        // releases headers-sync and download slots that the drain takes again.
+        if !p.handshake_complete() {
+            self.unregister(id);
+        }
         true
     }
 

@@ -960,8 +960,9 @@ fn trust_peer_resolve_replaces_socket() {
     generation.set(1);
     hub.redial_remembered_with(resolve);
     assert!(
-        hub.get(old.id).is_none(),
-        "previous trust socket is disconnected"
+        hub.get(old.id)
+            .is_some_and(|p| p.stop.load(Ordering::Relaxed)),
+        "previous trust socket is disconnecting; the row stays until its session returns"
     );
     let got = take_dials(&mut rx);
     assert_eq!(got.len(), 1, "new socket is dialed: {got:?}");
@@ -1044,8 +1045,9 @@ fn connect_resolve_replaces_socket() {
     phase.set(2);
     hub.redial_remembered_with(resolve);
     assert!(
-        hub.get(shared_peer.id).is_none(),
-        "the shared socket drops once neither name still uses it"
+        hub.get(shared_peer.id)
+            .is_some_and(|p| p.stop.load(Ordering::Relaxed)),
+        "the shared socket is disconnecting once neither name still uses it"
     );
     assert!(hub.get(literal_peer.id).is_some());
     assert!(
