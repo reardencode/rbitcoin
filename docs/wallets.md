@@ -6,9 +6,8 @@ Listener behavior, DoS limits, and the mempool.space nginx recipe stay in
 [`operator/interfaces.md`](./operator/interfaces.md). Method lists stay in
 [`COMPAT.md`](../COMPAT.md) and [`rpc.md`](./rpc.md).
 
-Chains the node actually runs: `mainnet`, `testnet` (testnet3), `signet`,
-`regtest`. There is no `--network testnet4`. A wallet left on testnet4
-has nothing to connect to.
+Chains the node actually runs: `mainnet`, `testnet` (testnet3), `testnet4`,
+`signet`, `regtest`.
 
 0.x. The Electrum and Esplora listeners are the wallet product. Core
 wallet RPC (`importdescriptors`, `walletcreatefundedpsbt`,
@@ -227,5 +226,4 @@ file](#tcp-rpc-cookie), not `rpcuser` / `rpcpassword`.
 | ZMQ | LND's default bitcoind mode, Eclair, Dojo / Ashigaru | A publisher. Out of scope. LND's `rpcpolling` path does not need it ([`lightning.md`](./lightning.md)). Eclair and Dojo also need Core wallet RPC. |
 | Core wallet RPC | The Core-wallet table above, plus Eclair | Out of scope. |
 | Blockbook WebSocket | Trezor Suite | A new API. |
-| `--network testnet4` | Wallets whose chain selector is testnet4 | A network. Not implemented. |
 | NBXplorer version gate | BTCPay | A client change. The block-scan methods are already served. |
