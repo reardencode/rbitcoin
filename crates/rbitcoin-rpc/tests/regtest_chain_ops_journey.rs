@@ -1193,6 +1193,56 @@ fn chain_ops_at_genesis(
     reported
 }
 
+/// `prioritisetransaction` and `getprioritisedtransactions` argument shapes
+/// as Core reads them. The deltas net to zero on a txid the pool never saw.
+fn chain_ops_prioritise_params(ctx: &RpcContext) {
+    let e = dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!("11".repeat(32)), json!(1), json!(0)],
+    )
+    .unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(e["message"]
+        .as_str()
+        .unwrap()
+        .contains("Priority is no longer supported"));
+    // Core `RPCHelpMan`: a wrong argument count is `-1` with the method's
+    // help text, the same text `help prioritisetransaction` prints.
+    let help = dispatch(ctx, "help", vec![json!("prioritisetransaction")]).unwrap();
+    assert!(
+        help.as_str().unwrap().starts_with("prioritisetransaction txid (dummy) fee_delta\n"),
+        "{help}"
+    );
+    let txid = json!("11".repeat(32));
+    for params in [
+        RpcParams::from(vec![]),
+        RpcParams::from(vec![txid.clone()]),
+        RpcParams::from(vec![txid.clone(), json!(0)]),
+        RpcParams::from(vec![txid.clone(), json!(0), json!(0), json!(0)]),
+        RpcParams::named(json!({"txid": txid}).as_object().unwrap().clone()),
+    ] {
+        let missing = dispatch(ctx, "prioritisetransaction", params).unwrap_err();
+        assert_eq!(missing["code"], ERR_MISC, "{missing}");
+        assert_eq!(missing["message"], help, "{missing}");
+    }
+    // Core reads dummy as a double (`0.0` in its own help example) that
+    // may be null, and fee_delta with `getInt<int64_t>`.
+    for dummy in [json_num("0.0"), Value::Null] {
+        let ok = dispatch(ctx, "prioritisetransaction", vec![txid.clone(), dummy, json!(1)]);
+        assert_eq!(ok, Ok(json!(true)));
+    }
+    let frac = dispatch(ctx, "prioritisetransaction", vec![txid.clone(), json!(0), json_num("1.5")])
+        .unwrap_err();
+    assert_eq!(frac["code"], ERR_MISC, "{frac}");
+    assert_eq!(frac["message"], "JSON integer out of range", "{frac}");
+    dispatch(ctx, "prioritisetransaction", vec![txid, json!(0), json!(-2)]).unwrap();
+    let extra = dispatch(ctx, "getprioritisedtransactions", vec![json!(true)]).unwrap_err();
+    assert_eq!(extra["code"], ERR_MISC);
+    let help = dispatch(ctx, "help", vec![json!("getprioritisedtransactions")]).unwrap();
+    assert_eq!(extra["message"], help, "{extra}");
+}
+
 fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
     let mut named = serde_json::Map::new();
     named.insert("output".into(), json!("raw(55)"));
@@ -1206,22 +1256,7 @@ fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub)
     assert_eq!(e["code"], ERR_INVALID_PARAMETER);
     assert!(e["message"].as_str().unwrap().contains("segwit rule"));
 
-    let e = dispatch(
-        ctx,
-        "prioritisetransaction",
-        vec![json!("11".repeat(32)), json!(1), json!(0)],
-    )
-    .unwrap_err();
-    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
-    assert!(e["message"]
-        .as_str()
-        .unwrap()
-        .contains("Priority is no longer supported"));
-    let missing = dispatch(ctx, "prioritisetransaction", vec![]).unwrap_err();
-    assert_eq!(missing["code"], ERR_MISC);
-    assert_eq!(missing["message"], "prioritisetransaction");
-    let extra = dispatch(ctx, "getprioritisedtransactions", vec![json!(true)]).unwrap_err();
-    assert_eq!(extra["code"], ERR_MISC);
+    chain_ops_prioritise_params(ctx);
 
     let e = dispatch(ctx, "setmocktime", vec![json!(-1)]).unwrap_err();
     assert_eq!(e["code"], ERR_INVALID_PARAMETER);

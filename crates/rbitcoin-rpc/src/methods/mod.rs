@@ -659,9 +659,9 @@ pub fn json_u64(v: &Value) -> Option<u64> {
         .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
 }
 
-/// Core `UniValue::getInt<int>`: a non-number is `-3`. A fraction, an
-/// exponent, or a value outside `i32` is `-1` `JSON integer out of range`.
-pub fn core_json_int(v: &Value) -> Result<i32, Value> {
+/// Core `UniValue::getInt<T>`: a non-number is `-3`. A fraction, an
+/// exponent, or a value outside `T` is `-1` `JSON integer out of range`.
+pub fn core_json_int<T: TryFrom<i64>>(v: &Value) -> Result<T, Value> {
     let Value::Number(n) = v else {
         return Err(rpc_error(
             ERR_TYPE_ERROR,
@@ -672,7 +672,7 @@ pub fn core_json_int(v: &Value) -> Result<i32, Value> {
         ));
     };
     n.as_i64()
-        .and_then(|t| i32::try_from(t).ok())
+        .and_then(|t| T::try_from(t).ok())
         .ok_or_else(|| rpc_error(ERR_MISC, "JSON integer out of range"))
 }
 
@@ -1148,7 +1148,7 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     ),
     (
         "prioritisetransaction",
-        "prioritisetransaction txid dummy fee_delta\nLocal mining fee delta (sat). dummy must be 0.",
+        "prioritisetransaction txid (dummy) fee_delta\nLocal mining fee delta (sat). dummy must be 0 or null.",
     ),
     (
         "getprioritisedtransactions",

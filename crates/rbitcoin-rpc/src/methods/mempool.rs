@@ -1635,7 +1635,7 @@ pub fn tx_confirmed_on_active_chain(ctx: &RpcContext, tx: &Transaction) -> Resul
 
 /// Core `ParseConfirmTarget`: an `int` (else `JSON integer out of range`) in `1..=1008`.
 pub fn parse_conf_target(v: &Value) -> Result<u32, Value> {
-    u32::try_from(core_json_int(v)?)
+    u32::try_from(core_json_int::<i32>(v)?)
         .ok()
         .filter(|t| (1..=1008).contains(t))
         .ok_or_else(|| {
@@ -1821,7 +1821,7 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
     let missing = params.get(0, "txid").is_none() || params.get(2, "fee_delta").is_none();
     let extra_pos = params.pos_len() > 3;
     if missing || extra_pos {
-        return Err(rpc_error(ERR_MISC, "prioritisetransaction"));
+        return Err(rpc_error(ERR_MISC, method_help("prioritisetransaction")));
     }
     let txid_s = params.req_str(0, "txid")?;
     if txid_s.len() != 64 {
@@ -1839,33 +1839,24 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
             format!("txid must be hexadecimal string (not '{txid_s}')"),
         ));
     }
-    if let Some(dummy) = params.get(1, "dummy") {
-        if dummy.as_i64() != Some(0) && dummy.as_u64() != Some(0) {
-            if dummy.as_i64().is_none() && dummy.as_u64().is_none() {
-                return Err(rpc_error(
-                    ERR_TYPE_ERROR,
-                    "JSON value of type string is not of expected type number",
-                ));
-            }
+    if let Some(dummy) = params.get(1, "dummy").filter(|d| !d.is_null()) {
+        let Some(dummy) = dummy.as_f64() else {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type number",
+                    json_type_name(dummy)
+                ),
+            ));
+        };
+        if dummy != 0.0 {
             return Err(rpc_error(
                 ERR_INVALID_PARAMETER,
                 "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.",
             ));
         }
     }
-    let fee_delta = params
-        .get(2, "fee_delta")
-        .and_then(json_i64)
-        .ok_or_else(|| {
-            if params.get(2, "fee_delta").is_some() {
-                rpc_error(
-                    ERR_TYPE_ERROR,
-                    "JSON value of type string is not of expected type number",
-                )
-            } else {
-                rpc_error(ERR_INVALID_PARAMS, "fee_delta required")
-            }
-        })?;
+    let fee_delta = core_json_int::<i64>(params.req(2, "fee_delta")?)?;
     let txid = Txid::from_byte_array(parse_hash32_display(txid_s)?);
     let mp = ctx
         .mempool
@@ -1878,7 +1869,10 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
 pub fn getprioritisedtransactions(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&[])?;
     if params.pos_len() != 0 {
-        return Err(rpc_error(ERR_MISC, "getprioritisedtransactions"));
+        return Err(rpc_error(
+            ERR_MISC,
+            method_help("getprioritisedtransactions"),
+        ));
     }
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(json!({}));
