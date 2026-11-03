@@ -11,7 +11,9 @@ use rbitcoin_query::ThresholdState;
 
 use serde_json::{json, Value};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub fn require_regtest(ctx: &RpcContext, method: &str) -> Result<(), Value> {
