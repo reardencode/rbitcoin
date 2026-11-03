@@ -294,9 +294,6 @@ async fn wait_lane_permit() {
     }
 }
 
-#[cfg(not(debug_assertions))]
-async fn wait_lane_permit() {}
-
 /// Jobs accepted onto the lane and not yet finished. Includes fillers that
 /// never call [`begin_job`], and jobs still sitting in the sync channel.
 #[cfg(debug_assertions)]
@@ -336,6 +333,7 @@ fn note_dequeued() {
 enum PollEnqueue {
     Sent,
     Full(Job),
+    #[cfg(debug_assertions)]
     Busy(Job),
 }
 
@@ -549,6 +547,7 @@ pub fn subscribe_quiet_drain() -> mpsc::Receiver<thread::ThreadId> {
     rx
 }
 
+#[cfg(debug_assertions)]
 fn note_quiet_drain() {
     let id = thread::current().id();
     let mut subs = quiet_drain_subs().lock().unwrap_or_else(|e| e.into_inner());
@@ -709,6 +708,7 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
                 note_async_enqueued();
                 break;
             }
+            #[cfg(debug_assertions)]
             PollEnqueue::Busy(j) => {
                 job = j;
                 wait_lane_permit().await;
@@ -733,6 +733,7 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
                 note_async_enqueued();
                 break;
             }
+            #[cfg(debug_assertions)]
             PollEnqueue::Busy(j) => {
                 job = j;
                 wait_lane_permit().await;
