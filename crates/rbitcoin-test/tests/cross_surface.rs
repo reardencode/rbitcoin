@@ -38,11 +38,24 @@ async fn published_listener(datadir: &std::path::Path, name: &str) -> SocketAddr
 }
 
 async fn wait_listeners(addrs: &[SocketAddr]) {
-    for addr in addrs {
-        tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(*addr))
-            .await
-            .unwrap_or_else(|_| panic!("connect {addr} after publish"))
-            .unwrap_or_else(|e| panic!("connect {addr} after publish: {e}"));
+    // Reserved ports are not published. Retry until the process accepts.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut missing = None;
+        for addr in addrs {
+            if TcpStream::connect(addr).await.is_err() {
+                missing = Some(*addr);
+                break;
+            }
+        }
+        if missing.is_none() {
+            return;
+        }
+        let addr = missing.expect("missing");
+        if Instant::now() >= deadline {
+            panic!("connect {addr} after publish");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
