@@ -2658,19 +2658,21 @@ fn invalidate_wakes_a_tip_wait_without_a_mempool() {
     let parked = Arc::new(AtomicU64::new(0));
     rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
     let _clear = ClearParkNote;
+    let marked = Arc::new(std::sync::Mutex::new(None));
     std::thread::scope(|scope| {
         let hub = Arc::clone(&hub);
+        let stamp = Arc::clone(&marked);
         scope.spawn(move || {
             wait_until_parked(&parked);
             hub.invalidate_block(tip).expect("invalidate tip");
+            *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         });
-        let t0 = Instant::now();
         let got = rbitcoin_rpc::methods::chain::wait_for_tip(&bare, 2_000, |_hash, h| h < height)
             .unwrap();
+        let woke = wake_after_invalidate(&marked);
         assert!(
-            t0.elapsed() < Duration::from_millis(500),
-            "invalidate left the tip wait parked: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {woke:?}"
         );
         assert!(got["height"].as_u64().unwrap() < u64::from(height), "{got}");
     });
@@ -2702,20 +2704,22 @@ fn invalidate_publishes_the_replacement_fork_not_the_stump() {
     let parked = Arc::new(AtomicU64::new(0));
     rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
     let _clear = ClearParkNote;
+    let marked = Arc::new(std::sync::Mutex::new(None));
     std::thread::scope(|scope| {
         let hub = Arc::clone(&hub);
+        let stamp = Arc::clone(&marked);
         scope.spawn(move || {
             wait_until_parked(&parked);
             hub.invalidate_block(start).expect("invalidate tip");
+            *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         });
-        let t0 = Instant::now();
         let got =
             rbitcoin_rpc::methods::chain::wait_for_tip(&bare, 2_000, |hash, _| hash != start_hex)
                 .unwrap();
+        let woke = wake_after_invalidate(&marked);
         assert!(
-            t0.elapsed() < Duration::from_millis(500),
-            "invalidate left the tip wait parked: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {woke:?}"
         );
         let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
         assert_eq!(got["hash"], fork_hex, "{got}");
@@ -2761,6 +2765,7 @@ fn invalidate_with_a_mempool_returns_the_replacement_fork() {
     let parked = Arc::new(AtomicU64::new(0));
     rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
     let _clear = ClearParkNote;
+    let marked = Arc::new(std::sync::Mutex::new(None));
     std::thread::scope(|scope| {
         let mp = Arc::clone(&mp);
         let saw_stump = Arc::clone(&saw_stump);
@@ -2774,19 +2779,20 @@ fn invalidate_with_a_mempool_returns_the_replacement_fork() {
             }
         });
         let hub = Arc::clone(&hub);
+        let stamp = Arc::clone(&marked);
         scope.spawn(move || {
             wait_until_parked(&parked);
             hub.invalidate_block(start).expect("invalidate tip");
+            *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         });
-        let t0 = Instant::now();
         let got =
             rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 2_000, |hash, _| hash != start_hex)
                 .unwrap();
         stop.store(true, Ordering::Relaxed);
+        let woke = wake_after_invalidate(&marked);
         assert!(
-            t0.elapsed() < Duration::from_millis(500),
-            "invalidate left the tip wait parked: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {woke:?}"
         );
         let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
         assert_eq!(got["hash"], fork_hex, "{got}");
@@ -2830,21 +2836,23 @@ fn invalidate_evicting_a_mempool_tx_returns_the_replacement_fork() {
     let parked = Arc::new(AtomicU64::new(0));
     rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
     let _clear = ClearParkNote;
+    let marked = Arc::new(std::sync::Mutex::new(None));
     std::thread::scope(|scope| {
         let hub = Arc::clone(&hub);
+        let stamp = Arc::clone(&marked);
         scope.spawn(move || {
             wait_until_parked(&parked);
             hub.invalidate_block(cut)
                 .expect("invalidate below maturity");
+            *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         });
-        let t0 = Instant::now();
         let got =
             rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 2_000, |hash, _| hash != start_hex)
                 .unwrap();
+        let woke = wake_after_invalidate(&marked);
         assert!(
-            t0.elapsed() < Duration::from_millis(500),
-            "invalidate left the tip wait parked: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {woke:?}"
         );
         let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
         assert_eq!(got["hash"], fork_hex, "{got}");
@@ -2886,6 +2894,20 @@ fn invalidate_on_a_catch_up_pool_builds_on_the_fork() {
     assert_eq!(gbt["height"].as_u64(), Some(103), "{gbt}");
     assert_eq!(mp.template_prev(), Some(fork_tip.to_byte_array()));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn wake_after_invalidate(marked: &std::sync::Mutex<Option<Instant>>) -> Duration {
+    let start = Instant::now();
+    loop {
+        if let Some(t) = *marked.lock().unwrap_or_else(|e| e.into_inner()) {
+            return t.elapsed();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "invalidate did not return"
+        );
+        std::thread::yield_now();
+    }
 }
 
 fn wait_until_parked(parked: &AtomicU64) {

@@ -742,14 +742,16 @@ fn second_stage_keeps_the_first_publisher_wake() {
             b_flag_for_a.load(Ordering::Acquire)
         });
         for _ in 0..2 {
-            let attempt = Instant::now();
+            let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 // Drop a stale unpark permit so the next park waits for this round.
                 thread::park_timeout(Duration::ZERO);
                 phase_a.store(1, Ordering::Release);
                 STAGE_PARKED.store(true, Ordering::Release);
                 note_script_progress();
-                thread::park();
+                let left = deadline.saturating_duration_since(Instant::now());
+                assert!(!left.is_zero(), "script stage was not woken");
+                thread::park_timeout(left);
                 STAGE_PARKED.store(false, Ordering::Release);
                 if phase_a.load(Ordering::Acquire) == 2 {
                     phase_a.store(0, Ordering::Release);
@@ -757,10 +759,6 @@ fn second_stage_keeps_the_first_publisher_wake() {
                     note_script_progress();
                     break;
                 }
-                assert!(
-                    attempt.elapsed() < Duration::from_secs(2),
-                    "script stage was not woken"
-                );
             }
         }
     });
@@ -783,8 +781,11 @@ fn second_stage_keeps_the_first_publisher_wake() {
         let _clear = Clear;
         b_flag.store(true, Ordering::Release);
         note_script_progress();
+        let deadline = Instant::now() + Duration::from_secs(2);
         while !release.load(Ordering::Acquire) {
-            thread::park();
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "second stage was not released");
+            thread::park_timeout(left);
         }
         set_script_publisher(None);
         cleared.store(true, Ordering::Release);

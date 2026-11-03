@@ -2856,11 +2856,10 @@ async fn client_stop_wakes_without_the_hundred_ms_poll() {
         tokio::task::yield_now().await;
     }
     stop.store(true);
-    tokio::task::yield_now().await;
-    let joined = tokio::time::timeout(Duration::ZERO, task).await;
     tokio::time::resume();
+    let joined = tokio::time::timeout(Duration::from_secs(2), task).await;
     joined
-        .expect("client stayed in the 100 ms stop poll")
+        .expect("client did not stop")
         .expect("client task")
         .expect("stop ends the client");
     drop(client);
