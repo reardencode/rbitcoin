@@ -72,8 +72,6 @@ pub fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
     }))
 }
 
-/// Exact 8-decimal BTC JSON number (Core `ValueFromAmount`). Avoids f64 drift
-/// against `Decimal` comparisons in the functional suite.
 #[doc(hidden)]
 pub fn accept_fees_json(fee_sat: u64, weight: u64, wtxid: &str) -> Value {
     accept_fees_parts(fee_sat, fee_sat, weight, &[wtxid.to_string()])
@@ -133,6 +131,8 @@ pub fn submit_fees_json(
     accept_fees_parts(base_fee, modified, weight, &[wtxid.to_string()])
 }
 
+/// Exact 8-decimal BTC JSON number (Core `ValueFromAmount`): every BTC
+/// amount and BTC/kvB rate the RPC prints. An f64 prints `1e-6` or `50.0`.
 pub fn sat_btc_json(sat: i64) -> Value {
     let sign = if sat < 0 { "-" } else { "" };
     let abs = sat.unsigned_abs();
@@ -1763,22 +1763,20 @@ pub fn smart_fee_result(ctx: &RpcContext, conf_target: u32) -> Result<Value, Val
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(json!({ "errors": ["mempool unavailable"], "blocks": blocks }));
     };
-    let rate = mp.estimate_fee_btc_per_kb(conf_target);
-    Ok(smart_fee_json(blocks, rate))
+    Ok(smart_fee_json(blocks, mp.estimate_fee_sat_kvb(conf_target)))
 }
 
-/// Core's result for `rate` (BTC/kvB; negative = no estimate): `feerate` and
+/// Core's result for `rate` (sat/kvB; `None` = no estimate): `feerate` and
 /// `blocks`, or `errors` and `blocks`.
 #[doc(hidden)]
-pub fn smart_fee_json(blocks: u32, rate: f64) -> Value {
-    if rate < 0.0 {
+pub fn smart_fee_json(blocks: u32, rate: Option<u64>) -> Value {
+    let Some(sat_kvb) = rate else {
         return json!({
             "errors": ["Insufficient data or no feerate found"],
             "blocks": blocks,
         });
-    }
-    let sat_kvb = (rate * 100_000_000.0).round() as i64;
-    json!({ "feerate": sat_btc_json(sat_kvb), "blocks": blocks })
+    };
+    json!({ "feerate": sat_btc_json(sat_kvb as i64), "blocks": blocks })
 }
 
 /// Same 10-minute product as [`estimatesmartfee`] under the Core name.
@@ -1813,16 +1811,15 @@ pub fn estimate_fee_result(ctx: &RpcContext, conf_target: u32) -> Result<Value, 
             "blocks": conf_target,
         }));
     };
-    let rate = mp.estimate_fee_btc_per_kb(conf_target);
-    if rate < 0.0 {
+    let Some(rate) = mp.estimate_fee_sat_kvb(conf_target) else {
         return Ok(json!({
             "feerate": -1.0,
             "errors": ["Insufficient data or empty mempool"],
             "blocks": conf_target.max(1),
         }));
-    }
+    };
     Ok(json!({
-        "feerate": rate,
+        "feerate": sat_btc_json(rate as i64),
         "blocks": conf_target.max(1),
         "errors": Value::Null,
         "rbitcoin_model": "10-minute inclusion frontier (not Core historical)",

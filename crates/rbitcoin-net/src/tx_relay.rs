@@ -344,13 +344,11 @@ impl FeeSnapshot {
         }
     }
 
-    /// `target`'s rate, at least `floor_sat_kvb`, in BTC/kvB; `-1.0` without one.
+    /// `target`'s rate in sat/kvB, at least `floor_sat_kvb`; `None` without one.
     #[doc(hidden)]
-    pub fn rate_btc_per_kb(&self, target: u32, floor_sat_kvb: u64) -> f64 {
-        match fee_at_target_sat_kvb(FEE_SNAPSHOT_DEPTHS, &self.depth_rates_sat_kvb, target) {
-            Some(sat) => sat.max(floor_sat_kvb) as f64 / 100_000_000.0,
-            None => -1.0,
-        }
+    pub fn rate_sat_kvb(&self, target: u32, floor_sat_kvb: u64) -> Option<u64> {
+        fee_at_target_sat_kvb(FEE_SNAPSHOT_DEPTHS, &self.depth_rates_sat_kvb, target)
+            .map(|sat| sat.max(floor_sat_kvb))
     }
 
     #[doc(hidden)]
@@ -6233,11 +6231,17 @@ impl MempoolHub {
     /// not hold the hub lock across multi-pass walks. The answer is at least
     /// the live `mempoolminfee`, read under a short read lock.
     pub fn estimate_fee_btc_per_kb(&self, target_blocks: u32) -> f64 {
+        self.estimate_fee_sat_kvb(target_blocks)
+            .map_or(-1.0, |sat| sat as f64 / 100_000_000.0)
+    }
+
+    /// [`Self::estimate_fee_btc_per_kb`] in exact sat/kvB; `None` without an estimate.
+    pub fn estimate_fee_sat_kvb(&self, target_blocks: u32) -> Option<u64> {
         self.maybe_refresh_fee_snapshot();
         let depth = Self::fee_depth(target_blocks);
         self.fee_snapshot
             .load()
-            .rate_btc_per_kb(depth, self.mempool_min_fee_sat_kvb())
+            .rate_sat_kvb(depth, self.mempool_min_fee_sat_kvb())
     }
 
     /// Esplora `/fee-estimates` targets in one Arc load (+ optional refresh):
@@ -6250,8 +6254,8 @@ impl MempoolHub {
         (1..=25)
             .chain([144, 504, 1008])
             .filter_map(|d| {
-                let rate = snap.rate_btc_per_kb(d, floor);
-                (rate >= 0.0).then_some((d, rate))
+                let sat = snap.rate_sat_kvb(d, floor)?;
+                Some((d, sat as f64 / 100_000_000.0))
             })
             .collect()
     }

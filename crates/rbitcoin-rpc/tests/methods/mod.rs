@@ -1951,6 +1951,54 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `ValueFromAmount`: every BTC amount and BTC/kvB rate is a JSON number
+/// with exactly eight decimals, never `50.0`, `49.99999`, or `1e-6`.
+#[test]
+fn btc_amounts_print_eight_decimals() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let text = |v: &Value| serde_json::to_string(v).unwrap();
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = json!(spend.compute_txid().to_string());
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let mempool_out = dispatch(&ctx, "gettxout", vec![txid.clone(), json!(0)]).unwrap();
+    assert_eq!(text(&mempool_out["value"]), "49.99999000", "{mempool_out}");
+    let raw = dispatch(&ctx, "getrawtransaction", vec![txid, json!(true)]).unwrap();
+    assert_eq!(text(&raw["vout"][0]["value"]), "49.99999000", "{raw}");
+    let (dust_hex, _) = spend_generated_coinbase(&ctx, 2, 100, ScriptBuf::from_bytes(vec![0x51]));
+    let decoded = dispatch(&ctx, "decoderawtransaction", vec![json!(dust_hex)]).unwrap();
+    assert_eq!(
+        text(&decoded["vout"][0]["value"]),
+        "0.00000100",
+        "{decoded}"
+    );
+
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(2)]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![hash, json!(2)]).unwrap();
+    let coinbase = &blk["tx"][0];
+    assert_eq!(text(&coinbase["vout"][0]["value"]), "50.00000000", "{blk}");
+    let confirmed = dispatch(&ctx, "gettxout", vec![coinbase["txid"].clone(), json!(0)]).unwrap();
+    assert_eq!(text(&confirmed["value"]), "50.00000000", "{confirmed}");
+
+    let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(text(&net["relayfee"]), "0.00000100", "{net}");
+    assert_eq!(text(&net["incrementalfee"]), "0.00000100", "{net}");
+
+    let mp = ctx.mempool.as_ref().unwrap();
+    for height in 1..=2_100 {
+        let block = rbitcoin_net::fee_history::HistoricalFeeBlock {
+            p10_sat_kvb: Some(1_050),
+            txstat_bytes: 8,
+        };
+        mp.insert_backfill_fee_block(height, block, None);
+    }
+    mp.mark_fee_dirty();
+    let smart = dispatch(&ctx, "estimatesmartfee", vec![json!(2)]).unwrap();
+    assert_eq!(text(&smart["feerate"]), "0.00001050", "{smart}");
+    let raw_fee = dispatch(&ctx, "estimaterawfee", vec![json!(2)]).unwrap();
+    assert_eq!(text(&raw_fee["feerate"]), "0.00001050", "{raw_fee}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Core `coinbase_tx` from a verbosity 2 coinbase row.
 fn expected_coinbase_tx(cb: &Value) -> Value {
     let vin = &cb["vin"][0];
@@ -5183,7 +5231,12 @@ fn getpeerinfo_lists_registered_session() {
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");
     assert_eq!(arr[0]["last_block"], 0);
     assert_eq!(arr[0]["last_transaction"], 0);
-    assert!(arr[0].get("minfeefilter").is_some());
+    assert_eq!(
+        serde_json::to_string(&arr[0]["minfeefilter"]).unwrap(),
+        "0.00000000",
+        "Core ValueFromAmount: {}",
+        arr[0]
+    );
     assert!(arr[0]["bytesrecv_per_msg"]["pong"].as_u64().unwrap() >= 29);
     let totals = dispatch(&ctx, "getnettotals", vec![]).unwrap();
     assert!(totals["totalbytesrecv"].as_u64().unwrap() >= 29);

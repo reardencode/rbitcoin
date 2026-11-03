@@ -2109,8 +2109,10 @@ pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -
     }
     let mut vout = Vec::new();
     for (i, out) in tx.output.iter().enumerate() {
+        // Core reads `nValue` as a signed `CAmount`: a decoded value above
+        // `i64::MAX` prints negative there too.
         vout.push(json!({
-            "value": out.value.to_btc(),
+            "value": sat_btc_json(out.value.to_sat() as i64),
             "n": i,
             "scriptPubKey": script_pubkey_json(&out.script_pubkey, network),
         }));

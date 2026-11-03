@@ -197,10 +197,6 @@ pub fn take_http_wait_snap() -> Option<(String, u32)> {
     HTTP_WAIT_SNAP.with(|c| c.borrow_mut().take())
 }
 
-pub fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
-    sat_kvb as f64 / 100_000_000.0
-}
-
 pub fn hash_hex_display(h: &[u8; 32]) -> String {
     rbitcoin_primitives::display_hash_hex(*h)
 }
