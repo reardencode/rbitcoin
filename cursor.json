@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
   "new_skip": 1684,
-  "old_index": 6021,
+  "old_index": 6628,
   "new_cap_used": true,
   "run_id": "41595379231",
-  "old_name": "crates/rbitcoin-ibd/src/ibd/perf_log.rs:1156:63: replace * with / in sample",
+  "old_name": "crates/rbitcoin-log/src/lib.rs:178:18: replace - with + in civil_utc",
   "new_len": 2959,
   "new_remaining": 1275,
-  "completed_new": 140,
-  "completed_old": 205,
+  "completed_new": 0,
+  "completed_old": 607,
   "old_len": 29651,
-  "old_remaining": 29446
+  "old_remaining": 29044
 }
