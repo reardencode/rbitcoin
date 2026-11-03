@@ -93,6 +93,9 @@ pub struct HeaderSyncNode {
     /// Resolved height. `None` means the ancestor walk hit the cap; children
     /// of that node must not walk again.
     pub height: Option<u32>,
+    /// Bits a non-gap child inherits from this header. `None` on a row that
+    /// was only remembered, so the child walks once.
+    pub min_diff_walk: Option<CompactTarget>,
 }
 
 /// One parked body. `waive` is the session bit from the accept that first
@@ -715,6 +718,10 @@ pub struct ChainHub {
     pub header_contextual_checks: AtomicU64,
     #[cfg(debug_assertions)]
     pub stored_height_walk_steps: AtomicU64,
+    /// Parent steps inside `min_diff_off_tip`. A long easy chain must not
+    /// rewalk to the retarget boundary on every header.
+    #[cfg(debug_assertions)]
+    pub min_diff_walk_steps: AtomicU64,
 }
 
 /// One `getchaintips` row. Status is a Core-shaped string (`active`,
@@ -787,7 +794,15 @@ pub fn remember_stored_header(
         Some(parent) => parent.map(|h| h.saturating_add(1)),
         None => walk(),
     };
-    in_batch.insert(hash, HeaderSyncNode { fk, header, height });
+    in_batch.insert(
+        hash,
+        HeaderSyncNode {
+            fk,
+            header,
+            height,
+            min_diff_walk: None,
+        },
+    );
 }
 
 impl ChainHub {
@@ -840,6 +855,8 @@ impl ChainHub {
             header_contextual_checks: AtomicU64::new(0),
             #[cfg(debug_assertions)]
             stored_height_walk_steps: AtomicU64::new(0),
+            #[cfg(debug_assertions)]
+            min_diff_walk_steps: AtomicU64::new(0),
         }
     }
 
@@ -1880,12 +1897,14 @@ impl ChainHub {
                 .unwrap_or(0);
             next = next.saturating_add(1);
             let fk = Fk(next);
+            let min_diff_walk = self.min_diff_walk_bits(header, height, &in_batch);
             in_batch.insert(
                 hash,
                 HeaderSyncNode {
                     fk,
                     header: *header,
                     height: Some(height),
+                    min_diff_walk: Some(min_diff_walk),
                 },
             );
             recs.push((i, header_to_record(prev_fk, header, hash)));
@@ -2143,10 +2162,60 @@ impl ChainHub {
             return limit;
         }
         let interval = self.params.difficulty_adjustment_interval();
-        let mut h = parent_height;
-        let mut bits = parent.bits;
-        let mut hdr = *parent;
+        // `is_multiple_of(0)` panics. Keep that, and do not answer from a cache.
+        if interval != 0 {
+            if let Some(bits) = in_batch
+                .get(&parent.block_hash().to_byte_array())
+                .and_then(|node| node.min_diff_walk)
+            {
+                return bits;
+            }
+        }
+        self.min_diff_walk_slow(parent, parent_height, in_batch)
+    }
+
+    /// `min_diff_off_tip` with no time gap. A child reuses its parent's
+    /// answer: the walk only moves while bits stay at the pow limit and the
+    /// height is not a retarget boundary.
+    fn min_diff_walk_bits(
+        &self,
+        header: &Header,
+        height: u32,
+        in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
+    ) -> CompactTarget {
+        if !self.params.allow_min_difficulty_blocks() {
+            return header.bits;
+        }
+        let interval = self.params.difficulty_adjustment_interval();
+        let limit = self.params.pow_limit.to_compact_lossy();
+        if interval != 0 && (height.is_multiple_of(interval) || header.bits != limit) {
+            return header.bits;
+        }
+        if interval != 0 {
+            if let Some(bits) = in_batch
+                .get(&header.prev_blockhash.to_byte_array())
+                .and_then(|node| node.min_diff_walk)
+            {
+                return bits;
+            }
+        }
+        self.min_diff_walk_slow(header, height, in_batch)
+    }
+
+    fn min_diff_walk_slow(
+        &self,
+        header: &Header,
+        height: u32,
+        in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
+    ) -> CompactTarget {
+        let limit = self.params.pow_limit.to_compact_lossy();
+        let interval = self.params.difficulty_adjustment_interval();
+        let mut h = height;
+        let mut bits = header.bits;
+        let mut hdr = *header;
         while !h.is_multiple_of(interval) && bits == limit {
+            #[cfg(debug_assertions)]
+            self.min_diff_walk_steps.fetch_add(1, Ordering::Relaxed);
             // Height 0 has no parent. Missing parent ends the walk below.
             let Some(p) = self.sync_parent_header(&hdr.prev_blockhash, in_batch) else {
                 break;
@@ -3581,12 +3650,14 @@ impl ChainHub {
                 if let Err(e) = checked {
                     return Err(connect_failed_for_header(b.block_hash().to_byte_array(), e));
                 }
+                let min_diff_walk = self.min_diff_walk_bits(&b.header, height, &batch);
                 batch.insert(
                     b.block_hash().to_byte_array(),
                     HeaderSyncNode {
                         fk: Fk(0),
                         header: b.header,
                         height: Some(height),
+                        min_diff_walk: Some(min_diff_walk),
                     },
                 );
             }
@@ -4468,6 +4539,11 @@ impl ChainHub {
     #[cfg(debug_assertions)]
     pub fn take_stored_height_walk_steps(&self) -> u64 {
         self.stored_height_walk_steps.swap(0, Ordering::Relaxed)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn take_min_diff_walk_steps(&self) -> u64 {
+        self.min_diff_walk_steps.swap(0, Ordering::Relaxed)
     }
 
     #[cfg(debug_assertions)]

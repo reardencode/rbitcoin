@@ -2807,6 +2807,111 @@ fn accept_unknown_parent_errors() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A long easy regtest chain asks for min-difficulty bits on every header.
+/// The walk result depends only on the parent, so the batch must not repeat
+/// it back to the retarget boundary.
+#[test]
+fn regtest_header_batch_remembers_the_min_diff_walk() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let mut header = hub.tip_header().unwrap();
+    let mut prev = header.block_hash();
+    let seeded = mine(prev, header.time.saturating_add(1), 1);
+    header.version = seeded.header.version;
+    header.bits = seeded.header.bits;
+    let mut headers = Vec::with_capacity(800);
+    for height in 1u32..=800 {
+        header.prev_blockhash = prev;
+        header.time = header.time.saturating_add(1);
+        header.merkle_root = bitcoin::TxMerkleNode::from_byte_array(
+            bitcoin::hashes::sha256d::Hash::hash(&height.to_le_bytes()).to_byte_array(),
+        );
+        rbitcoin_consensus::grind_regtest_pow(&mut header);
+        prev = header.block_hash();
+        headers.push(header);
+    }
+    #[cfg(debug_assertions)]
+    hub.take_min_diff_walk_steps();
+    hub.ensure_headers_batch(&headers).unwrap();
+    assert_eq!(hub.best_header_height(), 800);
+    #[cfg(debug_assertions)]
+    {
+        let steps = hub.take_min_diff_walk_steps();
+        assert!(
+            steps < 2_000,
+            "min-diff walk rewalked the easy chain: {steps} steps"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The remembered walk has to agree with the slow walk when an ancestor
+/// left the pow limit. The oracle fills the batch with `min_diff_walk: None`.
+#[test]
+fn header_batch_min_diff_matches_the_unremembered_walk() {
+    let (dir, mut hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.params.btc.no_pow_retargeting = false;
+    hub.params.btc.allow_min_difficulty_blocks = true;
+    let spacing = hub.params.btc.pow_target_spacing;
+    hub.params.btc.pow_target_timespan = spacing.saturating_mul(20);
+    let limit = hub.params.pow_limit.to_compact_lossy();
+    let genesis = hub.tip_header().unwrap();
+    let mut prev = genesis;
+    let mut batch: HashMap<[u8; 32], HeaderSyncNode> = HashMap::new();
+    let mut headers = Vec::new();
+    for height in 1..=22u32 {
+        let parent = headers.last().copied().unwrap_or(genesis);
+        let time = if height == 21 {
+            parent
+                .time
+                .saturating_add((spacing as u32).saturating_mul(2) + 1)
+        } else if height == 22 {
+            parent.time.saturating_add(1)
+        } else {
+            genesis
+                .time
+                .saturating_add((spacing as u32 / 2).saturating_mul(height))
+        };
+        let probe = Header {
+            time,
+            prev_blockhash: parent.block_hash(),
+            ..parent
+        };
+        let bits = hub
+            .expected_bits_off_tip(&probe, &parent, height - 1, &batch)
+            .unwrap_or_else(|e| panic!("height {height}: {e}"));
+        let mut header = probe;
+        header.version = mine(prev.block_hash(), time, height).header.version;
+        header.bits = bits;
+        header.merkle_root = bitcoin::TxMerkleNode::from_byte_array(
+            bitcoin::hashes::sha256d::Hash::hash(&height.to_le_bytes()).to_byte_array(),
+        );
+        rbitcoin_consensus::grind_regtest_pow(&mut header);
+        batch.insert(
+            header.block_hash().to_byte_array(),
+            HeaderSyncNode {
+                fk: Fk(0),
+                header,
+                height: Some(height),
+                min_diff_walk: None,
+            },
+        );
+        headers.push(header);
+        prev = header;
+    }
+    assert_ne!(headers[19].bits, limit, "the retarget leaves the pow limit");
+    assert_eq!(headers[20].bits, limit, "the time gap is min difficulty");
+    assert_eq!(
+        headers[21].bits, headers[19].bits,
+        "the next header walks back to the harder bits"
+    );
+    hub.ensure_headers_batch(&headers)
+        .unwrap_or_else(|e| panic!("batch disagreed with the walk: {e}"));
+    assert_eq!(hub.best_header_height(), 22);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn submit_header_child_is_headers_only_tip() {
     let (dir, hub) = tmp_hub();
