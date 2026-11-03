@@ -1326,7 +1326,7 @@ fn tip_announce_kept_prefix_of_failed_reorg_is_headers() {
     }
     let mut tips = hub.subscribe_tips();
     let err = hub
-        .accept_branch(&branch)
+        .accept_branch(&arcs(&branch))
         .expect_err("the last block has a wrong BIP34 height");
     assert_eq!(
         err.failing_block_hash(),
@@ -1407,7 +1407,7 @@ fn tip_announce_reorg_inv_until_caught_up() {
         prev = block.block_hash();
         branch.push(block);
     }
-    hub.accept_branch(&branch).unwrap();
+    hub.accept_branch(&arcs(&branch)).unwrap();
     let reorg_ev = tip_event(hub, 9);
     assert_ne!(reorg_ev.hash, sent_tip);
     assert_ann(
@@ -1677,3 +1677,7 @@ async fn tip_announce_cmpct_without_sendcmpct_is_ignored() {
     }
 }
 
+/// Share test bodies the way the hub shares a held one.
+fn arcs(blocks: &[bitcoin::Block]) -> Vec<std::sync::Arc<bitcoin::Block>> {
+    blocks.iter().cloned().map(std::sync::Arc::new).collect()
+}

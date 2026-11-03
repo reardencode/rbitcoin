@@ -268,7 +268,7 @@ fn latest_run_chain_surfaces() {
     let ghash = genesis.block_hash();
     let child = mine(ghash, genesis.header.time.saturating_add(1), 1);
     match hub
-        .accept_branch(&[genesis.clone(), child.clone()])
+        .accept_branch(&arcs(&[genesis.clone(), child.clone()]))
         .unwrap()
     {
         AcceptOutcome::Accepted { height } => assert_eq!(height, 1),
@@ -417,7 +417,7 @@ fn precious_archive_block_returns_after_the_tip_is_invalidated() {
     // a1 is one archive block and the tip is genesis, so precious connects it.
     // Park it as precious while a taller chain is the tip, then rewind again.
     let tall = mine(sibling_hash, t0.saturating_add(5), 2);
-    hub.accept_branch(&[sibling, tall]).unwrap();
+    hub.accept_branch(&arcs(&[sibling, tall])).unwrap();
     assert_eq!(hub.tip_height(), Some(2));
     hub.precious_block(a1_hash).unwrap();
     assert_ne!(hub.tip_hash(), Some(a1_hash));
@@ -1002,6 +1002,78 @@ fn hold_body_spares_asked_getdata_from_fifo() {
         "in-flight getdata body must not FIFO-evict at cap"
     );
     assert_eq!(hub.held_body_count(), HeldBodies::CAP);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A held side block is one `Arc`: the hub hands out the body it holds,
+/// and the branch it assembles for connect is those same bodies. A copy per
+/// ancestor step made a long side branch cost its length squared per block.
+#[test]
+fn held_body_and_best_held_branch_are_the_held_arcs() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = Arc::new(mine_distinct(gen, 1_500_000_000, 1, &[]));
+    let b2 = Arc::new(mine_distinct(b1.block_hash(), 1_500_000_001, 2, &[]));
+    hub.hold_body(Arc::clone(&b1), false);
+    hub.hold_body(Arc::clone(&b2), false);
+    let held = hub.held_body(&b1.block_hash()).unwrap();
+    assert!(Arc::ptr_eq(&held, &b1), "held_body returns the held Arc");
+    let branch = hub.best_held_branch().unwrap();
+    assert_eq!(branch.len(), 2);
+    assert!(Arc::ptr_eq(&branch[0], &b1), "assembled branch shares b1");
+    assert!(Arc::ptr_eq(&branch[1], &b2), "assembled branch shares b2");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `best_held_branch` walks each held leaf once. A ranked branch covers the
+/// held blocks under it and beats each of them on work. A walk from every
+/// held block cost a long side branch its length squared per accepted block.
+#[test]
+fn best_held_branch_walks_each_leaf_once() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let mut prev = hub.tip_hash().unwrap();
+    let mut held = Vec::new();
+    for i in 0..4u32 {
+        let b = mine_distinct(prev, 1_600_000_000 + i, i + 1, &held);
+        prev = b.block_hash();
+        held.push(prev);
+        hub.hold_body(Arc::new(b), false);
+    }
+    hub.reset_side_branch_walks();
+    let branch = hub.best_held_branch().unwrap();
+    assert_eq!(branch.len(), 4);
+    assert_eq!(branch[3].block_hash(), held[3]);
+    assert_eq!(hub.side_branch_walks(), 1, "one held leaf, one walk");
+    hub.note_invalid_block(held[3]);
+    let branch = hub.best_held_branch().unwrap();
+    assert_eq!(
+        branch.len(),
+        3,
+        "an invalid leaf still yields its valid prefix"
+    );
+    assert_eq!(branch[2].block_hash(), held[2]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A held leaf whose branch cannot be ranked does not hide its held
+/// parent. The child here has a zero target, so its branch work does not
+/// sum; the parent's branch is still the best held branch.
+#[test]
+fn best_held_branch_keeps_a_parent_whose_child_cannot_rank() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let parent = mine_distinct(gen, 1_700_000_000, 1, &[]);
+    let p = parent.block_hash();
+    let mut child = mine_distinct(p, 1_700_000_001, 2, &[]);
+    child.header.bits = bitcoin::CompactTarget::from_consensus(0);
+    hub.hold_body(Arc::new(parent), false);
+    hub.hold_body(Arc::new(child), false);
+    let branch = hub.best_held_branch().unwrap();
+    assert_eq!(branch.len(), 1);
+    assert_eq!(branch[0].block_hash(), p);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1646,7 +1718,7 @@ fn chain_edges_pin_work_headers_and_reopen() {
         ],
     );
     let s2 = mine(s1.block_hash(), s1.header.time.saturating_add(1), 2);
-    hub.accept_branch(&[s1, s2]).unwrap();
+    hub.accept_branch(&arcs(&[s1, s2])).unwrap();
     assert_eq!(hub.tip_height(), Some(2));
     hub.hold_body(Arc::new(parked.clone()), false);
     let fork_status = hub
@@ -2018,7 +2090,7 @@ fn branch_reorg_reaccepts_on_the_new_tip() {
     let pad = reorg_pad();
     let branch = pad_branch(&pad, vec![vec![], vec![], vec![]]);
     assert_eq!(
-        pad.hub.accept_branch(&branch).unwrap(),
+        pad.hub.accept_branch(&arcs(&branch)).unwrap(),
         AcceptOutcome::Accepted {
             height: pad.fork + 3
         }
@@ -2048,7 +2120,7 @@ fn branch_reorg_tip_events_follow_the_reaccept() {
         (ev.height, mp.contains(&child))
     });
     let branch = pad_branch(&pad, vec![vec![], vec![], vec![]]);
-    pad.hub.accept_branch(&branch).unwrap();
+    pad.hub.accept_branch(&arcs(&branch)).unwrap();
     let (height, back) = seen.join().unwrap();
     assert_eq!(height, pad.fork + 1);
     assert!(back, "the child is back before the first tip event");
@@ -2111,7 +2183,7 @@ fn branch_reorg_drops_the_child_of_a_double_spent_parent() {
     let mut rival = mature_spend_tx(&pad.hub, 1);
     rival.output[0].value = Amount::from_sat(49_9998_0000);
     let branch = pad_branch(&pad, vec![vec![rival], vec![], vec![]]);
-    pad.hub.accept_branch(&branch).unwrap();
+    pad.hub.accept_branch(&arcs(&branch)).unwrap();
     assert!(!pad.mp.contains(&pad.parent.compute_txid()));
     assert!(!pad.mp.contains(&pad.child.compute_txid()));
     assert_eq!(pad.mp.orphan_count(), 0);
@@ -2136,7 +2208,7 @@ fn branch_reorg_restore_puts_the_prefix_back() {
     );
     let branch = pad_branch(&pad, vec![vec![side.clone()], vec![bad], vec![]]);
     pad.hub
-        .accept_branch(&branch)
+        .accept_branch(&arcs(&branch))
         .expect_err("the second block spends a missing coin");
     assert_eq!(pad.hub.tip_hash(), Some(old_tip));
     let mut events = Vec::new();
@@ -2181,7 +2253,7 @@ fn branch_on_the_tip_undone_by_a_fault_sends_one_reorg_event() {
     let mut tips = pad.hub.subscribe_tips();
     let err = pad
         .hub
-        .accept_branch(&[b1, b2])
+        .accept_branch(&arcs(&[b1, b2]))
         .expect_err("the second block faults");
     assert!(err.is_local_fault(), "{err}");
     assert_eq!(pad.hub.tip_hash(), Some(tip));
@@ -2212,7 +2284,7 @@ fn branch_reorg_whose_first_block_fails_sends_no_tip_event() {
     );
     let branch = pad_branch(&pad, vec![vec![bad], vec![], vec![]]);
     pad.hub
-        .accept_branch(&branch)
+        .accept_branch(&arcs(&branch))
         .expect_err("the first block spends a missing coin");
     assert_eq!(pad.hub.tip_hash(), Some(old_tip));
     assert!(tips.try_recv().is_err(), "no tip event");
@@ -2783,12 +2855,12 @@ fn archive_then_confirm_run_and_empty_paths() {
         NetError::UnknownParent
     ));
 
-    assert!(hub.accept_branch(&[]).is_err());
+    assert!(hub.accept_branch(&arcs(&[])).is_err());
     let b2 = mine(h1, 1_300_000_300, 2);
     let b3_bad = mine(BlockHash::from_byte_array([1u8; 32]), 1_300_000_400, 3);
-    assert!(hub.accept_branch(&[b2.clone(), b3_bad]).is_err());
+    assert!(hub.accept_branch(&arcs(&[b2.clone(), b3_bad])).is_err());
     assert!(matches!(
-        hub.accept_branch(std::slice::from_ref(&b2)).unwrap(),
+        hub.accept_branch(&arcs(std::slice::from_ref(&b2))).unwrap(),
         AcceptOutcome::Accepted { height: 2 }
     ));
 
@@ -3480,7 +3552,7 @@ fn most_work_reorg_depth16_and_invalid_mid_branch_restores_tip() {
         branch.push(b);
     }
     assert_eq!(branch.len(), 16);
-    let out = hub.accept_branch(&branch).unwrap();
+    let out = hub.accept_branch(&arcs(&branch)).unwrap();
     assert!(
         matches!(out, AcceptOutcome::Accepted { height: 18 }),
         "depth-16 reorg must accept, got {out:?}"
@@ -3493,7 +3565,7 @@ fn most_work_reorg_depth16_and_invalid_mid_branch_restores_tip() {
     let weak = mine(hub.tip_hash().unwrap(), t + 10, 19); // extends tip — Accepted
     let _ = weak;
     let weak_side = mine(fork_prev, t + 9000, 3);
-    let weak_out = hub.accept_branch(&[weak_side]).unwrap();
+    let weak_out = hub.accept_branch(&arcs(&[weak_side])).unwrap();
     assert!(
         matches!(weak_out, AcceptOutcome::IgnoredWeaker),
         "short side from old LCA must be weaker: {weak_out:?}"
@@ -3551,7 +3623,7 @@ fn most_work_reorg_depth16_and_invalid_mid_branch_restores_tip() {
     }
     assert_eq!(bad_branch.len(), 10);
     let err = hub
-        .accept_branch(&bad_branch)
+        .accept_branch(&arcs(&bad_branch))
         .expect_err("invalid mid-branch must fail connect");
     assert!(
         matches!(err, NetError::Consensus(_) | NetError::ConnectFailed { .. }),
@@ -3615,7 +3687,7 @@ fn most_work_reorg_depth99_tip_follow_capacity() {
     const {
         assert!(rbitcoin_net::peer::MAX_PENDING_BLOCKS_FOR_TEST >= 99);
     }
-    let out = hub.accept_branch(&branch).unwrap();
+    let out = hub.accept_branch(&arcs(&branch)).unwrap();
     assert!(
         matches!(out, AcceptOutcome::Accepted { height: 100 }),
         "99-block reorg must accept, got {out:?}"
@@ -3822,7 +3894,7 @@ fn invalid_held_child_does_not_poison_later_apply() {
 
     hub.note_invalid_block(good.block_hash());
     let err = hub
-        .accept_branch(&[side.clone(), good.clone()])
+        .accept_branch(&arcs(&[side.clone(), good.clone()]))
         .expect_err("invalidated tip must not apply");
     match err {
         NetError::Consensus(s) => {
@@ -6127,4 +6199,9 @@ fn dropped_generate_still_commits_mined_txids() {
             tokio::task::yield_now().await;
         }
     });
+}
+
+/// Share test bodies the way the hub shares a held one.
+fn arcs(blocks: &[bitcoin::Block]) -> Vec<std::sync::Arc<bitcoin::Block>> {
+    blocks.iter().cloned().map(std::sync::Arc::new).collect()
 }

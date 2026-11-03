@@ -2357,7 +2357,7 @@ async fn reorg_to_longer_branch() {
         branch.push(b);
     }
 
-    let outcome = hub.accept_branch(&branch).unwrap();
+    let outcome = hub.accept_branch(&arcs(&branch)).unwrap();
     assert!(matches!(outcome, AcceptOutcome::Accepted { height: 6 }));
     assert_eq!(hub.tip_height(), Some(6));
     assert_eq!(hub.tip_hash().unwrap(), branch.last().unwrap().block_hash());
@@ -2510,7 +2510,7 @@ fn badprev_orphan_does_not_blacklist_then_reorg_reconstructs() {
         "orphan body is held, not permanent-blacklist"
     );
 
-    let outcome = hub.accept_branch(&winner).unwrap();
+    let outcome = hub.accept_branch(&arcs(&winner)).unwrap();
     assert!(matches!(outcome, AcceptOutcome::Accepted { height: 3 }));
     assert_eq!(hub.tip_height(), Some(3));
     assert_eq!(hub.tip_hash().unwrap(), w3.block_hash());
@@ -2619,7 +2619,7 @@ fn pin_competing_spend_extends_without_multi_fail(
         branch.push(b);
     }
 
-    let outcome = hub.accept_branch(&branch).unwrap();
+    let outcome = hub.accept_branch(&arcs(&branch)).unwrap();
     match outcome {
         AcceptOutcome::Accepted { height } => {
             assert_eq!(height, fork_h + 3, "reorg should land at fork_h+3");
@@ -2818,7 +2818,7 @@ fn pin_side_weaker_and_unknown_parent(hub: &rbitcoin_net::ChainHub) {
     let err = hub.accept_block(side.clone()).unwrap_err();
     assert!(matches!(err, NetError::SideBlock), "{err}");
     assert!(matches!(
-        hub.accept_branch(&[side]).unwrap(),
+        hub.accept_branch(&arcs(&[side])).unwrap(),
         AcceptOutcome::IgnoredWeaker
     ));
 
@@ -2956,7 +2956,7 @@ fn reorg_same_height_then_multi_block_branch() {
         t = b.header.time;
         branch.push(b);
     }
-    let o = hub.accept_branch(&branch).unwrap();
+    let o = hub.accept_branch(&arcs(&branch)).unwrap();
     match o {
         AcceptOutcome::Accepted { height } => {
             assert_eq!(height, hi, "multi-block reorg to {hi}");
@@ -3675,4 +3675,9 @@ async fn mocktime_generate_keeps_ponging_peer() {
     tokio::time::timeout(wall, fut)
         .await
         .unwrap_or_else(|_| panic!("mocktime_generate_keeps_ponging_peer wall timeout ({wall:?})"));
+}
+
+/// Share test bodies the way the hub shares a held one.
+fn arcs(blocks: &[bitcoin::Block]) -> Vec<std::sync::Arc<bitcoin::Block>> {
+    blocks.iter().cloned().map(std::sync::Arc::new).collect()
 }
