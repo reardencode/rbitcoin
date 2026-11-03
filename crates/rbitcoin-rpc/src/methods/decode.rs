@@ -1,20 +1,21 @@
 use super::*;
-use bitcoin::address::AddressType;
-use bitcoin::consensus::deserialize;
+use bitcoin::address::{AddressType, NetworkUnchecked};
 use bitcoin::{Address, ScriptBuf};
-use std::str::FromStr;
 
 pub fn decoderawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexstring", "iswitness"])?;
     let hex = params.req_str(0, "hexstring")?;
-    let force_witness = params.opt_bool(1, "iswitness")?;
-    let raw = rbitcoin_primitives::hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed"))?;
-    if force_witness == Some(false) && raw.len() >= 6 && raw[4] == 0x00 && raw[5] == 0x01 {
-        return Err(rpc_error(ERR_DESERIALIZATION, "TX decode failed"));
-    }
-    let tx: Transaction =
-        deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed"))?;
+    let iswitness = params.opt_bool(1, "iswitness")?;
+    let tx = rbitcoin_primitives::hex_decode(hex)
+        .ok()
+        .and_then(|raw| {
+            rbitcoin_consensus::wire::decode_tx(
+                &raw,
+                iswitness != Some(true),
+                iswitness != Some(false),
+            )
+        })
+        .ok_or_else(|| rpc_error(ERR_DESERIALIZATION, "TX decode failed"))?;
     Ok(tx_to_json(&tx, None, rpc_btc_network(ctx.network)))
 }
 
@@ -29,12 +30,21 @@ pub fn decodescript(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value
     ))
 }
 
+/// Core `DecodeDestination`. Core `DecodeBase58` skips leading and trailing
+/// whitespace (`IsSpace`), so a base58 address may carry it. Bech32 may not.
+pub fn parse_address(s: &str) -> Option<Address<NetworkUnchecked>> {
+    let base58 = s.trim_matches([' ', '\x0c', '\n', '\r', '\t', '\x0b']);
+    if base58.len() != s.len() && bitcoin::base58::decode_check(base58).is_ok() {
+        return base58.parse().ok();
+    }
+    s.parse().ok()
+}
+
 pub fn validateaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["address"])?;
     let s = params.req_str(0, "address")?;
-    let parsed = match Address::from_str(s) {
-        Ok(a) => a,
-        Err(_) => return Ok(json!({ "isvalid": false })),
+    let Some(parsed) = parse_address(s) else {
+        return Ok(json!({ "isvalid": false }));
     };
     let addr = match parsed.require_network(rpc_btc_network(ctx.network)) {
         Ok(a) => a,

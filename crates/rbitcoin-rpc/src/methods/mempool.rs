@@ -984,7 +984,7 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         _ => opt_maxfeerate_sat_kvb(params, 1)?,
     };
     let max_burn = opt_maxburn_sat(params, 2)?;
-    let tx = decode_tx_hex(hex)?;
+    let tx = decode_sendraw_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .as_ref()
@@ -1021,7 +1021,7 @@ pub async fn sendrawtransaction_async(
         _ => opt_maxfeerate_sat_kvb(params, 1)?,
     };
     let max_burn = opt_maxburn_sat(params, 2)?;
-    let tx = decode_tx_hex(hex)?;
+    let tx = decode_sendraw_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .clone()
@@ -1214,7 +1214,7 @@ pub fn testmempoolaccept(ctx: &RpcContext, params: &RpcParams) -> Result<Value, 
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "rawtx hex required"))?;
-        decoded.push(decode_tx_hex(hex)?);
+        decoded.push(decode_package_tx_hex(hex)?);
     }
     if let Some(rows) = testmempoolaccept_package_precheck(mp, &decoded) {
         return Ok(rows);
@@ -1244,7 +1244,7 @@ pub async fn testmempoolaccept_async(
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "rawtx hex required"))?;
-        decoded.push(decode_tx_hex(hex)?);
+        decoded.push(decode_package_tx_hex(hex)?);
     }
     let mp_c = Arc::clone(&mp);
     let decoded_c = decoded.clone();
@@ -2044,7 +2044,7 @@ pub fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_tx_hex(hex)?);
+        txs.push(decode_package_tx_hex(hex)?);
     }
     if let Some(done) = submitpackage_screen(ctx, mp, &txs, max_feerate, max_burn)? {
         return Ok(done);
@@ -2081,7 +2081,7 @@ pub async fn submitpackage_async(
         let hex = v
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
-        txs.push(decode_tx_hex(hex)?);
+        txs.push(decode_package_tx_hex(hex)?);
     }
     let ctx_s = Arc::clone(ctx);
     let mp_s = Arc::clone(&mp);

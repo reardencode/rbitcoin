@@ -1,6 +1,6 @@
 use super::descriptor::{bare_multisig, infer_descriptor, p2pk_key};
 use super::*;
-use bitcoin::consensus::{deserialize, encode::serialize_hex};
+use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash;
 use bitcoin::key::PublicKey;
 use bitcoin::script::Builder;
@@ -115,7 +115,7 @@ pub fn is_p2anchor(script: &bitcoin::Script) -> bool {
 
 pub fn decode_output_script(ctx: &RpcContext, s: &str) -> Result<ScriptBuf, Value> {
     let btc_net = rpc_btc_network(ctx.network);
-    if let Ok(a) = s.parse::<Address<_>>() {
+    if let Some(a) = parse_address(s) {
         match a.require_network(btc_net) {
             Ok(addr) => return Ok(addr.script_pubkey()),
             Err(_) => {
@@ -289,8 +289,8 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
                 }
             }
             match decode_tx_hex(s) {
-                Ok(tx) => extra.push(tx),
-                Err(_) => {
+                Some(tx) => extra.push(tx),
+                None => {
                     return Err(rpc_error(
                         ERR_DESERIALIZATION,
                         format!(
@@ -372,8 +372,8 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
                 }
             }
             match decode_tx_hex(s) {
-                Ok(tx) => extra.push(tx),
-                Err(_) => {
+                Some(tx) => extra.push(tx),
+                None => {
                     return Err(rpc_error(
                         ERR_DESERIALIZATION,
                         format!(
@@ -501,7 +501,7 @@ pub fn parse_generateblock_output(ctx: &RpcContext, output: &str) -> Result<Scri
         return Err(invalid());
     }
     let btc_net = rpc_btc_network(ctx.network);
-    if let Ok(a) = output.parse::<Address<_>>() {
+    if let Some(a) = parse_address(output) {
         if let Ok(addr) = a.require_network(btc_net) {
             return Ok(addr.script_pubkey());
         }
@@ -1232,10 +1232,7 @@ pub fn gbt_proposal(
         .and_then(|o| o.get("data"))
         .and_then(Value::as_str)
         .ok_or_else(|| rpc_error(ERR_TYPE_ERROR, "Missing data String key for proposal"))?;
-    let raw = rbitcoin_primitives::hex_decode(data)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-    let block: Block =
-        deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let block = decode_block_hex(data)?;
     if let Some(known) = proposal_duplicate(ctx, &block.block_hash())? {
         return Ok(json!(known));
     }
@@ -1960,11 +1957,7 @@ pub fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
 
 pub fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexdata", "dummy"])?;
-    let hex = params.req_str(0, "hexdata")?;
-    let raw = rbitcoin_primitives::hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-    let block: Block =
-        deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let block = decode_block_hex(params.req_str(0, "hexdata")?)?;
     let outcome = if let Some(chain) = ctx.chain.as_ref() {
         submit_received_block(chain, block)
     } else if let Some(miner) = ctx.regtest.as_deref() {
@@ -1983,10 +1976,7 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
     };
     let chain_prep = std::sync::Arc::clone(&chain);
     let prepared = rbitcoin_net::off_pool_budgeted(move || -> Result<SubmitPrep, Value> {
-        let raw = rbitcoin_primitives::hex_decode(&hex)
-            .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-        let block: Block =
-            deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+        let block = decode_block_hex(&hex)?;
         Ok(prepare_submit(&chain_prep, block))
     })
     .await?;
@@ -2007,10 +1997,39 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
     submit_outcome_json(outcome)
 }
 
-pub fn decode_tx_hex(hex: &str) -> Result<Transaction, Value> {
-    let b = rbitcoin_primitives::hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))?;
-    deserialize(&b).map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))
+/// Core `DecodeHexBlk` for `submitblock` and proposals.
+pub fn decode_block_hex(hex: &str) -> Result<Block, Value> {
+    rbitcoin_primitives::hex_decode(hex)
+        .ok()
+        .and_then(|raw| rbitcoin_consensus::wire::decode_block(&raw).ok())
+        .ok_or_else(|| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))
+}
+
+/// Core `DecodeHexTx` with its defaults: the witness form only. Each caller
+/// words the failure as Core's method does.
+pub fn decode_tx_hex(hex: &str) -> Option<Transaction> {
+    let raw = rbitcoin_primitives::hex_decode(hex).ok()?;
+    rbitcoin_consensus::wire::decode_tx(&raw, false, true)
+}
+
+/// Core `sendrawtransaction` decode failure.
+pub fn decode_sendraw_tx_hex(hex: &str) -> Result<Transaction, Value> {
+    decode_tx_hex(hex).ok_or_else(|| {
+        rpc_error(
+            ERR_DESERIALIZATION,
+            "TX decode failed. Make sure the tx has at least one input.",
+        )
+    })
+}
+
+/// Core `testmempoolaccept` and `submitpackage` decode failure.
+pub fn decode_package_tx_hex(hex: &str) -> Result<Transaction, Value> {
+    decode_tx_hex(hex).ok_or_else(|| {
+        rpc_error(
+            ERR_DESERIALIZATION,
+            format!("TX decode failed: {hex} Make sure the tx has at least one input."),
+        )
+    })
 }
 
 pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -> Value {

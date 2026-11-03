@@ -16,8 +16,23 @@ fn best_hash(ctx: &RpcContext) -> Value {
     dispatch(ctx, "getbestblockhash", vec![]).unwrap()
 }
 
+/// Core's bytes for `block`. rust-bitcoin writes a tx with no inputs in the
+/// witness form, which Core reads as a superfluous witness record. A tx with
+/// no inputs and no outputs is written as Core's null tx (flags 0) instead.
 fn block_hex(block: &Block) -> String {
-    rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(block))
+    use bitcoin::consensus::encode::{serialize, VarInt};
+    let mut bytes = serialize(&block.header);
+    bytes.extend(serialize(&VarInt(block.txdata.len() as u64)));
+    for tx in &block.txdata {
+        if tx.input.is_empty() && tx.output.is_empty() {
+            bytes.extend(serialize(&tx.version));
+            bytes.extend([0, 0]);
+            bytes.extend(serialize(&tx.lock_time));
+        } else {
+            bytes.extend(serialize(tx));
+        }
+    }
+    rbitcoin_primitives::hex_encode(bytes)
 }
 
 fn tx_hex(tx: &Transaction) -> String {
@@ -96,7 +111,99 @@ fn rpc_regtest_from_genesis() {
     chain_ops_submit_tx_shape(&ctx, &hub, &p2wpkh);
     chain_ops_echo_overlap(&ctx);
     chain_ops_reconsider_invalidated_side_block(&ctx, &hub);
+    chain_ops_decode_acceptance(&ctx, &hub);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bytes Core's decoders accept and refuse: `DecodeHexTx` tries the witness
+/// and legacy forms, `DecodeHexBlk` ignores trailing bytes, and a base58
+/// address may carry leading and trailing whitespace.
+fn chain_ops_decode_acceptance(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    let decode = |hex: &str, iswitness: Option<bool>| {
+        let mut params = vec![json!(hex)];
+        params.extend(iswitness.map(|w| json!(w)));
+        dispatch(ctx, "decoderawtransaction", params)
+    };
+    let null = decode(NULL_TX_HEX, None).unwrap();
+    assert_eq!((null["vin"].clone(), null["vout"].clone()), (json!([]), json!([])));
+    let output_only = decode(OUTPUT_ONLY_TX_HEX, None).unwrap();
+    assert_eq!(output_only["vin"], json!([]), "{output_only}");
+    assert_eq!(output_only["vout"][0]["scriptPubKey"]["hex"], "51");
+    assert!(decode(OUTPUT_ONLY_TX_HEX, Some(false)).is_ok());
+    for (hex, iswitness) in [
+        (OUTPUT_ONLY_TX_HEX, Some(true)),
+        (SUPERFLUOUS_WITNESS_TX_HEX, None),
+        (SUPERFLUOUS_WITNESS_TX_HEX, Some(true)),
+        (SUPERFLUOUS_WITNESS_TX_HEX, Some(false)),
+    ] {
+        let e = decode(hex, iswitness).unwrap_err();
+        assert_eq!(e["message"], "TX decode failed", "{hex} {iswitness:?}: {e}");
+    }
+
+    let submit = |hex: String| dispatch(ctx, "submitblock", vec![json!(hex)]);
+    let next = |txdata: Vec<Transaction>| {
+        let tip = hub.tip_header().unwrap();
+        rbitcoin_consensus::mine_regtest_paying(
+            tip.block_hash(),
+            tip.time + 1,
+            tip_count(ctx) as u32 + 1,
+            true_spk(),
+            txdata,
+        )
+    };
+    let null_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let with_null = next(vec![null_tx]);
+    assert!(block_hex(&with_null).ends_with(NULL_TX_HEX));
+    assert_eq!(
+        submit(block_hex(&with_null)).unwrap(),
+        "bad-txns-vin-empty",
+        "a null tx decodes inside a block"
+    );
+    let rust_bitcoin_bytes =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&with_null));
+    let e = submit(rust_bitcoin_bytes).unwrap_err();
+    assert_eq!(e["message"], "Block decode failed", "superfluous witness record: {e}");
+    let honest = next(vec![]);
+    let mut superfluous = block_hex(&honest);
+    superfluous.replace_range(160..162, "02");
+    superfluous.push_str(SUPERFLUOUS_WITNESS_TX_HEX);
+    let e = submit(superfluous).unwrap_err();
+    assert_eq!(e["message"], "Block decode failed", "{e}");
+
+    let proposal = proposal_on_tip(ctx, vec![]);
+    let req = |hex: String| json!({"mode": "proposal", "data": hex, "rules": ["segwit"]});
+    let plain = dispatch(ctx, "getblocktemplate", vec![req(block_hex(&proposal))]).unwrap();
+    let trailing =
+        dispatch(ctx, "getblocktemplate", vec![req(format!("{}00ff", block_hex(&proposal)))])
+            .unwrap();
+    assert_eq!(trailing, plain, "a proposal ignores trailing bytes");
+    let before = tip_count(ctx);
+    let r = submit(format!("{}00ff", block_hex(&honest))).unwrap();
+    assert!(r.is_null(), "submitblock ignores trailing bytes: {r}");
+    assert_eq!(tip_count(ctx), before + 1);
+
+    let p2pkh = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([7; 20]),
+        BtcNetwork::Regtest,
+    )
+    .to_string();
+    let spaced = format!(" \t\x0b{p2pkh}\r\n\x0c ");
+    let valid = dispatch(ctx, "validateaddress", vec![json!(spaced.clone())]).unwrap();
+    assert_eq!(valid["isvalid"], true, "{valid}");
+    assert_eq!(valid["address"], json!(p2pkh));
+    let inner = dispatch(ctx, "validateaddress", vec![json!(format!("{p2pkh} x"))]).unwrap();
+    assert_eq!(inner, json!({"isvalid": false}));
+    let (bech32, _) = p2wpkh_regtest();
+    let padded = dispatch(ctx, "validateaddress", vec![json!(format!(" {bech32}"))]).unwrap();
+    assert_eq!(padded, json!({"isvalid": false}), "bech32 keeps no whitespace");
+    let mined = dispatch(ctx, "generatetoaddress", vec![json!(1), json!(spaced)]).unwrap();
+    assert_eq!(mined.as_array().map(Vec::len), Some(1), "{mined}");
+    assert_eq!(tip_count(ctx), before + 2);
 }
 
 /// Param, help, stop, and network-identity outcomes on the hub this journey
@@ -396,17 +503,54 @@ fn chain_ops_regtest_type_errors(ctx: &RpcContext) {
     }
 }
 
+/// Version 2, an empty vin, flags 0, locktime 0. Core's witness decode reads
+/// no vout after flags 0.
+const NULL_TX_HEX: &str = "02000000000000000000";
+/// Legacy bytes of a tx with no inputs and one 1000-sat output. The witness
+/// decode reads the output count as flags 1 and runs out of inputs.
+const OUTPUT_ONLY_TX_HEX: &str = "020000000001e803000000000000015100000000";
+/// Flags 1 then an empty vin: Core's "Superfluous witness record". The
+/// legacy decode does not consume these bytes either.
+const SUPERFLUOUS_WITNESS_TX_HEX: &str = "02000000000100010000000000000000015100000000";
+
+/// Core `DecodeHexTx` per surface: raw submits try the witness decode only
+/// and name the input in the error text.
 fn chain_ops_junk_tx_hex(ctx: &RpcContext) {
-    for (method, params) in [
-        ("sendrawtransaction", vec![json!("ff00baar")]),
-        ("testmempoolaccept", vec![json!(["ff00baar"])]),
-        ("submitpackage", vec![json!(["ff00baar"])]),
-        ("sendrawtransaction", vec![json!("00")]),
+    const SUFFIX: &str = "Make sure the tx has at least one input.";
+    for hex in [
+        "ff00baar",
+        "00",
+        OUTPUT_ONLY_TX_HEX,
+        SUPERFLUOUS_WITNESS_TX_HEX,
     ] {
-        let e = dispatch(ctx, method, params).unwrap_err();
-        assert_eq!(e["code"], ERR_DESERIALIZATION, "{method}: {e}");
-        assert_eq!(e["message"], json!("TX decode failed:"), "{method}: {e}");
+        for (method, params, want) in [
+            (
+                "sendrawtransaction",
+                vec![json!(hex)],
+                format!("TX decode failed. {SUFFIX}"),
+            ),
+            (
+                "testmempoolaccept",
+                vec![json!([hex])],
+                format!("TX decode failed: {hex} {SUFFIX}"),
+            ),
+            (
+                "submitpackage",
+                vec![json!([hex])],
+                format!("TX decode failed: {hex} {SUFFIX}"),
+            ),
+        ] {
+            let e = dispatch(ctx, method, params).unwrap_err();
+            assert_eq!(e["code"], ERR_DESERIALIZATION, "{method} {hex}: {e}");
+            assert_eq!(e["message"], json!(want), "{method} {hex}: {e}");
+        }
     }
+    // A null tx decodes, so it is refused by validation, not as a decode.
+    let e = dispatch(ctx, "sendrawtransaction", vec![json!(NULL_TX_HEX)]).unwrap_err();
+    assert_eq!(e["code"], ERR_VERIFY_REJECTED, "a null tx decodes: {e}");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([NULL_TX_HEX])]).unwrap();
+    assert_eq!(tma[0]["allowed"], false, "{tma}");
+    assert!(tma[0]["reject-reason"].is_string(), "{tma}");
 }
 
 fn chain_ops_network_identity(ctx: &RpcContext) {
@@ -1519,16 +1663,14 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     let mut young = mine(7);
     let cb = young.txdata[0].compute_txid();
     young.txdata.push(spend(OutPoint { txid: cb, vout: 0 }, 1));
-    // CheckTransaction rejects an empty vin before CheckTxInputs compares values.
+    // CheckTransaction rejects an empty vin before CheckTxInputs compares
+    // values. Core's bytes can carry an input-less tx only as a null tx.
     let mut no_vin = mine(8);
     no_vin.txdata.push(Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
         input: vec![],
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::new(),
-        }],
+        output: vec![],
     });
     // A confirmed coinbase is still immature here. CheckTxInputs reports that
     // before the value check, including when the outputs exceed the inputs.

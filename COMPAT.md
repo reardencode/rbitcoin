@@ -125,7 +125,11 @@ it fails on more than 65,535 txs (an absolute prefill index past that is then
 out of range and scored). A failed
 decode is dropped with no score, as Core swallows the exception, so
 `InitData`'s `MAX_BLOCK_TX_COUNT` (100,000) cap is never reached from the wire
-here either. We always
+here either. RPC raw transactions and blocks read prefilled-tx bytes with that
+same decoder ([`docs/rpc.md`](./docs/rpc.md)). P2P `tx`, `block`, and
+`blocktxn` still use rust-bitcoin's: a null tx there does not decode, and a
+flag-1 tx with an empty vin decodes and fails `bad-txns-vin-empty`. Both are
+invalid either way. We always
 log reconstruct fill sources and `fetched=` `blocktxn` bytes, and outbound
 `cmpct announce … prefill=N/bytes` when we send `cmpctblock` (tip announce or
 `MSG_CMPCT_BLOCK` getdata). **Sending** extra prefills (beyond coinbase) is on

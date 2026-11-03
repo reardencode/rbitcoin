@@ -27,7 +27,6 @@ crates/rbitcoin-query/src/scripthash.rs	3
 crates/rbitcoin-query/src/testutil.rs	3
 crates/rbitcoin-query/src/versionbits.rs	2
 crates/rbitcoin-rpc/src/methods/chain.rs	2
-crates/rbitcoin-rpc/src/methods/decode.rs	2
 crates/rbitcoin-rpc/src/methods/descriptor.rs	6
 crates/rbitcoin-rpc/src/methods/mine.rs	1
 crates/rbitcoin-rpc/src/methods/net.rs	2
