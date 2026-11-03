@@ -236,6 +236,36 @@ impl Store {
         seal.store(self.path())
     }
 
+    /// Drop a confirmed tip that advanced past the last barrier seal, or a
+    /// sealed-height tip whose header is not the sealed hash.
+    fn clamp_to_tip_seal(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+        report: &mut TipRevalidateReport,
+    ) -> Result<(), StoreError> {
+        let Some(seal) = TipSeal::load(self.path())? else {
+            return Ok(());
+        };
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(());
+        };
+        if tip.0 > seal.tip_height {
+            return self.shrink_tip_to(write, Some(seal.tip_height), report);
+        }
+        if tip.0 < seal.tip_height {
+            return Ok(());
+        }
+        let Some(fk) = self.confirmed.get(tip)? else {
+            return Ok(());
+        };
+        match self.headers.get(fk) {
+            Ok(rec) if rec.hash != seal.tip_hash => {
+                self.shrink_tip_to(write, tip.0.checked_sub(1), report)
+            }
+            _ => Ok(()),
+        }
+    }
+
     #[doc(hidden)]
     pub fn effective_checkblocks(&self, n: u32) -> Result<u32, StoreError> {
         // A missing marker is not "durable through nothing". Heights below the
@@ -277,24 +307,7 @@ impl Store {
             eprintln!("rbitcoin: trimmed {trimmed} trailing null confirmed[] slots");
         }
 
-        // Soft seal: clamp confirmed tip that advanced without a complete seal write.
-        if let Some(seal) = TipSeal::load(self.path())? {
-            if let Some(tip) = self.confirmed.tip_height() {
-                if tip.0 > seal.tip_height {
-                    // Unsealed extension past last barrier seal — drop to sealed tip.
-                    self.shrink_tip_to(&write, Some(seal.tip_height), &mut report)?;
-                } else if tip.0 == seal.tip_height {
-                    if let Some(fk) = self.confirmed.get(tip)? {
-                        if let Ok(rec) = self.headers.get(fk) {
-                            if rec.hash != seal.tip_hash {
-                                let lg = tip.0.checked_sub(1);
-                                self.shrink_tip_to(&write, lg, &mut report)?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.clamp_to_tip_seal(&write, &mut report)?;
 
         let Some(tip) = self.confirmed.tip_height() else {
             report.tip_before = report.tip_before.or(None);
