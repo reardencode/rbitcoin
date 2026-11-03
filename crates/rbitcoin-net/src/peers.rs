@@ -1623,6 +1623,8 @@ pub struct PeerHub {
     /// One stored permit when an addr-fetch reply is learned, so tip-follow
     /// can dial a book that was empty at catch-up.
     addrfetch_learned: Notify,
+    /// Catch-up has seen an empty book and is about to wait for a row.
+    dial_parked: Notify,
     /// Network P2P port used when a remembered host omits `:port`. `0` = unset.
     pub connect_default_port: AtomicU16,
     pub dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
@@ -1790,6 +1792,7 @@ impl PeerHub {
             dials_in_flight: Arc::new(Mutex::new(HashMap::new())),
             addrfetch_replies: AtomicU64::new(0),
             addrfetch_learned: Notify::new(),
+            dial_parked: Notify::new(),
             connect_default_port: AtomicU16::new(0),
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
@@ -2053,6 +2056,18 @@ impl PeerHub {
     /// Tip-follow dials a book that was empty at catch-up.
     pub fn addrfetch_learned(&self) -> &Notify {
         &self.addrfetch_learned
+    }
+
+    /// Catch-up is parked on an empty book. The wait, not the dial target.
+    #[doc(hidden)]
+    pub fn note_dial_parked(&self) {
+        self.dial_parked.notify_one();
+    }
+
+    /// Wakes once catch-up is inside the empty-book wait.
+    #[doc(hidden)]
+    pub fn dial_parked(&self) -> &Notify {
+        &self.dial_parked
     }
 
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
