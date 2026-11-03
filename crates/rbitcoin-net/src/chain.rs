@@ -1984,6 +1984,7 @@ impl ChainHub {
         header: &Header,
         height: u32,
         mtp: u32,
+        parent_time: u32,
         expected: CompactTarget,
     ) -> Result<(), NetError> {
         soften_parent_header(query, header, height, || {
@@ -1992,6 +1993,7 @@ impl ChainHub {
                 Height(height),
                 header,
                 mtp,
+                parent_time,
                 expected,
                 header.block_hash().to_byte_array(),
             )
@@ -2039,6 +2041,7 @@ impl ChainHub {
                 header,
                 parent_height.saturating_add(1),
                 mtp,
+                parent.time,
                 expected,
             )
         })
@@ -2176,11 +2179,11 @@ impl ChainHub {
         let first = self
             .header_along_off_tip(parent, parent_height, first_h, in_batch)
             .ok_or_else(|| NetError::Consensus("missing retarget first header".into()))?;
-        let timespan = u64::from(parent.time.saturating_sub(first.time));
-        Ok(CompactTarget::from_next_work_required(
+        Ok(rbitcoin_consensus::header::retarget_bits(
+            &self.params,
             parent.bits,
-            timespan,
-            &self.params.btc,
+            parent.time,
+            rbitcoin_consensus::PeriodFirst::of(&first),
         ))
     }
 
@@ -3678,6 +3681,7 @@ impl ChainHub {
                                     Height(height),
                                     &b.header,
                                     mtp,
+                                    parent.time,
                                     expected,
                                     hash.to_byte_array(),
                                 )
@@ -4801,6 +4805,7 @@ pub fn check_block_proposal_with(
         height,
         expected_bits: expected,
         mtp,
+        parent_time: tip_rec.timestamp,
         now,
     };
     proposal_header_checks(params, header)?;
@@ -4858,6 +4863,7 @@ struct ProposalHeader<'a> {
     height: u32,
     expected_bits: u32,
     mtp: u32,
+    parent_time: u32,
     now: u32,
 }
 
@@ -4867,6 +4873,7 @@ fn proposal_header_checks(params: &ChainParams, header: ProposalHeader<'_>) -> R
         height,
         expected_bits,
         mtp,
+        parent_time,
         now,
     } = header;
     if block.header.bits.to_consensus() != expected_bits {
@@ -4877,6 +4884,14 @@ fn proposal_header_checks(params: &ChainParams, header: ProposalHeader<'_>) -> R
     // (new MTP often equals that stamp on an incrementing cache).
     if block.header.time < mtp {
         return Err("time-too-old".into());
+    }
+    if let Err(e) = rbitcoin_consensus::header::check_timewarp(
+        params,
+        Height(height),
+        parent_time,
+        &block.header,
+    ) {
+        return Err(rbitcoin_consensus::block_reject_reason(&e));
     }
     if let Err(e) = rbitcoin_consensus::with_now(u64::from(now), || {
         rbitcoin_consensus::header::check_header_version_and_future_time(

@@ -1044,7 +1044,9 @@ fn expected_bits(
     let prev = &chain[(height - 1) as usize].header;
     let interval = params.difficulty_adjustment_interval();
     let first = if interval > 0 && height.is_multiple_of(interval) && !params.no_pow_retargeting() {
-        Some(chain[(height - interval) as usize].header.time)
+        Some(rbitcoin_consensus::PeriodFirst::of(
+            &chain[(height - interval) as usize].header,
+        ))
     } else {
         None
     };

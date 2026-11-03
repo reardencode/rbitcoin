@@ -123,7 +123,9 @@ pub use block::{
 };
 pub use clock::{with_now, NodeClock};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
-pub use header::{check_header, next_work_bits, validate_header_on_parent, ParentHeader};
+pub use header::{
+    check_header, next_work_bits, validate_header_on_parent, ParentHeader, PeriodFirst,
+};
 pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher, TxidMap, TxidSet};
 pub use milestone::{Milestone, MilestoneAnchor};
 pub use params::{

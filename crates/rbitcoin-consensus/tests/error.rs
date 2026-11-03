@@ -123,6 +123,7 @@ fn trust_reason_class() {
         ConsensusError::BadHeader("empty median time"),
         ConsensusError::BadHeader("time-too-old"),
         ConsensusError::BadHeader("time-too-new"),
+        ConsensusError::BadHeader("time-timewarp-attack"),
         ConsensusError::BadBlock("bip34 height encoding"),
         ConsensusError::BadBlock("bip34 coinbase script empty"),
         ConsensusError::BadBlock("bad-blk-sigops"),

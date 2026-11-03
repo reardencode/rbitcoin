@@ -3134,6 +3134,7 @@ pub fn batch_context_ok(
             rbitcoin_primitives::Height(height),
             hdr,
             mtp,
+            parent.time,
             bits,
             hash.to_byte_array(),
         ) {
@@ -3187,18 +3188,18 @@ pub fn expected_lookahead_bits(
         parent.bits,
         parent.time,
         header_time,
-        period_first_time(hub, height, st, diff),
+        period_first(hub, height, st, diff),
         |h| lookahead_bits_at(diff, st, hub, h),
     )
 }
 
 #[doc(hidden)]
-pub fn period_first_time(
+pub fn period_first(
     hub: &ChainHub,
     height: u32,
     st: &IbdWorkState,
     diff: &DiffSnap,
-) -> Option<u32> {
+) -> Option<rbitcoin_consensus::PeriodFirst> {
     let params = &hub.params;
     let interval = params.difficulty_adjustment_interval();
     if interval == 0 || !height.is_multiple_of(interval) || params.no_pow_retargeting() {
@@ -3212,7 +3213,7 @@ pub fn period_first_time(
     };
     first
         .or_else(|| header_on_store(st, hub, start_h))
-        .map(|h| h.time)
+        .map(|h| rbitcoin_consensus::PeriodFirst::of(&h))
 }
 
 #[doc(hidden)]

@@ -4,7 +4,7 @@ use crate::ConfirmError;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::CompactTarget;
-use rbitcoin_consensus::header::{check_header, next_work_bits, ParentHeader};
+use rbitcoin_consensus::header::{check_header, next_work_bits, ParentHeader, PeriodFirst};
 use rbitcoin_consensus::ChainParams;
 use rbitcoin_primitives::Height;
 
@@ -50,7 +50,7 @@ pub fn validate_header_hashed(
         Vec::new()
     };
     let period_first = if parent.is_some() {
-        period_first_time(query, params, height.0)?
+        period_first(query, params, height.0)?
     } else {
         None
     };
@@ -185,7 +185,7 @@ pub fn expected_next_bits(
     let (_fk, prev_rec) =
         rbitcoin_consensus::block::require_linked_parent(query.header_at_height(prev_height)?)?;
     let prev_bits = CompactTarget::from_consensus(prev_rec.bits);
-    let period_first = period_first_time(query, params, height.0)?;
+    let period_first = period_first(query, params, height.0)?;
     rbitcoin_consensus::block::require_next_work(next_work_bits(
         params,
         height.0,
@@ -204,21 +204,23 @@ pub fn expected_next_bits(
 
 /// Difficulty for the header at `height`, from the parent and the period start.
 ///
-/// `period_first_time` is the timestamp of the header at `height - interval`
-/// when `height` is a retarget boundary. `bits_at` supplies earlier `nBits`
-/// for the testnet min-difficulty walk. `None` means an ancestor is missing.
-pub fn period_first_time(
+/// The header at `height - interval` when `height` is a retarget boundary.
+/// `None` off a boundary, without retargeting, or when that header is missing.
+pub fn period_first(
     query: &Query,
     params: &ChainParams,
     height: u32,
-) -> Result<Option<u32>, ConfirmError> {
+) -> Result<Option<PeriodFirst>, ConfirmError> {
     let interval = params.difficulty_adjustment_interval();
     if interval == 0 || !height.is_multiple_of(interval) || params.no_pow_retargeting() {
         return Ok(None);
     }
     Ok(query
         .header_at_height(Height(height - interval))?
-        .map(|(_fk, first_rec)| first_rec.timestamp))
+        .map(|(_fk, first_rec)| PeriodFirst {
+            time: first_rec.timestamp,
+            bits: CompactTarget::from_consensus(first_rec.bits),
+        }))
 }
 
 pub fn header_bits_at(query: &Query, height: Height) -> Result<u32, ConfirmError> {
