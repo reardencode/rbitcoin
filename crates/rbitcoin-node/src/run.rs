@@ -20,10 +20,11 @@ use rbitcoin_rpc::{
 };
 use rbitcoin_store::StoreError;
 use rbitcoin_sv2::{run_sv2_tp, Sv2TpConfig, Sv2TpHandle};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Notify};
 
@@ -2218,8 +2219,31 @@ where
     })
 }
 
-// Bound TCP address, including the kernel port when the configured port was 0.
-// Unix Esplora's placeholder `127.0.0.1:0` is not a listener and is skipped.
+fn listener_addr_path(datadir: &Path, name: &str) -> PathBuf {
+    datadir.join("run").join(format!("{name}.addr"))
+}
+
+fn listener_wakes() -> &'static Mutex<HashMap<PathBuf, Arc<Notify>>> {
+    static WAKES: OnceLock<Mutex<HashMap<PathBuf, Arc<Notify>>>> = OnceLock::new();
+    WAKES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn listener_addr_wake(path: &Path) -> Arc<Notify> {
+    let mut wakes = listener_wakes().lock().unwrap_or_else(|e| e.into_inner());
+    wakes
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Notify::new()))
+        .clone()
+}
+
+fn read_listener_addr(path: &Path) -> Option<SocketAddr> {
+    let addr: SocketAddr = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    (addr.port() != 0).then_some(addr)
+}
+
+/// Bound TCP address, including the kernel port when the configured port was 0.
+/// Unix Esplora's placeholder `127.0.0.1:0` is not a listener and is skipped.
+/// A same-process waiter blocked in [`wait_published_listener`] is woken.
 #[doc(hidden)]
 pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
     if addr.port() == 0 {
@@ -2230,7 +2254,7 @@ pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
         warn!("listener address {}: {e}", dir.display());
         return;
     }
-    let path = dir.join(format!("{name}.addr"));
+    let path = listener_addr_path(datadir, name);
     let tmp = dir.join(format!("{name}.addr.tmp"));
     if let Err(e) = std::fs::write(&tmp, format!("{addr}\n")) {
         warn!("listener address {}: {e}", tmp.display());
@@ -2238,6 +2262,38 @@ pub fn publish_listener_addr(datadir: &Path, name: &str, addr: SocketAddr) {
     }
     if let Err(e) = std::fs::rename(&tmp, &path) {
         warn!("listener address {}: {e}", path.display());
+        return;
+    }
+    if let Some(wake) = listener_wakes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&path)
+        .cloned()
+    {
+        wake.notify_waiters();
+    }
+}
+
+/// The address `run_p2p` published for `name`. Same-process publish wakes this.
+/// A child process has no shared wake, so the wait also retries until `wait`.
+#[doc(hidden)]
+pub async fn wait_published_listener(datadir: &Path, name: &str, wait: Duration) -> SocketAddr {
+    let path = listener_addr_path(datadir, name);
+    let wake = listener_addr_wake(&path);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let notified = wake.notified();
+        if let Some(addr) = read_listener_addr(&path) {
+            return addr;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{name} listener not up at {}", path.display());
+        }
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
     }
 }
 
@@ -3102,4 +3158,35 @@ pub fn resolve_seednode(raw: &str, network: Network) -> Result<NetAddr, String> 
         ip,
         default_port(network),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_listener_addr_wakes_the_waiter() {
+        tokio::time::pause();
+        let dir =
+            std::env::temp_dir().join(format!("rbitcoin-listener-wake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_wait = dir.clone();
+        let wait = tokio::spawn(async move {
+            wait_published_listener(&dir_wait, "rpc", Duration::from_secs(2)).await
+        });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
+        publish_listener_addr(&dir, "rpc", addr);
+        tokio::task::yield_now().await;
+        let got = tokio::time::timeout(Duration::ZERO, wait).await;
+        tokio::time::resume();
+        let got = got
+            .expect("publish left the waiter on the file poll")
+            .expect("waiter");
+        assert_eq!(got, addr);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

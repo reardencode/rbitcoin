@@ -25,24 +25,7 @@ fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
 }
 
 async fn published_listener(datadir: &Path, name: &str) -> SocketAddr {
-    let path = datadir.join("run").join(format!("{name}.addr"));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(addr) = text.trim().parse::<SocketAddr>() {
-                if addr.port() != 0 {
-                    return addr;
-                }
-            }
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "bound {name} address was not published at {}",
-                path.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    rbitcoin_node::run::wait_published_listener(datadir, name, Duration::from_secs(20)).await
 }
 
 async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
