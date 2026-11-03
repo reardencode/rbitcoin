@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
   "label": "coverage",
-  "message": "91.82%",
+  "message": "91.81%",
   "color": "brightgreen",
-  "pct": 91.82,
-  "lh": 103178,
-  "lf": 112370,
+  "pct": 91.81,
+  "lh": 103896,
+  "lf": 113168,
   "gate": 91,
   "scope": "production",
-  "sha": "be7e22018779",
+  "sha": "0518d8d08c5f",
   "date": "2026-11-03",
   "crates": [
     {
@@ -19,27 +19,27 @@
     },
     {
       "name": "rbitcoin-consensus",
-      "lh": 6052,
-      "lf": 6236,
-      "pct": 97.05
+      "lh": 6070,
+      "lf": 6251,
+      "pct": 97.1
     },
     {
       "name": "rbitcoin-electrum",
-      "lh": 2824,
-      "lf": 3136,
-      "pct": 90.05
+      "lh": 2843,
+      "lf": 3153,
+      "pct": 90.17
     },
     {
       "name": "rbitcoin-esplora",
-      "lh": 3561,
-      "lf": 4060,
-      "pct": 87.71
+      "lh": 3692,
+      "lf": 4194,
+      "pct": 88.03
     },
     {
       "name": "rbitcoin-ibd",
-      "lh": 12525,
-      "lf": 13574,
-      "pct": 92.27
+      "lh": 12528,
+      "lf": 13583,
+      "pct": 92.23
     },
     {
       "name": "rbitcoin-log",
@@ -55,15 +55,15 @@
     },
     {
       "name": "rbitcoin-net",
-      "lh": 20328,
-      "lf": 21918,
-      "pct": 92.75
+      "lh": 20586,
+      "lf": 22184,
+      "pct": 92.8
     },
     {
       "name": "rbitcoin-node",
-      "lh": 4277,
-      "lf": 5179,
-      "pct": 82.58
+      "lh": 4327,
+      "lf": 5270,
+      "pct": 82.11
     },
     {
       "name": "rbitcoin-primitives",
@@ -73,21 +73,21 @@
     },
     {
       "name": "rbitcoin-query",
-      "lh": 15111,
-      "lf": 16408,
-      "pct": 92.1
+      "lh": 15194,
+      "lf": 16519,
+      "pct": 91.98
     },
     {
       "name": "rbitcoin-rpc",
-      "lh": 7046,
-      "lf": 7527,
-      "pct": 93.61
+      "lh": 7144,
+      "lf": 7621,
+      "pct": 93.74
     },
     {
       "name": "rbitcoin-store",
-      "lh": 24904,
-      "lf": 27423,
-      "pct": 90.81
+      "lh": 24962,
+      "lf": 27484,
+      "pct": 90.82
     },
     {
       "name": "rbitcoin-sv2",
