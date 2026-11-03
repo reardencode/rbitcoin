@@ -33,6 +33,7 @@ template_distribution_sv2 = { workspace = true }
 
 [dev-dependencies]
 rbitcoin-query = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "suite"
