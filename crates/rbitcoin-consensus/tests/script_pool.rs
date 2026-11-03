@@ -357,23 +357,26 @@ fn steal_publish_wakes_idle_workers() {
     wait_all_idle(n);
 
     let one = publish_waking(n, 1, vec![1u32]);
-    assert_eq!(idle_waiter_count(), n - 1, "the other workers stay parked");
+    // `publish_waking` returns when the unpark count matches. A worker that
+    // was already leaving `park` is still awake, so the idle count is short
+    // until that worker parks again. Passing here would flake the suite.
+    wait_until("the other workers stay parked", || {
+        idle_waiter_count() == n - 1
+    });
     one.finish().unwrap();
     wait_all_idle(n);
 
     let k = n.min(2);
     let many = publish_waking(n, k, (0..k as u32).collect());
-    assert_eq!(idle_waiter_count(), n - k);
+    wait_until("k workers stay up", || idle_waiter_count() == n - k);
     many.finish().unwrap();
     wait_all_idle(n);
 
     let chunks = n + 2;
     let wide = publish_waking(n, n, (0..chunks as u32).collect());
-    assert_eq!(
-        idle_waiter_count(),
-        0,
-        "no parked worker beside a queued chunk"
-    );
+    wait_until("no parked worker beside a queued chunk", || {
+        idle_waiter_count() == 0
+    });
     assert!(
         wide.wave().has_unclaimed(),
         "chunks remain after the pool is busy"
