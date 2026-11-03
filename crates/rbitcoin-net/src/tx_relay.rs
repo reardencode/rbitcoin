@@ -883,6 +883,12 @@ pub struct MempoolHub {
     pub isolated_broadcast: AtomicBool,
     /// Wakes the isolated loop when a local tx is queued for it.
     isolated_wake: tokio::sync::Notify,
+    /// One isolated-broadcast lap: skipped an unknown tx, blocked on a write,
+    /// or found no dial targets. The wait; the send or the skip is the assert.
+    isolated_skipped_unknown: AtomicU64,
+    isolated_lagged: AtomicU64,
+    isolated_no_targets: AtomicU64,
+    isolated_lap: tokio::sync::Notify,
     /// Wtxids re-admitted from a disconnected block. Core serves these
     /// even if this peer has not been INV'd yet (`mempool_reorg`).
     pub reorg_servable: Mutex<HashSet<Wtxid>>,
@@ -1005,6 +1011,27 @@ impl Drop for TemplateHold<'_> {
         }
         self.settle.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// One isolated-broadcast lap the loop can name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum IsolatedLap {
+    /// `get_tx` missed: the txid was never admitted, or it left before its turn.
+    SkippedUnknown,
+    /// The queue was past the backlog warn, or the live read blocked on a write.
+    Lagged,
+    /// AddrMan had no onion or IP target.
+    NoTargets,
+}
+
+/// [`MempoolHub::isolated_laps`] snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct IsolatedLapCounts {
+    pub skipped_unknown: u64,
+    pub lagged: u64,
+    pub no_targets: u64,
 }
 
 impl MempoolHub {
@@ -1132,6 +1159,10 @@ impl MempoolHub {
             local_origin: Mutex::new(LocalOrigin::default()),
             isolated_broadcast: AtomicBool::new(false),
             isolated_wake: tokio::sync::Notify::new(),
+            isolated_skipped_unknown: AtomicU64::new(0),
+            isolated_lagged: AtomicU64::new(0),
+            isolated_no_targets: AtomicU64::new(0),
+            isolated_lap: tokio::sync::Notify::new(),
             reorg_servable: Mutex::new(HashSet::new()),
             relay_seq: Mutex::new(HashMap::new()),
             wtxid_by_txid: Mutex::new(HashMap::new()),
@@ -2124,6 +2155,14 @@ impl MempoolHub {
 
     pub fn get_tx(&self, txid: &Txid) -> Option<Transaction> {
         self.lock_read().get_tx(txid).cloned()
+    }
+
+    /// The isolated loop's read cannot start. A held mempool write looks the
+    /// same as a missing tx to `try_read`, so the loop notes the block and
+    /// then waits in [`Self::get_tx`].
+    #[doc(hidden)]
+    pub fn isolated_read_blocked(&self) -> bool {
+        self.inner.try_read().is_err()
     }
 
     /// Session getdata: never parks. Busy write → `None` (notfound this round).
@@ -4628,6 +4667,35 @@ impl MempoolHub {
 
     pub fn set_isolated_broadcast(&self, on: bool) {
         self.isolated_broadcast.store(on, Ordering::Relaxed);
+    }
+
+    /// One finished isolated-broadcast lap. The counter is the wait.
+    #[doc(hidden)]
+    pub fn note_isolated_lap(&self, kind: IsolatedLap) {
+        let slot = match kind {
+            IsolatedLap::SkippedUnknown => &self.isolated_skipped_unknown,
+            IsolatedLap::Lagged => &self.isolated_lagged,
+            IsolatedLap::NoTargets => &self.isolated_no_targets,
+        };
+        slot.fetch_add(1, Ordering::Release);
+        self.isolated_lap.notify_one();
+    }
+
+    /// How many isolated-broadcast laps of each kind have finished.
+    #[doc(hidden)]
+    pub fn isolated_laps(&self) -> IsolatedLapCounts {
+        IsolatedLapCounts {
+            skipped_unknown: self.isolated_skipped_unknown.load(Ordering::Acquire),
+            lagged: self.isolated_lagged.load(Ordering::Acquire),
+            no_targets: self.isolated_no_targets.load(Ordering::Acquire),
+        }
+    }
+
+    /// Wakes after [`Self::note_isolated_lap`]. A permit sticks if the waiter
+    /// has not armed yet.
+    #[doc(hidden)]
+    pub fn isolated_lap_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.isolated_lap.notified()
     }
 
     pub fn isolated_broadcast(&self) -> bool {
