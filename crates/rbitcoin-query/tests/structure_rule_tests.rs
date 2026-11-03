@@ -3600,7 +3600,7 @@ fn assemble_without_pres_sums_zero_and_rejects_over_max() {
     );
     assert!(matches!(
         rbitcoin_consensus::block::assemble_tx_value_out(&one(max_money + 1), 0, None),
-        Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"))
+        Err(ConsensusError::BadTx("bad-txns-vout-toolarge"))
     ));
 }
 

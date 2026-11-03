@@ -167,19 +167,6 @@ fn vsize_fee_zero_and_libre_gates() {
         PolicyResult::NonStandard("coinbase")
     );
 
-    let mut no_in = bare_tx(1);
-    no_in.input.clear();
-    assert_eq!(
-        check_libre_admission(&no_in, 1000, 100),
-        PolicyResult::NonStandard("no inputs")
-    );
-    let mut no_out = bare_tx(1);
-    no_out.output.clear();
-    assert_eq!(
-        check_libre_admission(&no_out, 1000, 100),
-        PolicyResult::NonStandard("no outputs")
-    );
-
     // Weight cap. The exact maximum is still standard.
     let tx = bare_tx(1);
     assert!(check_libre_shape(&tx, MAX_STANDARD_TX_WEIGHT).is_standard());

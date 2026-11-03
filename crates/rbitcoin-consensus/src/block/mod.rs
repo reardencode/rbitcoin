@@ -62,6 +62,8 @@ pub const MIN_TX_WEIGHT: u64 = 10 * 4;
 /// Most transactions a valid block can contain.
 pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usize;
 
+/// Core `CheckTransaction` in Core's order, except duplicate inputs: a block
+/// checks those for every transaction before its coinbase layout.
 pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
     if tx.input.is_empty() {
         return Err(ConsensusError::BadTx("no inputs"));
@@ -72,6 +74,7 @@ pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), Consensu
     if base_size > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadTx("bad-txns-oversize"));
     }
+    tx_value_out(tx)?;
     if tx.is_coinbase() {
         return Ok(());
     }
@@ -263,19 +266,6 @@ pub fn validate_block_structure_with_pres(
     // height 1 this rejects mainnet block 1.
     if ctx.enforce_height_gates && ctx.params.bip34_active_at(ctx.height.0) {
         check_bip34_coinbase(&block.txdata[0], ctx.height.0)?;
-    }
-
-    // Money-range gate on the precompute path. `assemble_tx_value_out` applies
-    // the same per-output check when a tx has no precompute row.
-    for (tx, p) in block.txdata.iter().zip(pres.iter()) {
-        for o in &tx.output {
-            if exceeds_max_money(o.value.to_sat()) {
-                return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));
-            }
-        }
-        if exceeds_max_money(p.out_sum) {
-            return Err(ConsensusError::BadBlock("bad-txns-txouttotal-toolarge"));
-        }
     }
 
     {
@@ -1214,6 +1204,28 @@ pub fn exceeds_max_money(sats: u64) -> bool {
     sats > Amount::MAX_MONEY.to_sat()
 }
 
+/// Core `CheckTransaction` output walk: each value in wire order is
+/// `bad-txns-vout-negative`, then `bad-txns-vout-toolarge`, then the running
+/// sum is `bad-txns-txouttotal-toolarge`. The wire amount is a signed 64-bit
+/// value, which rust-bitcoin reads as `u64`.
+pub fn tx_value_out(tx: &Transaction) -> Result<i64, ConsensusError> {
+    let mut value_out = 0i64;
+    for o in &tx.output {
+        let sats = o.value.to_sat();
+        if sats > i64::MAX as u64 {
+            return Err(ConsensusError::BadTx("bad-txns-vout-negative"));
+        }
+        if exceeds_max_money(sats) {
+            return Err(ConsensusError::BadTx("bad-txns-vout-toolarge"));
+        }
+        value_out += sats as i64;
+        if exceeds_max_money(value_out as u64) {
+            return Err(ConsensusError::BadTx("bad-txns-txouttotal-toolarge"));
+        }
+    }
+    Ok(value_out)
+}
+
 /// Signed satoshis for an `out_sum` that already passed [`exceeds_max_money`].
 #[inline]
 pub fn money_range_out_sum(out_sum: u64) -> i64 {
@@ -1231,19 +1243,7 @@ pub fn assemble_tx_value_out(
 ) -> Result<i64, ConsensusError> {
     match pres.and_then(|p| p.get(ti)) {
         Some(p) => Ok(money_range_out_sum(p.out_sum)),
-        None => {
-            let mut value_out = 0i64;
-            for o in &tx.output {
-                let sats_u = o.value.to_sat();
-                if exceeds_max_money(sats_u) {
-                    return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));
-                }
-                value_out = value_out
-                    .checked_add(sats_u as i64)
-                    .ok_or(ConsensusError::BadTx("value out overflow"))?;
-            }
-            Ok(value_out)
-        }
+        None => tx_value_out(tx),
     }
 }
 

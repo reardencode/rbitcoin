@@ -2091,6 +2091,38 @@ fn chain_ops_submit_tx_shape(
     regrind(&mut sum);
     assert_eq!(submit(&sum), "bad-txns-txouttotal-toolarge");
 
+    // A wire amount is a signed 64-bit value. Core CheckTransaction walks the
+    // outputs in order: negative, then over MAX_MONEY, then the running sum.
+    let negative = Amount::from_sat(u64::MAX);
+    let with_outputs = |values: &[Amount]| {
+        let mut block = next(vec![]);
+        block.txdata[0].output = values
+            .iter()
+            .map(|&value| TxOut {
+                value,
+                script_pubkey: p2wpkh.clone(),
+            })
+            .collect();
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        regrind(&mut block);
+        block
+    };
+    assert_eq!(submit(&with_outputs(&[negative])), "bad-txns-vout-negative");
+    let max = Amount::MAX_MONEY;
+    assert_eq!(
+        submit(&with_outputs(&[max, max, negative])),
+        "bad-txns-txouttotal-toolarge",
+        "the running sum fails before the later negative output"
+    );
+    let negative_spend = bare(vec![tx_in(op)], vec![TxOut {
+        value: negative,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }]);
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_spend)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
+    let e = dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&negative_spend))]).unwrap_err();
+    assert_eq!(e["message"], "bad-txns-vout-negative", "{e}");
+
     let spend = bare(
         vec![tx_in(OutPoint {
             txid: Txid::from_byte_array([9; 32]),

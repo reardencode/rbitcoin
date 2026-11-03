@@ -165,12 +165,6 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     }) {
         return PolicyResult::NonStandard("scriptpubkey");
     }
-    if tx.input.is_empty() {
-        return PolicyResult::NonStandard("no inputs");
-    }
-    if tx.output.is_empty() {
-        return PolicyResult::NonStandard("no outputs");
-    }
     if zero_value_spendable_is_dust(tx) {
         return PolicyResult::NonStandard("dust");
     }
