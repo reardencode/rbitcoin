@@ -130,6 +130,32 @@ fn lane_permit_take_does_not_publish_wait_seen() {
     worker.join().expect("job");
 }
 
+/// A permit must not park the worker inside `run_on_tip_accept_async`.
+/// The caller's timeout has to run while the permit is still held, and the
+/// job must not have entered the lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_permit_wait_does_not_block_the_async_worker() {
+    use std::time::Duration;
+
+    let permit = LanePermit::take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let task = tokio::spawn(async move {
+        let timed_out = tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+            .await
+            .is_err();
+        tx.send(timed_out).ok();
+    });
+    let reported = rx.recv_timeout(Duration::from_millis(800));
+    let finished_while_held = matches!(reported, Ok(true));
+    drop(permit);
+    let _ = rx.recv_timeout(Duration::from_secs(2));
+    task.await.expect("task");
+    assert!(
+        finished_while_held,
+        "the async entry blocked a worker in the permit wait; the caller's timeout did not run"
+    );
+}
+
 /// Drop on the taking thread clears `LANE_HELD` there. Drop on another
 /// thread must not leave that take exempt for a later full-queue test.
 #[test]
