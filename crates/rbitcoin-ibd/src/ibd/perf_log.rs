@@ -26,7 +26,8 @@
 //!   load OS-thread wall. Load thread also does pack decode, leftover stamp
 //!   (plan=None / S0 only), clone, post-stamp prune on a marked last load
 //!   batch, and a stamp or pin reject's rewind of the wave
-//!   (`load_thr pack/stamp/pin/asm/prune`). `reject=` is a lone block's
+//!   (`load_thr pack/stamp/pin/asm/prune`). `reject=` is a load reject's wait
+//!   for the batches below it, and a lone block's
 //!   missing-parent check after a stamp miss: the wait for its parent to be
 //!   the tip with `tx.head` holding every connected create, one TipOnly
 //!   read, and on a miss a `txid.body` scan of every unsealed `tx.head`
@@ -352,7 +353,8 @@ pub struct IbdPerfSample {
     pub thr_load_pin_ms: u64,
     pub thr_load_asm_ms: u64,
     pub thr_load_prune_ms: u64,
-    /// A lone block's missing-parent check after its load stamp missed.
+    /// A load reject's wait for the batches below it, and a lone block's
+    /// missing-parent check after its load stamp missed.
     pub thr_load_reject_ms: u64,
     pub thr_load_send_wait_ms: u64,
     pub script_jobs: u64,
