@@ -26,6 +26,12 @@ Push the entry up. Prefer the surface a real session uses over an in-process dis
 
 A small unit is faster to land. It also freezes behavior a real node never exhibits, and later work has to preserve that accident. Assert what changes the result for a real user, peer, or operator. That includes rare real cases: a lagged subscriber, a pruned witness, a cap that returns an RPC error while ping still works. It does not include an internal shape no session can hit.
 
+### Waits
+
+A test waits on a signal the production path already publishes: the tip, the template generation, the stop bit, or a semaphore the server acquires. The assert is what a session sees after that wake: the tip, a peer row, the template. A counter, a park note, or a thread-local that exists only so the test can see a thread park is not that signal. Add one only when the production path itself was polling and the wake replaces that poll.
+
+A deadline stays a clock. The 50 ms session heartbeat, the two-minute RPC long-poll cap, and a process that holds a bound port until the parent kills it are clocks. They are not the condition the test is waiting for.
+
 ### Default CI is the pin
 
 Default `cargo test` owns operator- and peer-visible contracts (JSON-RPC,
