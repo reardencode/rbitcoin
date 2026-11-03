@@ -448,43 +448,62 @@ fn force_announce_picks_peers(
     }
 }
 
-async fn standing_echo_ends_the_private_broadcast(
+async fn returned_tx_ends_the_private_broadcast(
     hub: &rbitcoin_net::chain::ChainHub,
     peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
     heights: [u32; 2],
 ) {
-    use rbitcoin_net::peers::PeerConnType::OutboundFullRelay;
+    use rbitcoin_net::peers::PeerConnType::{BlockRelay, OutboundFullRelay};
     let mp = hub.mempool().unwrap();
     mp.set_isolated_broadcast(true);
     for (height, by_txid) in heights.into_iter().zip([false, true]) {
         let local = spend_coinbase(hub, height);
         let (txid, wtxid) = (local.compute_txid(), local.compute_wtxid());
-        let echo = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
-        let mut echo_rx = writer_of(&echo);
-        let other = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
-        let mut other_rx = writer_of(&other);
-        mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
-            .expect("local");
-        assert!(mp.skip_standing_inv(&txid));
-
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut follow = PeerFollowState::new();
         let item = if by_txid {
             Inventory::WitnessTransaction(txid)
         } else {
             Inventory::WTx(wtxid)
         };
-        push(hub, &out_tx, &mut follow, Some(echo.as_ref()), NetworkMessage::Inv(vec![item])).await;
+        let block_only = relay_peer(peers, [127, 0, 0, 1], BlockRelay);
+        let echo = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+        let other = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+        let mut other_rx = writer_of(&other);
+        mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
+            .expect("local");
+
+        let (block_out, mut block_rx) = mpsc::unbounded_channel();
+        let mut block_follow = PeerFollowState::new();
+        push(hub, &block_out, &mut block_follow, Some(block_only.as_ref()), NetworkMessage::Inv(vec![item])).await;
+        assert!(getdata_txs(&mut block_rx).is_empty(), "no getdata to a block-relay peer");
+        assert!(mp.is_local_origin(&txid));
+
+        let (echo_out, mut echo_rx) = mpsc::unbounded_channel();
+        let mut follow = PeerFollowState::new();
+        push(hub, &echo_out, &mut follow, Some(echo.as_ref()), NetworkMessage::Inv(vec![item])).await;
+        assert_eq!(getdata_txs(&mut echo_rx), vec![item], "ask the peer for our tx");
+        assert!(
+            mp.is_local_origin(&txid),
+            "an inv alone does not end the private broadcast"
+        );
+
+        push(hub, &echo_out, &mut follow, Some(echo.as_ref()), NetworkMessage::Tx(local.clone())).await;
         assert!(
             !mp.is_local_origin(&txid),
-            "a standing peer's inv must end the private broadcast ({item:?})"
+            "the tx coming back from a standing peer ends the private broadcast"
         );
-        assert_eq!(tx_invs(&mut other_rx), vec![wtxid]);
+        assert!(tx_invs(&mut other_rx).is_empty(), "no announce before the inv timer");
+        other.request_tx_inv();
+        let (due_out, mut due_rx) = mpsc::unbounded_channel();
+        queue_due_tx_invs(hub, other.as_ref(), &CappedSet::new(), &due_out);
+        assert!(tx_invs(&mut due_rx).contains(&wtxid), "announce on the next inv tick");
+        echo.request_tx_inv();
+        let (back_out, mut back_rx) = mpsc::unbounded_channel();
+        queue_due_tx_invs(hub, echo.as_ref(), &follow.from_this_peer, &back_out);
         assert!(
-            tx_invs(&mut echo_rx).is_empty(),
-            "the peer that announced it must not get it back ({item:?})"
+            !tx_invs(&mut back_rx).contains(&wtxid),
+            "the peer that sent it does not get it back"
         );
-        for s in [echo, other] {
+        for s in [block_only, echo, other] {
             peers.unregister(s.id);
         }
     }
@@ -798,7 +817,7 @@ fn peer_blocksonly_and_orphan_tx() {
         relay_on_inbound_age_gate(&hub, &peers, t0 + 100, 6..=21);
         getdata_until_announced_or_reorg(&hub, &peers, t0 + 200, [22, 23, 24, 25]).await;
         orphan_parks_then_asks_missing_parent(&hub, &peers, t0 + 600, 26).await;
-        standing_echo_ends_the_private_broadcast(&hub, &peers, [27, 28]).await;
+        returned_tx_ends_the_private_broadcast(&hub, &peers, [27, 28]).await;
 
         let _ = std::fs::remove_dir_all(dir);
     });

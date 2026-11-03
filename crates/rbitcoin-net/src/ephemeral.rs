@@ -172,6 +172,7 @@ pub fn spawn_isolated_broadcast_loop(
             // and this check never waits on the mempool lock.
             let in_pool = || mp.is_local_origin(&txid);
             isolated_broadcast_known_tx(&dialer, &addrman, magic, txid, tx, in_pool).await;
+            mp.isolated_sent(&txid);
         }
     })
 }
