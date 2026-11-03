@@ -40,6 +40,8 @@ where
                 config.conf_path = Some(cp.clone());
             }
             apply_operator_kvs(&mut config, parsed.kvs)?;
+            config.hot_digest = parsed.hot_digest;
+            config.assumehot = parse_assumehot(parsed.assumehot_from, parsed.assumehot)?;
             finish_operator_config(config, parsed.smoke, parsed.log_level_cli, env)
         }
     }
@@ -55,6 +57,9 @@ pub enum OperatorFlagEnd {
 #[doc(hidden)]
 pub struct ParsedOperatorFlags {
     pub smoke: bool,
+    pub hot_digest: bool,
+    pub assumehot_from: Option<PathBuf>,
+    pub assumehot: Option<String>,
     pub conf_path: Option<PathBuf>,
     pub log_level_cli: Option<Option<Level>>,
     pub kvs: Vec<(String, String)>,
@@ -64,6 +69,9 @@ pub struct ParsedOperatorFlags {
 pub fn parse_operator_flags(args: &[OsString]) -> Result<OperatorFlagEnd, ExitCode> {
     let mut i = 1usize;
     let mut smoke = false;
+    let mut hot_digest = false;
+    let mut assumehot_from: Option<PathBuf> = None;
+    let mut assumehot: Option<String> = None;
     let mut conf_path: Option<PathBuf> = None;
     let mut log_level_cli: Option<Option<Level>> = None;
     let mut kvs: Vec<(String, String)> = Vec::new();
@@ -83,6 +91,18 @@ pub fn parse_operator_flags(args: &[OsString]) -> Result<OperatorFlagEnd, ExitCo
                 smoke = true;
                 i += 1;
             }
+            "--hot-digest" => {
+                hot_digest = true;
+                i += 1;
+            }
+            "--assumehot-from" => match take_arg(args, &mut i, "--assumehot-from") {
+                Ok(v) => assumehot_from = Some(PathBuf::from(v)),
+                Err(c) => return Err(c),
+            },
+            "--assumehot" => match take_arg(args, &mut i, "--assumehot") {
+                Ok(v) => assumehot = Some(v),
+                Err(c) => return Err(c),
+            },
             "--conf" => match take_arg(args, &mut i, "--conf") {
                 Ok(v) => conf_path = Some(PathBuf::from(v)),
                 Err(c) => return Err(c),
@@ -119,6 +139,9 @@ pub fn parse_operator_flags(args: &[OsString]) -> Result<OperatorFlagEnd, ExitCo
     }
     Ok(OperatorFlagEnd::Flags(ParsedOperatorFlags {
         smoke,
+        hot_digest,
+        assumehot_from,
+        assumehot,
         conf_path,
         log_level_cli,
         kvs,
@@ -286,6 +309,10 @@ where
         return ExitCode::FAILURE;
     }
 
+    if config.hot_digest {
+        return hot_digest_main(config);
+    }
+
     if config.smoke {
         config.head_scale = HeadScale::Tiny;
         match run_node(config) {
@@ -332,6 +359,85 @@ where
     }
 }
 
+/// `--assumehot-from` / `--assumehot`: both or neither, and the hash is the
+/// 64-hex digest field that `--hot-digest` prints. CLI only: a conf line
+/// would import again on every start.
+fn parse_assumehot(
+    from: Option<PathBuf>,
+    hash: Option<String>,
+) -> Result<Option<(PathBuf, [u8; 32])>, ExitCode> {
+    match (from, hash) {
+        (None, None) => Ok(None),
+        (Some(_), None) => {
+            eprintln!("error: --assumehot-from requires --assumehot HASH");
+            Err(ExitCode::from(2))
+        }
+        (None, Some(_)) => {
+            eprintln!("error: --assumehot requires --assumehot-from DATADIR");
+            Err(ExitCode::from(2))
+        }
+        (Some(from), Some(hash)) => {
+            match rbitcoin_primitives::hex::decode(&hash).map(<[u8; 32]>::try_from) {
+                Ok(Ok(digest)) => Ok(Some((from, digest))),
+                _ => {
+                    eprintln!(
+                        "error: --assumehot must be 64 hex digits (the digest --hot-digest prints)"
+                    );
+                    Err(ExitCode::from(2))
+                }
+            }
+        }
+    }
+}
+
+/// `--hot-digest`: open the store, print [`hot_digest_line`], exit. An empty
+/// store has no digest and exits 1.
+fn hot_digest_main(config: NodeConfig) -> ExitCode {
+    let network = config.network;
+    let handle = match run_node(config) {
+        Ok(handle) => handle,
+        Err(e) => {
+            print_run_err(&e);
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = match handle.query.hot_digest() {
+        Ok(Some(d)) => {
+            println!("{}", hot_digest_line(network, &d));
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            eprintln!("hot-digest: store is empty");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            error!("hot-digest: {e}");
+            ExitCode::FAILURE
+        }
+    };
+    if let Err(e) = handle.shutdown() {
+        error!("shutdown error: {e}");
+        return ExitCode::FAILURE;
+    }
+    code
+}
+
+/// `network height blockhash digest`: the tip hash in display (reversed)
+/// order, the digest as plain lower hex.
+pub fn hot_digest_line(
+    network: rbitcoin_primitives::Network,
+    d: &rbitcoin_query::hot_digest::HotDigest,
+) -> String {
+    use rbitcoin_primitives::hex;
+    format!(
+        "{} {} {} {}",
+        network.as_str(),
+        d.height,
+        hex::display_hash_hex(d.tip_hash),
+        hex::encode(d.digest),
+    )
+}
+
 #[doc(hidden)]
 pub fn operator_usage() -> String {
     format!(
@@ -356,7 +462,7 @@ pub fn operator_usage() -> String {
     [--min-chain-work HEX] [--max-tip-age SECS] [--check-blocks N] [--mock-time UNIX] \\\n\
     [--block-version N] [--block-min-tx-fee BTC] [--bytes-per-sigop N] [--block-reserved-sigops N] [--alert-notify CMD] [--startup-notify CMD] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] \\\n\
-    [--no-seeds] [--no-listen] [--no-discover] [--listen-onion] [--cjdns-reachable] [--smoke] [--inhibit-suspend]\n\n\
+    [--no-seeds] [--no-listen] [--no-discover] [--listen-onion] [--cjdns-reachable] [--smoke] [--hot-digest] [--assumehot-from DATADIR --assumehot HASH] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest.\n\
 Custom Signet: --signet-challenge HEX [--signet-block-time SECS].\n\
 Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG / RUST_LOG).\n\
@@ -368,6 +474,10 @@ Milestone: skip script/sig checks at/below HEIGHT.\n\
   (skip only on that header path, and only when header work meets that network's min chain work),\n\
   signet 0, regtest 0. Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
 Check-blocks: --check-blocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
+Hot digest: --hot-digest prints `network height tiphash digest` for this store and exits.\n\
+Assumehot: --assumehot-from DATADIR --assumehot HASH imports a cleanly stopped datadir's store into\n\
+  this empty one, on the first start only. HASH is the digest --hot-digest printed there. Each header\n\
+  and block body is checked and spends are recomputed; scripts are not run. CLI only (not conf).\n\
 Mempool: --mempool-size-mb (default 300 → 300e6 WU; N × 1_000_000 weight, not MiB).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 200; half for tx-relaying peers).\n\
 Trust-peer: --trust-peer ADDR (conf trustpeer=) dials only that address, the same grammar as --connect.\n\

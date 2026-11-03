@@ -184,10 +184,10 @@ impl ScriptHashHead {
             ));
         }
         let (occupied, occ_known) = if body <= OCC_SCAN_BYTE_CAP {
-            // Tiny heads: always walk slots so leftover pack8 Paged refuses on open.
-            let occ = scan_occupied(&file, slots)?;
-            let _ = store_occ_sidecar(file.path(), occ);
-            (occ, true)
+            // Tiny heads: always walk slots so leftover pack8 Paged refuses on
+            // open. The walk is the count, so the sidecar is not read here and
+            // the open does not rewrite it.
+            (scan_occupied(&file, slots)?, true)
         } else if let Some(occ) = load_occ_sidecar(file.path()) {
             (occ, true)
         } else {

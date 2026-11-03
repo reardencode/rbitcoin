@@ -59,6 +59,8 @@ pub mod connect_facade;
 pub mod convert;
 #[doc(hidden)]
 pub mod header_read;
+#[doc(hidden)]
+pub mod hot_digest;
 
 #[doc(hidden)]
 pub mod index_rows;
@@ -612,6 +614,33 @@ impl Query {
         if repaired > 0 {
             let _ = store.strong_tx.flush();
         }
+        let q = Self::from_store(store)?;
+        q.recover_sh_writebehind()?;
+        if let Some(t) = q
+            .sp_tweaks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            q.repair_sp_tweaks(t)?;
+        }
+        q.sweep_spill_at_or_below_pruneheight()?;
+        Ok(q)
+    }
+
+    /// Open a closed store to read it as an `--assumehot` source.
+    ///
+    /// Nothing is repaired or resized: no tip-window revalidation, no class C
+    /// repair, no index write-behind recovery, and the header head keeps the
+    /// file's slots ([`Store::open_source`]). The caller has checked that the
+    /// store is on the current schema and stopped cleanly; the import checks
+    /// every block it reads.
+    pub fn open_import_source(dir: &Path) -> Result<Self, QueryError> {
+        write_create_loc::clear();
+        Self::from_store(Store::open_source(dir)?)
+    }
+
+    fn from_store(store: Store) -> Result<Self, QueryError> {
         let store_path = store.path().to_path_buf();
         let index_dir = store.cold_files_dir().to_path_buf();
         let (sp_tweaks, sptweaks_origin) = if SpTweaksTable::files_present(&index_dir) {
@@ -707,16 +736,6 @@ impl Query {
             let _ = q.ensure_height_by_hash_index(tip);
         }
         q.seed_published_tip()?;
-        q.recover_sh_writebehind()?;
-        if let Some(t) = q
-            .sp_tweaks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            q.repair_sp_tweaks(t)?;
-        }
-        q.sweep_spill_at_or_below_pruneheight()?;
         Ok(q)
     }
 
