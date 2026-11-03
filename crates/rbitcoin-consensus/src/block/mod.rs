@@ -213,11 +213,14 @@ pub fn validate_block_structure_with_pres(
     // One set for the block. A one-input tx cannot repeat an outpoint, so it
     // does not allocate. Runs before the coinbase layout check: two null
     // coinbase inputs are `bad-txns-inputs-duplicate`, not "first tx not coinbase".
+    // Core CheckTransaction walks the outputs before the inputs, so a tx this
+    // scan reaches has its outputs walked here and again in `check_tx_local`.
     let mut block_outs: Option<crate::OutPointSet> = None;
     for tx in &block.txdata {
         if tx.input.len() < 2 {
             continue;
         }
+        tx_value_out(tx)?;
         let seen = block_outs.get_or_insert_with(|| {
             crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default())
         });

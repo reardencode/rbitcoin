@@ -2212,6 +2212,15 @@ fn chain_ops_submit_tx_shape(
     assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
     let e = dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&negative_spend))]).unwrap_err();
     assert_eq!(e["message"], "bad-txns-vout-negative", "{e}");
+    // Core CheckTransaction walks the outputs before the inputs, in a block
+    // and in the mempool alike.
+    let negative_dup = bare(vec![tx_in(op), tx_in(op)], vec![TxOut {
+        value: negative,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }]);
+    assert_eq!(submit(&next(vec![negative_dup.clone()])), "bad-txns-vout-negative");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_dup)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
 
     let spend = bare(
         vec![tx_in(OutPoint {
