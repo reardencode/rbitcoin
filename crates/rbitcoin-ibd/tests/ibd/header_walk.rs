@@ -5856,113 +5856,109 @@ fn a_lighter_fork_still_weighed_is_named_before_the_confirmed_tip() {
     );
 }
 
-/// A heavier chain forked at the confirmed tip is longer than one reply
-/// window, and its first window has less work than the candidate. It is kept
-/// as a lighter fork, and the next ask continues it from that fork's tip. Two
-/// real 2,000-header windows cost about 14 s in the dev profile, so this
-/// runs with `--ignored` (TESTING.md, opt-in IBD replays).
+/// A heavier chain forked at the confirmed tip needs another headers reply
+/// before it beats the candidate. A short first reply retires the peer.
+/// A full [`rbitcoin_net::codec::MAX_HEADERS_RESULTS`] window does not: that
+/// length is what [`settle_walk_peer`] reads, together with the fork's work
+/// having grown. The next locator names the fork ahead of the confirmed tip,
+/// so Core's first match continues it, and the rest of the chain becomes
+/// the candidate.
 #[test]
-#[ignore = "two full 2,000-header windows; run with --ignored"]
 fn a_heavier_fork_that_needs_a_second_window_continues_from_the_challenger() {
-    let window = rbitcoin_net::codec::MAX_HEADERS_RESULTS;
-    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("locator-second-window");
-    hub.ensure_genesis().unwrap();
-    let gen = hub.tip_hash().unwrap();
-    let mined = hub
-        .generate_to_script(
-            LOCATOR_FIXTURE_TIP,
-            bitcoin::ScriptBuf::from_bytes(vec![0x51]),
-            vec![],
-        )
-        .unwrap();
-    let confirmed: Vec<Header> = std::iter::once(gen)
-        .chain(mined)
-        .map(|hash| hub.header_of(&hash).expect("a mined header"))
-        .collect();
-    let tip = *confirmed.last().unwrap();
-    let (s0, mut rx) = slot(0);
-    let mut st = IbdWorkState::new(vec![s0], Some(tip.block_hash()), Some(LOCATOR_FIXTURE_TIP));
-    ensure_origin(&mut st, &hub);
-    assert!(send_getheaders(&mut st, &hub).unwrap());
-    let drain = |rx: &mut mpsc::UnboundedReceiver<PeerCmd>| while rx.try_recv().is_ok() {};
-    drain(&mut rx);
-    // The candidate: one window and a half above the confirmed tip.
-    let candidate = headers_on(tip, 1..=(window as u32 + 50));
-    apply(&mut st, &hub, 0, candidate[..window].to_vec());
-    apply(&mut st, &hub, 0, candidate[window..].to_vec());
-    let candidate_tip = candidate.last().unwrap().block_hash();
-    assert_eq!(st.header_walk.tip_hash(), Some(candidate_tip));
-    drain(&mut rx);
-    // Its queue drains, then a short guess above the confirmed tip is queued.
-    st.ordered.clear();
-    st.ordered_set.clear();
-    for height in LOCATOR_FIXTURE_TIP + 1..=LOCATOR_FIXTURE_TIP + window as u32 + 50 {
-        st.height_to_hash.remove(&height);
+    let mut f = WithheldCandidate::new("locator-second-window");
+    let tip = *f.confirmed.last().unwrap();
+    let candidate_tip = f.candidate[2].block_hash();
+    // The candidate stays the walk tip. The queue holds one unproved guess.
+    f.st.ordered.clear();
+    f.st.ordered_set.clear();
+    for (at, hdr) in f.candidate.iter().enumerate() {
+        let height = LOCATOR_FIXTURE_TIP + 1 + at as u32;
+        f.st.hash_height.remove(&hdr.block_hash());
+        f.st.height_to_hash.remove(&height);
     }
     let guess = mine_at(tip.block_hash(), 9999, tip.time + 40);
-    apply(&mut st, &hub, 0, vec![guess]);
-    assert!(st.ordered_set.contains(&guess.block_hash()));
-    drain(&mut rx);
-    // A heavier chain forked at the confirmed tip: one window does not beat
-    // the candidate, two do. Salts differ from the candidate's; times stay
-    // within the future limit.
-    let mut heavier = Vec::with_capacity(window + 100);
-    let mut prev = tip.block_hash();
-    for i in 0..(window as u32 + 100) {
-        let hdr = mine_at(prev, 10_000 + i, tip.time + 1 + i);
-        prev = hdr.block_hash();
-        heavier.push(hdr);
-    }
-    let peer_chain: Vec<Header> = confirmed.iter().chain(heavier.iter()).copied().collect();
-    let first_window_tip = heavier[window - 1].block_hash();
-    let heavier_tip = heavier.last().unwrap().block_hash();
+    apply(&mut f.st, &f.hub, 0, vec![guess]);
+    assert!(f.st.ordered_set.contains(&guess.block_hash()));
+    assert_eq!(f.st.header_walk.tip_hash(), Some(candidate_tip));
+    while f.rx.try_recv().is_ok() {}
+    release_lane(&mut f.st.header_walk.walk);
 
-    assert!(send_getheaders(&mut st, &hub).unwrap());
-    let first = core_reply(&peer_chain, &take_locator(&mut rx), window);
+    // Two headers have less work than the three-header candidate.
+    let fork = headers_on(tip, 11..=12);
+    let fork_tip = fork[1].block_hash();
+    let work_before = f.st.header_walk.challenger.as_ref().map(|ch| ch.tip.work);
+    apply(&mut f.st, &f.hub, 0, fork.clone());
     assert_eq!(
-        first.first().map(|hdr| hdr.prev_blockhash),
-        Some(tip.block_hash())
-    );
-    assert_eq!(first.len(), window);
-    apply(&mut st, &hub, 0, first);
-    assert_eq!(
-        st.header_walk.tip_hash(),
+        f.st.header_walk.tip_hash(),
         Some(candidate_tip),
-        "one window is lighter"
+        "the first reply is lighter"
     );
     assert_eq!(
-        st.header_walk
+        f.st.header_walk
             .challenger
             .as_ref()
             .and_then(|ch| ch.tip.hash),
-        Some(first_window_tip),
-        "the first window is kept as a lighter fork"
+        Some(fork_tip),
+        "the first reply is kept as a lighter fork"
     );
     assert!(
-        !st.header_walk.walk_quiet.contains(&0),
+        f.st.header_walk.walk_quiet.contains(&0),
+        "a short reply retires the peer"
+    );
+    while f.rx.try_recv().is_ok() {}
+
+    let tip_before = Some(candidate_tip);
+    let queued = f.st.ordered.len();
+    settle_walk_peer(&mut f.st, &f.hub, 0, tip_before, queued, work_before, 2);
+    assert!(
+        f.st.header_walk.walk_quiet.contains(&0),
+        "a short length still retires the peer"
+    );
+    settle_walk_peer(
+        &mut f.st,
+        &f.hub,
+        0,
+        tip_before,
+        queued,
+        work_before,
+        rbitcoin_net::codec::MAX_HEADERS_RESULTS,
+    );
+    assert!(
+        !f.st.header_walk.walk_quiet.contains(&0),
         "a full window keeps the peer"
     );
 
-    assert!(send_getheaders(&mut st, &hub).unwrap());
-    let locator = take_locator(&mut rx);
+    release_lane(&mut f.st.header_walk.walk);
+    assert!(send_getheaders(&mut f.st, &f.hub).unwrap());
+    let locator = take_locator(&mut f.rx);
     assert_eq!(
         locator[..2],
-        [guess.block_hash(), first_window_tip],
+        [guess.block_hash(), fork_tip],
         "the next ask continues the fork from its tip, ahead of the confirmed tip"
     );
-    let second = core_reply(&peer_chain, &locator, window);
+    // Two more headers give the fork more work than the candidate.
+    let rest = headers_on(fork[1], 13..=14);
+    let heavier_tip = rest[1].block_hash();
+    let peer_chain: Vec<Header> = f
+        .confirmed
+        .iter()
+        .chain(fork.iter())
+        .chain(rest.iter())
+        .copied()
+        .collect();
+    let second = core_reply(&peer_chain, &locator, rest.len());
     assert_eq!(
         second.first().map(|hdr| hdr.prev_blockhash),
-        Some(first_window_tip)
+        Some(fork_tip),
+        "Core answers after the fork tip, not from the confirmed tip again"
     );
-    assert_eq!(second.len(), 100);
-    apply(&mut st, &hub, 0, second);
+    apply(&mut f.st, &f.hub, 0, second);
     assert_eq!(
-        st.header_walk.tip_hash(),
+        f.st.header_walk.tip_hash(),
         Some(heavier_tip),
-        "the second window makes the fork the candidate"
+        "the second reply makes the fork the candidate"
     );
-    assert!(!st.header_walk.walk_quiet.contains(&0));
+    assert!(!f.st.header_walk.walk_quiet.contains(&0));
 }
 
 #[test]
