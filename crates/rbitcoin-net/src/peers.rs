@@ -439,6 +439,10 @@ pub struct LivePeer {
     pub version_timestamp: i64,
     /// VERSION protocol version (`0` on the connecting placeholder).
     pub version: u32,
+    /// Frames pushed onto this session's decode queue. Already-applied
+    /// frames stay counted, so a test can wait until the reader has taken
+    /// the bytes off the socket.
+    pub decode_enqueued: AtomicUsize,
 }
 
 #[cfg(target_os = "linux")]
@@ -504,6 +508,14 @@ impl LivePeer {
 
     pub fn raw_sent(&self) -> u64 {
         self.wire_load(|w| &w.sent)
+    }
+
+    pub fn decode_enqueued(&self) -> usize {
+        self.decode_enqueued.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_decode_enqueued(&self) {
+        self.decode_enqueued.fetch_add(1, Ordering::Release);
     }
 
     pub fn note_recv(&self, cmd: &str, nbytes: u64) {
@@ -2885,6 +2897,7 @@ impl PeerHub {
             next_local_addr_send: AtomicU64::new(0),
             version_timestamp: ver.timestamp,
             version: ver.version,
+            decode_enqueued: AtomicUsize::new(0),
         })
     }
 

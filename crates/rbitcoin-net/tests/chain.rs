@@ -53,6 +53,28 @@ fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("chain")
 }
 
+/// Height 101, built once. Each generate-commit case opens a private copy.
+fn generate_commit_pad() -> &'static rbitcoin_query::testutil::TempDir {
+    use std::sync::OnceLock;
+    static PAD: OnceLock<rbitcoin_query::testutil::TempDir> = OnceLock::new();
+    PAD.get_or_init(|| {
+        let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("generate-commit-pad");
+        hub.ensure_genesis().unwrap();
+        hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+        hub.query.flush().expect("flush generate-commit pad");
+        dir
+    })
+}
+
+fn open_generate_commit_hub(label: &str) -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+    let dir = rbitcoin_query::testutil::TempDir::labeled(label).expect(label);
+    rbitcoin_store::testutil::copy_store_tree(generate_commit_pad().path(), dir.path());
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.path()).expect("open generate copy");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    (dir, hub)
+}
+
 /// Two classifies of one announcement must not both ask. The claim is the
 /// check and the insert under one write lock.
 #[test]
@@ -5898,10 +5920,7 @@ fn connect_finishes_while_the_blocking_pool_is_parked() {
 /// Maintenance is off, so connect does not strip the tx itself.
 #[test]
 fn async_generate_commits_mined_txids_off_the_request_task() {
-    let (dir, hub) = tmp_hub();
-    hub.ensure_genesis().unwrap();
-    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
-        .unwrap();
+    let (dir, hub) = open_generate_commit_hub("generate-commit");
     let mp =
         rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
     assert!(
@@ -5945,10 +5964,7 @@ fn async_generate_commits_mined_txids_off_the_request_task() {
 /// that commit shares the generate task rather than the request.
 #[test]
 fn dropped_generate_still_commits_mined_txids() {
-    let (dir, hub) = tmp_hub();
-    hub.ensure_genesis().unwrap();
-    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
-        .unwrap();
+    let (dir, hub) = open_generate_commit_hub("generate-commit-drop");
     let mp =
         rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
     assert!(!mp.pool_maintained());

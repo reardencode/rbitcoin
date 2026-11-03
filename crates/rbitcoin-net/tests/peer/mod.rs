@@ -929,288 +929,290 @@ async fn queued_decode_holds_the_ping_timeout() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
-/// A ping that arrives while a block is still in `decode_q` must not send
-/// pong until that block has been applied.
+/// One peer, then the next, on a chain that is still at genesis. A block
+/// sitting in `decode_q` holds the ping behind it, still applies when
+/// disconnect wakes the session, does not take headers sync on the way out,
+/// and a heavy queue past the cap ends the session. Each beat waits until
+/// that peer's decode queue has taken the frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ping_behind_a_queued_block_does_not_pong_early() {
+async fn queued_decode_keeps_the_block_ahead_of_ping_and_disconnect() {
     use bitcoin::blockdata::constants::genesis_block;
-    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
-    use tokio::net::TcpListener;
+    use rbitcoin_net::chain::TipEvent;
+    use rbitcoin_net::v2::write_v2_msg;
 
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-queue-journey");
+    hub.ensure_genesis().unwrap();
+    let hub = hub.into_arc();
+    let mut held = hold_decode_permits().await;
+
+    // Tip announce runs before `-minimumchainwork` is raised. Disconnect
+    // closes the writer while the body is still queued.
+    {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        let mut s = open_decode_session(Arc::clone(&hub), &peers, 18461).await;
+        drain_startup(&mut s.reader, s.magic).await;
+        write_v2_msg(
+            &mut s.writer,
+            NetworkMessage::SendCmpct(SendCmpct {
+                send_compact: true,
+                version: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut block = genesis_block(Network::Regtest);
+        block.header.prev_blockhash = BlockHash::from_byte_array([0x11; 32]);
+        let hash = block.block_hash();
+        write_v2_msg(&mut s.writer, NetworkMessage::Block(block))
+            .await
+            .unwrap();
+        wait_decode_enqueued(&s.live, 1).await;
+        let tip_hash = hub.tip_hash().expect("genesis tip");
+        let header = hub.tip_header().expect("genesis header");
+        let _ = hub.tip_tx.send(TipEvent {
+            height: 0,
+            hash: tip_hash,
+            header,
+            reorg_branch_len: 0,
+        });
+        // The tip arm has no completion signal while the decode permit is held.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(peers.disconnect_id(s.live.id), "the peer is registered");
+        assert!(
+            !s.live.take_block_from_peer(&hash),
+            "the body stays queued while every decode permit is held"
+        );
+        drop(held);
+        wait_block_applied(&s.live, &hash).await;
+        s.session.abort();
+        held = hold_decode_permits().await;
+    }
+
+    hub.set_minimum_chain_work(Some([0xff; 32]));
+
+    // Ping stays behind the block. The same session then fills the heavy
+    // queue and the cap ends it.
+    {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        let mut s = open_decode_session(Arc::clone(&hub), &peers, 18462).await;
+        drain_startup(&mut s.reader, s.magic).await;
+        let nonce = 0x51a7_0001_u64;
+        write_v2_msg(
+            &mut s.writer,
+            NetworkMessage::Block(genesis_block(Network::Regtest)),
+        )
+        .await
+        .unwrap();
+        write_v2_msg(&mut s.writer, NetworkMessage::Ping(nonce))
+            .await
+            .unwrap();
+        wait_decode_enqueued(&s.live, 2).await;
+        assert_no_pong(&mut s.reader, s.magic, nonce).await;
+        drop(held);
+        wait_pong(&mut s.reader, s.magic, nonce).await;
+        held = hold_decode_permits().await;
+
+        let blocks = DECODE_Q_MAX_FRAMES + 1;
+        let genesis = genesis_block(Network::Regtest);
+        for _ in 0..blocks {
+            write_v2_msg(&mut s.writer, NetworkMessage::Block(genesis.clone()))
+                .await
+                .unwrap();
+        }
+        wait_decode_enqueued(&s.live, 2 + blocks).await;
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(8), s.session)
+            .await
+            .expect("a full heavy decode queue must end the session")
+            .expect("session join");
+        held = hold_decode_permits().await;
+    }
+
+    // disconnect_id applies a block already off the socket.
+    {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        let mut s = open_decode_session(Arc::clone(&hub), &peers, 18463).await;
+        drain_startup(&mut s.reader, s.magic).await;
+        let block = genesis_block(Network::Regtest);
+        let hash = block.block_hash();
+        let before = s.live.decode_enqueued();
+        write_v2_msg(&mut s.writer, NetworkMessage::Block(block))
+            .await
+            .unwrap();
+        wait_decode_enqueued(&s.live, before + 1).await;
+        assert!(peers.disconnect_id(s.live.id), "the peer is registered");
+        assert!(
+            !s.live.take_block_from_peer(&hash),
+            "the body stays queued while every decode permit is held"
+        );
+        drop(held);
+        wait_block_applied(&s.live, &hash).await;
+        s.session.abort();
+        held = hold_decode_permits().await;
+    }
+
+    // A ping queued behind that block must not take headers sync as the
+    // session drains.
+    {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        let mut s = open_decode_session(Arc::clone(&hub), &peers, 18464).await;
+        drain_startup(&mut s.reader, s.magic).await;
+        assert!(s.live.can_serve_blocks());
+        let before = s.live.decode_enqueued();
+        let block = genesis_block(Network::Regtest);
+        write_v2_msg(&mut s.writer, NetworkMessage::Block(block))
+            .await
+            .unwrap();
+        wait_decode_enqueued(&s.live, before + 1).await;
+        write_v2_msg(&mut s.writer, NetworkMessage::Ping(1))
+            .await
+            .unwrap();
+        wait_decode_enqueued(&s.live, before + 2).await;
+        let slots = peers.headers_sync_peers.load(Ordering::Relaxed);
+        let downloading = peers.peers_downloading_from.load(Ordering::Relaxed);
+        let started = s.live.is_sync_started();
+        let session_id = s.live.id;
+        assert!(peers.disconnect_id(s.live.id), "the peer is registered");
+        assert!(
+            peers.get(s.live.id).is_some(),
+            "disconnect hides the peer and leaves the row until the session ends"
+        );
+        assert_eq!(
+            s.live.is_sync_started(),
+            started,
+            "disconnect must not release headers sync"
+        );
+        assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), slots);
+        drop(held);
+        drop(s.writer);
+        tokio::time::timeout(Duration::from_secs(5), s.session)
+            .await
+            .expect("session drains")
+            .expect("session task");
+        assert_eq!(
+            s.live.is_sync_started(),
+            started,
+            "a queued ping must not start headers sync on the way out"
+        );
+        assert_eq!(
+            peers.headers_sync_peers.load(Ordering::Relaxed),
+            slots,
+            "the drain must not take a headers-sync slot"
+        );
+        assert_eq!(
+            peers.peers_downloading_from.load(Ordering::Relaxed),
+            downloading
+        );
+        peers.unregister(session_id);
+        assert!(
+            !s.live.is_sync_started(),
+            "the session unregister releases headers sync once"
+        );
+        assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), 0);
+        assert_eq!(peers.peers_downloading_from.load(Ordering::Relaxed), 0);
+    }
+
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+async fn hold_decode_permits() -> Vec<tokio::sync::OwnedSemaphorePermit> {
     let n = rbitcoin_net::block_decode_permits();
     let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
     let mut held = Vec::with_capacity(n);
     for _ in 0..n {
         held.push(sem.clone().acquire_owned().await.expect("decode permit"));
     }
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-ping-order");
-    hub.ensure_genesis().unwrap();
-    // Below `-minimumchainwork` the body is applied and skipped. A real
-    // accept would wait on the tip thread from this session task.
-    hub.set_minimum_chain_work(Some([0xff; 32]));
-    let magic = Magic::from(Network::Regtest);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client_magic = magic;
-    let client = tokio::spawn(async move {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        open_v2(stream, client_magic, false).await.unwrap()
-    });
-    let (server_stream, _) = listener.accept().await.unwrap();
-    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
-    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
-    let session = tokio::spawn(async move {
-        let _ = peer_session_with(
-            reader,
-            writer,
-            magic,
-            Arc::new(hub),
-            tip_rx,
-            FollowSessionMeta::default(),
-        )
-        .await;
-    });
-    let drain_startup = async {
-        while let Ok(Ok(_)) = tokio::time::timeout(
-            Duration::from_millis(40),
-            read_v2_frame(&mut c_reader, magic),
-        )
-        .await
-        {}
+    held
+}
+
+async fn wait_decode_enqueued(peer: &rbitcoin_net::peers::LivePeer, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while peer.decode_enqueued() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued {} decode frames, wanted {n}",
+            peer.decode_enqueued()
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn drain_startup(reader: &mut rbitcoin_net::v2::V2Reader, magic: Magic) {
+    use rbitcoin_net::v2::read_v2_frame;
+    let drain = async {
+        while let Ok(Ok(_)) =
+            tokio::time::timeout(Duration::from_millis(40), read_v2_frame(reader, magic)).await
+        {
+        }
     };
-    tokio::time::timeout(Duration::from_secs(2), drain_startup)
+    tokio::time::timeout(Duration::from_secs(2), drain)
         .await
         .expect("startup frames drain");
-    let nonce = 0x51a7_0001_u64;
-    write_v2_msg(
-        &mut c_writer,
-        NetworkMessage::Block(genesis_block(Network::Regtest)),
-    )
-    .await
-    .unwrap();
-    write_v2_msg(&mut c_writer, NetworkMessage::Ping(nonce))
-        .await
-        .unwrap();
-    let nonce_pong = |frame: &rbitcoin_net::codec::FramedMessage| {
-        frame.is_pong()
-            && frame.payload.len() >= 8
-            && u64::from_le_bytes(frame.payload[..8].try_into().unwrap()) == nonce
-    };
-    let early_deadline = std::time::Instant::now() + Duration::from_millis(300);
-    while std::time::Instant::now() < early_deadline {
-        let left = early_deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(left, read_v2_frame(&mut c_reader, magic)).await {
+}
+
+fn frame_is_pong(frame: &FramedMessage, nonce: u64) -> bool {
+    frame.is_pong()
+        && frame.payload.len() >= 8
+        && u64::from_le_bytes(frame.payload[..8].try_into().unwrap()) == nonce
+}
+
+async fn assert_no_pong(reader: &mut rbitcoin_net::v2::V2Reader, magic: Magic, nonce: u64) {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + Duration::from_millis(20);
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
             Ok(Ok(frame)) => assert!(
-                !nonce_pong(&frame),
+                !frame_is_pong(&frame, nonce),
                 "pong went out while the earlier block was still queued"
             ),
             _ => break,
         }
     }
-    drop(held);
-    let mut saw_pong = false;
-    let late_deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while std::time::Instant::now() < late_deadline {
-        let left = late_deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(left, read_v2_frame(&mut c_reader, magic)).await {
-            Ok(Ok(frame)) if nonce_pong(&frame) => {
-                saw_pong = true;
-                break;
-            }
+}
+
+async fn wait_pong(reader: &mut rbitcoin_net::v2::V2Reader, magic: Magic, nonce: u64) {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
+            Ok(Ok(frame)) if frame_is_pong(&frame, nonce) => return,
             Ok(Ok(_)) => {}
             _ => break,
         }
     }
-    assert!(
-        saw_pong,
-        "pong must follow the queued block once a decode permit is free"
-    );
-    session.abort();
-    let _ = std::fs::remove_dir_all(dir.path());
+    panic!("pong must follow the queued block once a decode permit is free");
 }
 
-/// A peer that keeps sending while every decode permit is held must not
-/// grow `decode_q` without a bound. Past the heavy-frame cap the session
-/// ends. Cheap frames are not in that cap.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn decode_queue_full_disconnects() {
-    use bitcoin::blockdata::constants::genesis_block;
-    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
-    use tokio::net::TcpListener;
-
-    let n = rbitcoin_net::block_decode_permits();
-    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
-    let mut held = Vec::with_capacity(n);
-    for _ in 0..n {
-        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
-    }
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-queue-cap");
-    hub.ensure_genesis().unwrap();
-    hub.set_minimum_chain_work(Some([0xff; 32]));
-    let magic = Magic::from(Network::Regtest);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client_magic = magic;
-    let client = tokio::spawn(async move {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        open_v2(stream, client_magic, false).await.unwrap()
-    });
-    let (server_stream, _) = listener.accept().await.unwrap();
-    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
-    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
-    let session = tokio::spawn(async move {
-        let _ = peer_session_with(
-            reader,
-            writer,
-            magic,
-            Arc::new(hub),
-            tip_rx,
-            FollowSessionMeta::default(),
-        )
-        .await;
-    });
-    let drain_startup = async {
-        while let Ok(Ok(_)) = tokio::time::timeout(
-            Duration::from_millis(40),
-            read_v2_frame(&mut c_reader, magic),
-        )
-        .await
-        {}
-    };
-    tokio::time::timeout(Duration::from_secs(2), drain_startup)
-        .await
-        .expect("startup frames drain");
-    let blocks = rbitcoin_net::peer::DECODE_Q_MAX_FRAMES + 1;
-    let genesis = genesis_block(Network::Regtest);
-    for _ in 0..blocks {
-        write_v2_msg(&mut c_writer, NetworkMessage::Block(genesis.clone()))
-            .await
-            .unwrap();
-    }
-    // Permits stay held until the reader has taken every body. Releasing
-    // them as the writes return lets the front decode finish and the rest
-    // of the burst apply without crossing the cap.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    drop(held);
-    tokio::time::timeout(Duration::from_secs(8), session)
-        .await
-        .expect("a full heavy decode queue must end the session")
-        .expect("session join");
-    let _ = std::fs::remove_dir_all(dir.path());
-}
-
-/// `disconnect_id` must not abort a session that still has a frame in
-/// `decode_q`. The body is applied once a decode permit is free.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disconnect_applies_a_block_already_queued() {
-    use bitcoin::blockdata::constants::genesis_block;
-    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
-    use tokio::net::TcpListener;
-
-    let n = rbitcoin_net::block_decode_permits();
-    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
-    let mut held = Vec::with_capacity(n);
-    for _ in 0..n {
-        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
-    }
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-disconnect");
-    hub.ensure_genesis().unwrap();
-    hub.set_minimum_chain_work(Some([0xff; 32]));
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    let live = outbound_test_peer(&peers, 18451);
-    let magic = Magic::from(Network::Regtest);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client_magic = magic;
-    let client = tokio::spawn(async move {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        open_v2(stream, client_magic, false).await.unwrap()
-    });
-    let (server_stream, _) = listener.accept().await.unwrap();
-    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
-    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
-    let session_peer = Arc::clone(&live);
-    let session = tokio::spawn(async move {
-        let _ = peer_session_with(
-            reader,
-            writer,
-            magic,
-            Arc::new(hub),
-            tip_rx,
-            FollowSessionMeta {
-                peer: Some(addr),
-                live: None,
-                session: Some(session_peer),
-            },
-        )
-        .await;
-    });
-    live.set_session_abort(session.abort_handle());
-    let drain_startup = async {
-        while let Ok(Ok(_)) = tokio::time::timeout(
-            Duration::from_millis(40),
-            read_v2_frame(&mut c_reader, magic),
-        )
-        .await
-        {}
-    };
-    tokio::time::timeout(Duration::from_secs(2), drain_startup)
-        .await
-        .expect("startup frames drain");
-    let block = genesis_block(Network::Regtest);
-    let hash = block.block_hash();
-    write_v2_msg(&mut c_writer, NetworkMessage::Block(block))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(peers.disconnect_id(live.id), "the peer is registered");
-    assert!(
-        !live.take_block_from_peer(&hash),
-        "the body stays queued while every decode permit is held"
-    );
-    drop(held);
+async fn wait_block_applied(peer: &rbitcoin_net::peers::LivePeer, hash: &BlockHash) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut applied = false;
     while std::time::Instant::now() < deadline {
-        if live.take_block_from_peer(&hash) {
-            applied = true;
-            break;
+        if peer.take_block_from_peer(hash) {
+            return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
-    assert!(
-        applied,
-        "disconnect must apply a block already taken off the socket"
-    );
-    let _ = std::fs::remove_dir_all(dir.path());
+    panic!("disconnect must apply a block already taken off the socket");
 }
 
-/// `disconnect_id` hides the peer and leaves headers-sync accounting to the
-/// session's final unregister. A ping queued behind a block must not take
-/// that slot on the way out: the second unregister would not release it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disconnect_drain_does_not_take_headers_sync() {
-    use bitcoin::blockdata::constants::genesis_block;
-    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
+struct DecodeSession {
+    live: Arc<rbitcoin_net::peers::LivePeer>,
+    reader: rbitcoin_net::v2::V2Reader,
+    writer: rbitcoin_net::v2::V2Writer,
+    session: tokio::task::JoinHandle<()>,
+    magic: Magic,
+}
+
+async fn open_decode_session(
+    hub: Arc<ChainHub>,
+    peers: &Arc<rbitcoin_net::peers::PeerHub>,
+    port: u16,
+) -> DecodeSession {
+    use rbitcoin_net::v2::open_v2;
     use tokio::net::TcpListener;
 
-    let n = rbitcoin_net::block_decode_permits();
-    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
-    let mut held = Vec::with_capacity(n);
-    for _ in 0..n {
-        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
-    }
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-disconnect-sync");
-    hub.ensure_genesis().unwrap();
-    // The body must decode without a tip accept on the reactor thread.
-    hub.set_minimum_chain_work(Some([0xff; 32]));
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    let live = outbound_test_peer(&peers, 18453);
-    assert!(live.can_serve_blocks());
-    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), 0);
+    let live = outbound_test_peer(peers, port);
     let magic = Magic::from(Network::Regtest);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1221,16 +1223,15 @@ async fn disconnect_drain_does_not_take_headers_sync() {
     });
     let (server_stream, _) = listener.accept().await.unwrap();
     let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
-    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
+    let (c_reader, c_writer, _wire, _shutdown) = client.await.unwrap();
     let tip_rx = hub.subscribe_tips();
     let session_peer = Arc::clone(&live);
-    let session_id = live.id;
     let session = tokio::spawn(async move {
         let _ = peer_session_with(
             reader,
             writer,
             magic,
-            Arc::new(hub),
+            hub,
             tip_rx,
             FollowSessionMeta {
                 peer: Some(addr),
@@ -1241,177 +1242,13 @@ async fn disconnect_drain_does_not_take_headers_sync() {
         .await;
     });
     live.set_session_abort(session.abort_handle());
-    let drain_startup = async {
-        while let Ok(Ok(_)) = tokio::time::timeout(
-            Duration::from_millis(40),
-            read_v2_frame(&mut c_reader, magic),
-        )
-        .await
-        {}
-    };
-    tokio::time::timeout(Duration::from_secs(2), drain_startup)
-        .await
-        .expect("startup frames drain");
-    let block = genesis_block(Network::Regtest);
-    write_v2_msg(&mut c_writer, NetworkMessage::Block(block))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    write_v2_msg(&mut c_writer, NetworkMessage::Ping(1))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let slots = peers.headers_sync_peers.load(Ordering::Relaxed);
-    let downloading = peers.peers_downloading_from.load(Ordering::Relaxed);
-    let started = live.is_sync_started();
-    assert!(peers.disconnect_id(live.id), "the peer is registered");
-    assert!(
-        peers.get(live.id).is_some(),
-        "disconnect hides the peer and leaves the row until the session ends"
-    );
-    assert_eq!(
-        live.is_sync_started(),
-        started,
-        "disconnect must not release headers sync"
-    );
-    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), slots);
-    drop(held);
-    drop(c_writer);
-    tokio::time::timeout(Duration::from_secs(5), session)
-        .await
-        .expect("session drains")
-        .expect("session task");
-    assert_eq!(
-        live.is_sync_started(),
-        started,
-        "a queued ping must not start headers sync on the way out"
-    );
-    assert_eq!(
-        peers.headers_sync_peers.load(Ordering::Relaxed),
-        slots,
-        "the drain must not take a headers-sync slot"
-    );
-    assert_eq!(
-        peers.peers_downloading_from.load(Ordering::Relaxed),
-        downloading
-    );
-    peers.unregister(session_id);
-    assert!(
-        !live.is_sync_started(),
-        "the session unregister releases headers sync once"
-    );
-    assert_eq!(peers.headers_sync_peers.load(Ordering::Relaxed), 0);
-    assert_eq!(peers.peers_downloading_from.load(Ordering::Relaxed), 0);
-    let _ = std::fs::remove_dir_all(dir.path());
-}
-
-/// A tip announce that fails because disconnect closed the writer must
-/// still apply a block already sitting in `decode_q`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disconnect_during_tip_announce_applies_a_queued_block() {
-    use bitcoin::blockdata::constants::genesis_block;
-    use rbitcoin_net::chain::TipEvent;
-    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
-    use tokio::net::TcpListener;
-
-    let n = rbitcoin_net::block_decode_permits();
-    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
-    let mut held = Vec::with_capacity(n);
-    for _ in 0..n {
-        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
+    DecodeSession {
+        live,
+        reader: c_reader,
+        writer: c_writer,
+        session,
+        magic,
     }
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-tip-disconnect");
-    hub.ensure_genesis().unwrap();
-    let hub = hub.into_arc();
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    let live = outbound_test_peer(&peers, 18452);
-    let magic = Magic::from(Network::Regtest);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client_magic = magic;
-    let client = tokio::spawn(async move {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        open_v2(stream, client_magic, false).await.unwrap()
-    });
-    let (server_stream, _) = listener.accept().await.unwrap();
-    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
-    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
-    let session_peer = Arc::clone(&live);
-    let session_hub = Arc::clone(&hub);
-    let session = tokio::spawn(async move {
-        let _ = peer_session_with(
-            reader,
-            writer,
-            magic,
-            session_hub,
-            tip_rx,
-            FollowSessionMeta {
-                peer: Some(addr),
-                live: None,
-                session: Some(session_peer),
-            },
-        )
-        .await;
-    });
-    live.set_session_abort(session.abort_handle());
-    let drain_startup = async {
-        while let Ok(Ok(_)) = tokio::time::timeout(
-            Duration::from_millis(40),
-            read_v2_frame(&mut c_reader, magic),
-        )
-        .await
-        {}
-    };
-    tokio::time::timeout(Duration::from_secs(2), drain_startup)
-        .await
-        .expect("startup frames drain");
-    write_v2_msg(
-        &mut c_writer,
-        NetworkMessage::SendCmpct(SendCmpct {
-            send_compact: true,
-            version: 2,
-        }),
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut block = genesis_block(Network::Regtest);
-    block.header.prev_blockhash = BlockHash::from_byte_array([0x11; 32]);
-    let hash = block.block_hash();
-    write_v2_msg(&mut c_writer, NetworkMessage::Block(block))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let tip_hash = hub.tip_hash().expect("genesis tip");
-    let header = hub.tip_header().expect("genesis header");
-    let _ = hub.tip_tx.send(TipEvent {
-        height: 0,
-        hash: tip_hash,
-        header,
-        reorg_branch_len: 0,
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(peers.disconnect_id(live.id), "the peer is registered");
-    assert!(
-        !live.take_block_from_peer(&hash),
-        "the body stays queued while every decode permit is held"
-    );
-    drop(held);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut applied = false;
-    while std::time::Instant::now() < deadline {
-        if live.take_block_from_peer(&hash) {
-            applied = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        applied,
-        "a failed tip announce must still apply a block already read"
-    );
-    let _ = std::fs::remove_dir_all(dir.path());
 }
 
 fn outbound_test_peer(
