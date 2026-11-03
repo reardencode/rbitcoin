@@ -193,14 +193,15 @@ pub enum TipFault {
 }
 
 impl TipFault {
-    /// Classify a failed read. A corrupt or missing record is `Bad(reason)`.
-    /// An OS error, a completion-session fault, or any other error is `Read`.
+    /// Classify a failed read. A corrupt or missing record, or a stored
+    /// length past the body read cap, is `Bad(reason)`. An OS error, a
+    /// completion-session fault, or any other error is `Read`.
     pub fn read(reason: &'static str) -> impl FnOnce(StoreError) -> TipFault {
         move |e| match e {
             StoreError::Corrupt(m) if !StoreError::is_uring_session_fault_msg(m) => {
                 TipFault::Bad(reason)
             }
-            StoreError::NotFound => TipFault::Bad(reason),
+            StoreError::NotFound | StoreError::Rejected(_) => TipFault::Bad(reason),
             other => TipFault::Read(other),
         }
     }

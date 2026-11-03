@@ -760,7 +760,8 @@ impl Drop for UnreadableFd {
 /// A read that fails is not a divergent block. Open stops with that error
 /// and leaves the tip and every body association as they were. The next
 /// open, with the read working, keeps the whole chain. A record torn past
-/// the body end, or a create with no locator, still drops that block.
+/// the body end, a create with no locator, or a locator length past the
+/// body read cap still drops that block.
 #[cfg(unix)]
 #[test]
 fn failed_read_in_tip_window_shrinks_nothing_but_a_torn_record_does() {
@@ -808,5 +809,18 @@ fn failed_read_in_tip_window_shrinks_nothing_but_a_torn_record_does() {
     let r = s.revalidate_tip_window_n(6).unwrap();
     assert_eq!(r.first_bad_reason, Some("seqsigwit range"), "{r:?}");
     assert_eq!(r.tip_after, Some(5), "a missing locator still shrinks");
+
+    let loc = &s.txs.seqsigwit_loc;
+    let (start, _) = s.txs.seqsigwit_range(Fk(6)).unwrap();
+    loc.truncate_to_count(5).unwrap();
+    let huge = rbitcoin_store::var_table::VarTable::BODY_READ_MAX + 8;
+    loc.append(&[start], &[huge]).unwrap();
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert_eq!(r.first_bad_reason, Some("seqsigwit read"), "{r:?}");
+    assert_eq!(
+        r.tip_after,
+        Some(4),
+        "a locator past the read cap still shrinks"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
