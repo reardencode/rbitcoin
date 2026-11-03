@@ -516,7 +516,7 @@ pub struct Query {
     pub tip_flush_worker: connect::TipFlushWorker,
     /// Test hook: IBD tip flush threads wait before writing while this is set.
     #[cfg(debug_assertions)]
-    pub tip_flush_hold: Arc<std::sync::atomic::AtomicBool>,
+    pub tip_flush_hold: Arc<rbitcoin_store::TipFlushHold>,
     /// Test hook: the next IBD tip flush thread fails to start.
     #[cfg(debug_assertions)]
     pub tip_flush_spawn_fail: std::sync::atomic::AtomicBool,
@@ -686,7 +686,7 @@ impl Query {
             tip_flush: Mutex::new(connect::TipFlush::Idle),
             tip_flush_worker: connect::TipFlushWorker::default(),
             #[cfg(debug_assertions)]
-            tip_flush_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tip_flush_hold: Arc::new(rbitcoin_store::TipFlushHold::new(false)),
             #[cfg(debug_assertions)]
             tip_flush_spawn_fail: std::sync::atomic::AtomicBool::new(false),
             confirm_stats: Arc::new(ConfirmStats::default()),
