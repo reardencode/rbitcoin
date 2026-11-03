@@ -1,3 +1,4 @@
+use super::asm::{script_asm, SighashAsm};
 use super::descriptor::{bare_multisig, infer_descriptor, p2pk_key};
 use super::*;
 use bitcoin::consensus::encode::serialize_hex;
@@ -62,7 +63,7 @@ pub fn rpc_btc_network(n: Network) -> BtcNetwork {
 pub fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Value {
     let mut obj = json!({
         "hex": rbitcoin_primitives::hex_encode(script.as_bytes() ),
-        "asm": script.to_asm_string(),
+        "asm": script_asm(script, SighashAsm::Hex),
         "type": script_core_type(script),
         "desc": infer_descriptor(script, network),
     });
@@ -2047,7 +2048,7 @@ pub fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNetwork) -
                 "txid": hash_hex_display(&inp.previous_output.txid.to_byte_array()),
                 "vout": inp.previous_output.vout,
                 "scriptSig": {
-                    "asm": inp.script_sig.to_asm_string(),
+                    "asm": script_asm(&inp.script_sig, SighashAsm::Decode),
                     "hex": rbitcoin_primitives::hex_encode(inp.script_sig.as_bytes() ),
                 },
                 "sequence": inp.sequence.to_consensus_u32(),

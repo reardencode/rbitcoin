@@ -221,6 +221,7 @@ pub fn genesis_coinbase_txid(ctx: &RpcContext) -> [u8; 32] {
         .to_byte_array()
 }
 
+mod asm;
 #[doc(hidden)]
 pub mod chain;
 #[doc(hidden)]
@@ -1075,7 +1076,7 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
         "decoderawtransaction",
         "decoderawtransaction hexstring (iswitness)\n\
          Decode a serialized transaction. iswitness=false refuses the BIP141 marker. \
-         scriptSig asm is rust-bitcoin, not Core ScriptToAsmStr sighash suffixes.",
+         asm is Core ScriptToAsmStr; scriptSig signatures carry their sighash name.",
     ),
     (
         "decodescript",

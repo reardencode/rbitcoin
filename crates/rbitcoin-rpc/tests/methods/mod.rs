@@ -8197,4 +8197,5 @@ fn spend_coinbase_two_outputs(ctx: &RpcContext, height: u32, value: u64) -> (Str
 include!("../regtest_chain_ops_journey.rs");
 
 mod chain;
+mod decode;
 mod mempool;
