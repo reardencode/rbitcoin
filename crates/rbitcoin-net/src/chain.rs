@@ -291,6 +291,10 @@ pub struct Invalidated {
 
 /// Refusal of a hash already marked invalid. Not a fresh validation result.
 const BLOCK_IS_INVALIDATED: &str = "block is invalidated";
+/// Core `AcceptBlockHeader` `BLOCK_INVALID_PREV`: the parent is marked
+/// invalid. The child is not kept, held, or marked, so `reconsiderblock` of
+/// the parent does not bring it back.
+const BAD_PREVBLK: &str = "bad-prevblk";
 
 /// Sidecar of connect failures next to `header.adopt`. Not a schema bump.
 const INVALID_FILE: &str = "block.invalid";
@@ -1694,7 +1698,7 @@ impl ChainHub {
     /// not poison later getdata of that hash.
     #[doc(hidden)]
     pub fn remember_failed_accept(&self, offered: BlockHash, e: &NetError) {
-        if matches!(e, NetError::Consensus(m) if m == BLOCK_IS_INVALIDATED) {
+        if matches!(e, NetError::Consensus(m) if m == BLOCK_IS_INVALIDATED || m == BAD_PREVBLK) {
             return;
         }
         let hash = e
@@ -3363,6 +3367,9 @@ impl ChainHub {
                     self.remember_cmpct_prefill_from_block(block.as_ref());
                     self.connect_at(height, block, waive, None)?;
                     return Ok(AcceptOutcome::Accepted { height });
+                }
+                if self.is_block_invalid(&prev) {
+                    return Err(NetError::Consensus(BAD_PREVBLK.into()));
                 }
 
                 let Some(parent_h) = self

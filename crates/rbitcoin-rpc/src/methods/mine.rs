@@ -1635,6 +1635,11 @@ fn prepare_submit(hub: &rbitcoin_net::ChainHub, mut block: Block) -> SubmitPrep 
     if !known {
         return SubmitPrep::Done(SubmitBlockOutcome::Rejected("prev-blk-not-found".into()));
     }
+    // Core `AcceptBlockHeader` refuses an invalid parent before any body rule
+    // and does not index the block.
+    if hub.is_block_invalid(&block.header.prev_blockhash) {
+        return SubmitPrep::Done(SubmitBlockOutcome::Rejected("bad-prevblk".into()));
+    }
     fill_witness_reserved_value(hub, &mut block);
     match cheap_submit_tx_reject(
         hub.query.as_ref(),
@@ -1824,14 +1829,15 @@ pub fn read_confirmed_prevout(
     )))
 }
 
-/// Hard consensus rejects stick. A mutated body, a missing parent, a block
-/// that is only too far in the future, and a block older than median time
-/// stay retryable. A warn-and-apply fault stays retryable while
+/// Hard consensus rejects stick. A mutated body, a missing or invalid parent,
+/// a block that is only too far in the future, and a block older than median
+/// time stay retryable. A warn-and-apply fault stays retryable while
 /// `--trust-peer` is on. `bad-diffbits` sticks.
 fn submit_reason_sticks(hub: &rbitcoin_net::ChainHub, block: &Block, reason: &str) -> bool {
     !submit_reason_is_mutated(block, reason)
         && reason != "high-hash"
         && reason != "prev-blk-not-found"
+        && reason != "bad-prevblk"
         && reason != "time-too-new"
         && reason != "time-too-old"
         && !(hub.query.trust_peer() && rbitcoin_consensus::reason_is_warn_and_apply(reason))
