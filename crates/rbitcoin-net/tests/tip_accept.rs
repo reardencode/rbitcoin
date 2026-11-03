@@ -75,8 +75,10 @@ fn wait_idle_blocks_until_job_finishes() {
         });
     });
     started_rx.recv().unwrap();
+    let seen = subscribe_wait_seen();
     let waiter = thread::spawn(wait_idle);
-    thread::sleep(Duration::from_millis(20));
+    seen.recv_timeout(Duration::from_secs(2))
+        .expect("wait_idle did not observe the running job");
     assert!(
         !waiter.is_finished(),
         "wait_idle must not return while a tip-accept job is running"
@@ -110,13 +112,14 @@ fn wait_current_job_returns_while_second_job_queued() {
             release2_rx.recv().unwrap();
         });
     });
-    thread::sleep(Duration::from_millis(20));
+    let seen = subscribe_wait_seen();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
         wait_current_job();
         done_tx.send(()).ok();
     });
-    thread::sleep(Duration::from_millis(20));
+    seen.recv_timeout(Duration::from_secs(2))
+        .expect("wait_current_job did not observe the running job");
     assert_eq!(
         done_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty),
@@ -287,34 +290,17 @@ async fn full_lane_parks_instead_of_spinning() {
     let releases = filler.join().expect("filler queued");
 
     FULL_QUEUE_SPINS.store(0, Ordering::Relaxed);
+    let parked_note = send_parked_notify().notified();
+    tokio::pin!(parked_note);
     let ninth = tokio::spawn(async { run_on_tip_accept_async(|| 9u8).await });
-    let started = std::time::Instant::now();
-    let mut last = 0usize;
-    let mut stable = 0u32;
-    let parked = loop {
-        let now = FULL_QUEUE_SPINS.load(Ordering::Relaxed);
-        if now > 8 {
-            break now;
-        }
-        if now > 0 && now == last {
-            stable += 1;
-            if stable >= 3 {
-                break now;
-            }
-        } else {
-            stable = 0;
-            last = now;
-        }
-        if started.elapsed() > Duration::from_secs(2) {
-            break now;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
+    tokio::time::timeout(Duration::from_secs(2), parked_note)
+        .await
+        .expect("ninth sender did not park on a full queue");
+    let parked = FULL_QUEUE_SPINS.load(Ordering::Relaxed);
     assert!(
         (1..=8).contains(&parked),
         "a full queue parks after a handful of failed sends, saw {parked}"
     );
-    tokio::time::sleep(Duration::from_millis(40)).await;
     let spins = FULL_QUEUE_SPINS.load(Ordering::Relaxed);
     assert_eq!(
         spins, parked,
