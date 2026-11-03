@@ -19,7 +19,7 @@ pub fn usage() -> String {
          Options:\n\
            --datadir PATH         node datadir (default ./datadir); unix socket PATH/rpc.sock\n\
            --rpc-socket PATH      unix socket the node binds with --rpc-socket\n\
-           --network NET          mainnet|testnet|signet|regtest (default TCP port)\n\
+           --network NET          mainnet|testnet|testnet4|signet|regtest (default TCP port)\n\
            --rpc-url ADDR         plain HTTP host:port (else 127.0.0.1:<network port> if no socket)\n\
            --rpc-token-file PATH  Bearer token (default PATH/rpc.token from --datadir)\n\
            -h, --help             this message\n\

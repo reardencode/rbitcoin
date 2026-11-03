@@ -7503,12 +7503,22 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
         (Network::Mainnet, "main"),
         (Network::Testnet, "test"),
         (Network::Signet, "signet"),
+        (Network::Testnet4, "testnet4"),
     ] {
         let mut labeled = ctx_without_chain(&ctx);
         labeled.network = net;
         let info = dispatch(&labeled, "getblockchaininfo", vec![]).unwrap();
         assert_eq!(info["chain"], name, "{info}");
     }
+    let mut testnet4 = ctx_without_chain(&ctx);
+    testnet4.network = Network::Testnet4;
+    let tb = dispatch(
+        &testnet4,
+        "validateaddress",
+        vec![json!("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")],
+    )
+    .unwrap();
+    assert_eq!(tb["isvalid"], true, "testnet4 addresses are tb: {tb}");
 
     let gbt = dispatch(
         &bare,

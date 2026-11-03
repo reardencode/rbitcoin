@@ -1,7 +1,7 @@
 use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_node::cli::*;
-use rbitcoin_node::config::NodeConfig;
 use rbitcoin_node::config::NodeEnv;
+use rbitcoin_node::config::{ConfApply, NodeConfig};
 use rbitcoin_primitives::Network;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -166,7 +166,7 @@ fn operator_conf_and_argv() {
     ] {
         assert!(!h.contains(concat), "help must not advertise {concat}");
     }
-    assert!(h.contains("Networks: mainnet|testnet|signet|regtest."));
+    assert!(h.contains("Networks: mainnet|testnet|testnet4|signet|regtest."));
     assert!(h.contains("[--signet-block-time SECS]"));
     assert!(matches!(
         operator_config_from_args(["rbitcoin-node", "-V"], &NodeEnv::default()),
@@ -254,6 +254,7 @@ fn operator_conf_and_argv() {
         ("regtest", Network::Regtest),
         ("signet", Network::Signet),
         ("testnet", Network::Testnet),
+        ("testnet4", Network::Testnet4),
     ] {
         let conf = dir.join(format!("{bare}.conf"));
         std::fs::write(&conf, format!("{bare}\n; also a comment\n\nno_seeds=1\n")).unwrap();
@@ -261,6 +262,9 @@ fn operator_conf_and_argv() {
         let cfg = ready_config(["rbitcoin-node", eq.as_str()]);
         assert_eq!(cfg.network, net);
         assert!(!cfg.listen.use_seeds);
+        let mut keyed = NodeConfig::default();
+        assert_eq!(keyed.apply_kv(bare, "1").unwrap(), ConfApply::Applied);
+        assert_eq!(keyed.network, net);
     }
     let zero = dir.join("milestone.conf");
     std::fs::write(&zero, "milestone=0\n").unwrap();
