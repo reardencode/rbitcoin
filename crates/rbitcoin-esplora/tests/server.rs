@@ -222,6 +222,14 @@ fn with_sh_join_empty_slot_unblocks_waiter() {
         });
     });
     leader_in_rx.recv().expect("leader entered f");
+    let inf = st
+        .sh_join
+        .lock()
+        .unwrap()
+        .clients
+        .get("c1")
+        .and_then(|c| c.inflight.get(&sh).cloned())
+        .expect("leader inflight");
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let st_w = Arc::clone(&st);
     let waiter = std::thread::spawn(move || {
@@ -229,7 +237,10 @@ fn with_sh_join_empty_slot_unblocks_waiter() {
             let _ = done_tx.send(slot.is_none());
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        inf.wait_queued(Duration::from_secs(2)),
+        "waiter did not queue on the empty join"
+    );
     let _ = release.send(());
     leader.join().expect("leader");
     let empty = done_rx
@@ -258,6 +269,14 @@ fn with_sh_join_leader_panic_unblocks_waiter() {
         });
     });
     leader_in_rx.recv().expect("leader entered f");
+    let inf = st
+        .sh_join
+        .lock()
+        .unwrap()
+        .clients
+        .get("c1")
+        .and_then(|c| c.inflight.get(&sh).cloned())
+        .expect("leader inflight");
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let st_w = Arc::clone(&st);
     let waiter = std::thread::spawn(move || {
@@ -265,7 +284,10 @@ fn with_sh_join_leader_panic_unblocks_waiter() {
             let _ = done_tx.send(());
         });
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        inf.wait_queued(Duration::from_secs(2)),
+        "waiter did not queue before the leader unwound"
+    );
     let _ = release.send(());
     let _ = leader.join();
     done_rx

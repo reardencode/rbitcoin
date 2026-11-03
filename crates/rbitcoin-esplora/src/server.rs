@@ -486,9 +486,24 @@ pub struct InflightJoin {
     pub cv: std::sync::Condvar,
     /// Start order of the leader. Waiters publish this stamp.
     pub seq: u64,
+    /// Set under `done` before a waiter sleeps. The wait, not the join result.
+    queued: AtomicBool,
+    queued_mu: Mutex<()>,
+    queued_cv: std::sync::Condvar,
 }
 
 impl InflightJoin {
+    /// `true` once a waiter has observed an unfinished leader and is in `cv.wait`.
+    #[doc(hidden)]
+    pub fn wait_queued(&self, timeout: std::time::Duration) -> bool {
+        let g = self.queued_mu.lock().unwrap_or_else(|p| p.into_inner());
+        let (_g, status) = self
+            .queued_cv
+            .wait_timeout_while(g, timeout, |_| !self.queued.load(Ordering::SeqCst))
+            .unwrap_or_else(|p| p.into_inner());
+        !status.timed_out()
+    }
+
     #[doc(hidden)]
     pub fn finish(&self, slot: Option<Arc<ShJoinSlot>>) {
         let mut d = self.done.lock().unwrap_or_else(|p| p.into_inner());
@@ -716,6 +731,9 @@ impl AppState {
                     done: Mutex::new(None),
                     cv: std::sync::Condvar::new(),
                     seq,
+                    queued: AtomicBool::new(false),
+                    queued_mu: Mutex::new(()),
+                    queued_cv: std::sync::Condvar::new(),
                 });
                 c.inflight.insert(*sh, Arc::clone(&inf));
                 Ok((inf, seq))
@@ -725,6 +743,8 @@ impl AppState {
             Err((inf, seq)) => {
                 let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
                 while d.is_none() {
+                    inf.queued.store(true, Ordering::SeqCst);
+                    inf.queued_cv.notify_all();
                     d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
                 }
                 let mut slot = (*d).clone().flatten();
