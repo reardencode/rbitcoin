@@ -1134,13 +1134,26 @@ impl ActiveMempool {
             min_relay,
             waive,
         } = opts;
-        rbitcoin_consensus::block::check_tx_local(tx, tx.base_size()).map_err(|e| {
-            AcceptError::CheckTransaction(rbitcoin_consensus::block_reject_reason(&e))
-        })?;
+        let check_tx = |r: Result<(), rbitcoin_consensus::ConsensusError>| {
+            r.map_err(|e| {
+                AcceptError::CheckTransaction(rbitcoin_consensus::block_reject_reason(&e))
+            })
+        };
+        check_tx(rbitcoin_consensus::block::check_tx_shape(
+            tx,
+            tx.base_size(),
+        ))?;
+        let txid = tx.compute_txid();
+        // Core CheckTransaction: repeated inputs after the outputs and before
+        // null prevouts, and before any value sum (Finding 011: phantom fee).
+        let mut seen = BTreeSet::new();
+        if !tx.input.iter().all(|inp| seen.insert(inp.previous_output)) {
+            return Err(duplicate_inputs(waive, txid));
+        }
         if tx.is_coinbase() {
             return Err(AcceptError::Coinbase);
         }
-        let txid = tx.compute_txid();
+        check_tx(rbitcoin_consensus::block::reject_null_prevouts(tx))?;
         let wtxid = tx.compute_wtxid();
         if let Some(live) = self.graph.get(&txid) {
             if live.wtxid == wtxid {
@@ -1158,16 +1171,6 @@ impl ActiveMempool {
                     missing,
                     fresh: false,
                 });
-            }
-        }
-
-        // Finding 011: duplicate inputs before any value sum (phantom fee).
-        {
-            let mut seen = BTreeSet::new();
-            for inp in &tx.input {
-                if !seen.insert(inp.previous_output) {
-                    return Err(duplicate_inputs(waive, txid));
-                }
             }
         }
 

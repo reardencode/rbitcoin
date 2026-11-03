@@ -2221,6 +2221,11 @@ fn chain_ops_submit_tx_shape(
     assert_eq!(submit(&next(vec![negative_dup.clone()])), "bad-txns-vout-negative");
     let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_dup)])]).unwrap();
     assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
+    // Core CheckTransaction checks repeated inputs before null prevouts.
+    let null_dup = bare(vec![tx_in(OutPoint::null()), tx_in(OutPoint::null())], one_out(1));
+    assert_eq!(submit(&next(vec![null_dup.clone()])), "bad-txns-inputs-duplicate");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&null_dup)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-inputs-duplicate", "{tma}");
     let empty_dup = bare(vec![tx_in(op), tx_in(op)], vec![]);
     assert_eq!(submit(&next(vec![empty_dup])), "bad-txns-vout-empty");
     // A coinbase's outputs are checked before its scriptSig length.

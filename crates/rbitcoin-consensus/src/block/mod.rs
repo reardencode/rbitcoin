@@ -66,20 +66,24 @@ pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usiz
 /// checks those for every transaction before its coinbase layout.
 pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
     check_tx_shape(tx, base_size)?;
+    reject_null_prevouts(tx)
+}
+
+/// Core `CheckTransaction` after the duplicate-input walk: a non-coinbase tx
+/// spends no null prevout.
+pub fn reject_null_prevouts(tx: &Transaction) -> Result<(), ConsensusError> {
     if tx.is_coinbase() {
         return Ok(());
     }
-    for inp in &tx.input {
-        if inp.previous_output.is_null() {
-            return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
-        }
+    if tx.input.iter().any(|inp| inp.previous_output.is_null()) {
+        return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
     }
     Ok(())
 }
 
 /// Core `CheckTransaction` before its input walk: an empty vin or vout, the
 /// stripped size, then each output value.
-fn check_tx_shape(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+pub fn check_tx_shape(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
     if tx.input.is_empty() {
         return Err(ConsensusError::BadTx("no inputs"));
     }
