@@ -580,6 +580,19 @@ pub fn ibd_mono_ms() -> u64 {
     T0.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+/// `0` means no stamp yet. Tests wait this out instead of a fixed sleep.
+#[doc(hidden)]
+pub fn wait_past_mono_sentinel() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    while ibd_mono_ms() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ibd_mono_ms stayed at the zero sentinel"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 pub fn note_stream_bytes(counter: &AtomicU64, n: u64) {
     if n == 0 {
         return;

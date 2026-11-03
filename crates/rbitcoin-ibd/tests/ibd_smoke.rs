@@ -167,20 +167,28 @@ async fn ibd_redial_keeps_dialing_until_a_peer_or_cancel() {
     }
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&cancel);
+    let clock = Arc::clone(&dark.hub.clock);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while clock.connection_attempt_at() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "redial never issued a dial"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         stop.store(true, Ordering::SeqCst);
     });
-    let started = std::time::Instant::now();
     let stopped = tokio::time::timeout(
         Duration::from_secs(20),
         rbitcoin_ibd::sync_cancellable(&dark, &dead, redial_cfg(book), Some(cancel)),
     )
     .await
     .expect("cancel ends a dark catch-up");
-    assert!(
-        started.elapsed() >= Duration::from_secs(2),
-        "dead addresses alone do not end catch-up"
+    assert_ne!(
+        dark.hub.clock.connection_attempt_at(),
+        0,
+        "dead addresses alone do not end catch-up before a dial"
     );
     assert_eq!(stopped.ok(), Some(0));
     assert_eq!(dark.tip_height(), Some(0));
