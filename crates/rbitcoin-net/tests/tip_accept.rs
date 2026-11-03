@@ -56,9 +56,18 @@ fn wait_idle_blocks_until_job_finishes() {
     });
     started_rx.recv().unwrap();
     let seen = subscribe_wait_seen();
-    let waiter = thread::spawn(wait_idle);
-    seen.recv_timeout(Duration::from_secs(2))
-        .expect("wait_idle did not observe the running job");
+    let (id_tx, id_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        id_tx.send(thread::current().id()).unwrap();
+        wait_idle();
+    });
+    let id = id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiter started");
+    assert!(
+        wait_seen_from(&seen, id, Duration::from_secs(2)),
+        "wait_idle did not observe the running job"
+    );
     assert!(
         !waiter.is_finished(),
         "wait_idle must not return while a tip-accept job is running"
@@ -90,15 +99,14 @@ fn lane_permit_take_does_not_publish_wait_seen() {
     let seen = subscribe_wait_seen();
     let (id_tx, id_rx) = mpsc::channel();
     let drainer = thread::spawn(move || {
-        id_tx.send(()).unwrap();
+        id_tx.send(thread::current().id()).unwrap();
         let _permit = LanePermit::take();
     });
-    id_rx
+    let id = id_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("drainer started");
-    let noted = seen.recv_timeout(Duration::from_millis(400));
     assert!(
-        noted.is_err(),
+        !wait_seen_from(&seen, id, Duration::from_millis(400)),
         "LanePermit::take published wait_seen while draining the running job"
     );
     release_tx.send(()).unwrap();
@@ -132,13 +140,20 @@ fn wait_current_job_returns_while_second_job_queued() {
         });
     });
     let seen = subscribe_wait_seen();
+    let (id_tx, id_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
+        id_tx.send(thread::current().id()).unwrap();
         wait_current_job();
         done_tx.send(()).ok();
     });
-    seen.recv_timeout(Duration::from_secs(2))
-        .expect("wait_current_job did not observe the running job");
+    let id = id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiter started");
+    assert!(
+        wait_seen_from(&seen, id, Duration::from_secs(2)),
+        "wait_current_job did not observe the running job"
+    );
     assert_eq!(
         done_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty),

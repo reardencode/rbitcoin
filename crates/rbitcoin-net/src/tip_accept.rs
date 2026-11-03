@@ -79,13 +79,21 @@ impl Drop for InflightEnd {
 /// Block until no tip-accept job is running. No-op on the lane itself
 /// (nested generate/RPC must not deadlock).
 pub fn wait_idle() {
+    park_until_idle(true);
+}
+
+/// `announce` publishes [`note_wait_seen`] for the waiter tests. The permit
+/// drain passes `false`: that wait is not one of those waiters.
+fn park_until_idle(announce: bool) {
     if on_tip_accept_thread() {
         return;
     }
     let i = inflight();
     let mut g = i.mu.lock().unwrap_or_else(|e| e.into_inner());
     while i.n.load(Ordering::SeqCst) > 0 {
-        note_wait_seen();
+        if announce {
+            note_wait_seen();
+        }
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -157,11 +165,9 @@ thread_local! {
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 
-/// Let the next [`run_on_tip_accept`] or [`run_on_tip_accept_async`] on this
-/// thread enter while a [`LanePermit`] is held. Consumed at that entry, before
-/// any `.await`, so a tokio worker does not stay exempt for the next task.
 /// Opt in for the process. The net suite calls this before any test. A node
-/// never does, and then [`lane_send_guard`] does not lock.
+/// never does, and then [`lane_send_guard`] does not lock. This does not
+/// exempt a thread; that is [`arm_lane_oneshot`].
 #[doc(hidden)]
 pub fn enable_lane_test_gate() {
     #[cfg(debug_assertions)]
@@ -181,6 +187,9 @@ pub fn lane_test_gate_enabled() -> bool {
     }
 }
 
+/// Let the next [`run_on_tip_accept`] or [`run_on_tip_accept_async`] on this
+/// thread enter while a [`LanePermit`] is held. Consumed at that entry, before
+/// any `.await`, so a tokio worker does not stay exempt for the next task.
 #[doc(hidden)]
 pub fn arm_lane_oneshot() {
     #[cfg(debug_assertions)]
@@ -241,7 +250,9 @@ impl LanePermit {
             LANE_EXCLUSIVE.store(true, Ordering::Release);
             drop(g);
             LANE_HELD.with(|c| c.set(c.get().saturating_add(1)));
-            wait_idle();
+            // Quiet drain. `wait_idle` would publish `note_wait_seen` and the
+            // waiter tests would treat this thread as their parked waiter.
+            park_until_idle(false);
         }
         Self { _private: () }
     }
@@ -264,14 +275,15 @@ fn slot_freed() -> &'static tokio::sync::Notify {
     N.get_or_init(tokio::sync::Notify::new)
 }
 
-fn wait_seen_subs() -> &'static Mutex<Vec<mpsc::Sender<()>>> {
-    static S: OnceLock<Mutex<Vec<mpsc::Sender<()>>>> = OnceLock::new();
+fn wait_seen_subs() -> &'static Mutex<Vec<mpsc::Sender<thread::ThreadId>>> {
+    static S: OnceLock<Mutex<Vec<mpsc::Sender<thread::ThreadId>>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// One message when a waiter has observed a running job and is about to wait.
+/// One message per observation, carrying the waiter thread. Callers keep the
+/// id they spawned and ignore every other waiter.
 #[doc(hidden)]
-pub fn subscribe_wait_seen() -> mpsc::Receiver<()> {
+pub fn subscribe_wait_seen() -> mpsc::Receiver<thread::ThreadId> {
     let (tx, rx) = mpsc::channel();
     wait_seen_subs()
         .lock()
@@ -280,9 +292,28 @@ pub fn subscribe_wait_seen() -> mpsc::Receiver<()> {
     rx
 }
 
+/// True when `id` itself has observed a running job and is about to wait.
+#[doc(hidden)]
+pub fn wait_seen_from(
+    rx: &mpsc::Receiver<thread::ThreadId>,
+    id: thread::ThreadId,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(noted) if noted == id => return true,
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 fn note_wait_seen() {
+    let id = thread::current().id();
     let mut subs = wait_seen_subs().lock().unwrap_or_else(|e| e.into_inner());
-    subs.retain(|tx| tx.send(()).is_ok());
+    subs.retain(|tx| tx.send(id).is_ok());
 }
 
 fn send_parked() -> &'static tokio::sync::Notify {
