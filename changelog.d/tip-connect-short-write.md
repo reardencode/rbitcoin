@@ -1,16 +1,5 @@
 Fixed
 
-- A store write that fails while connecting a block no longer leaves body
-  bytes ahead of the output locators. `gettxout` does not return another
-  output's value or script, the block is not marked invalid, and a later
-  connect of that block succeeds once writes work. A short checkpoint, a
-  create locator ahead of the seqsigwit locator, or an overflow row past
-  its header reopens at the last create those files still name. A missed
-  overflow header is retried before a later block publishes. A withheld
-  locator header does not seal the new tip and does not publish
-  `spend_durable` there. `--prune-seqsigwit` stays on the last sealed
-  tip when a later locator header is withheld, in tip mode and on the
-  next IBD batch. Disconnecting a block that was never sealed does not
-  move that tip. Open truncates a body header that ran ahead of
-  that count. A body header short of the locator count is corrupt. A
-  real consensus failure is still kept in `store/block.invalid`.
+- **A store write that fails while connecting a block does not leave body bytes ahead of the output index.** `gettxout` does not return another output's value or script. The block is not marked invalid, and a later connect of that block succeeds once writes work.
+- **Open repairs a torn tip instead of sealing it.** A short checkpoint, an output index ahead of the witness index, or an overflow row past its header reopens at the last output those files still name. A missed overflow header is retried before a later block is published. A withheld index header does not seal the new tip and does not publish the spend-durability mark there. `--prune-seqsigwit` stays on the last sealed tip when a later index header is withheld, in tip mode and on the next initial-download batch. Disconnecting a block that was never sealed does not move that tip.
+- **Open truncates a body header that ran ahead of the output count.** A body header short of the index count is corrupt. A real consensus failure is still recorded in `store/block.invalid`.

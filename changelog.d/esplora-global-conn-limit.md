@@ -10,8 +10,6 @@ Fixed
   The `/blindbit/v1/` routes share this limit too. A BlindBit request waits
   for its own permit first, so one queued there holds no listener slot.
 
-Added
-
 - **`--esplora-max-inflight N`** (conf `esplora_max_inflight=`, NixOS
   `services.rbitcoin.esplora.maxInflight`) sets that limit. The default stays
   256. A busy public listener may want more. Values above tokio's
