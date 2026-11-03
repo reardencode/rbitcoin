@@ -137,8 +137,8 @@ impl HeldBodies {
     }
 
     #[doc(hidden)]
-    pub fn get(&self, hash: &BlockHash) -> Option<&Block> {
-        self.by_hash.get(hash).map(|row| row.block.as_ref())
+    pub fn get(&self, hash: &BlockHash) -> Option<&Arc<Block>> {
+        self.by_hash.get(hash).map(|row| &row.block)
     }
 
     /// Session waive bit recorded with the first hold. Absent is strict.
@@ -714,6 +714,9 @@ pub struct ChainHub {
     pub header_inv_challenge: AtomicBool,
     #[cfg(debug_assertions)]
     pub block_at_height_calls: AtomicU64,
+    /// Side branches assembled from the hold or the archive.
+    #[cfg(debug_assertions)]
+    pub side_branch_walks: AtomicU64,
     #[cfg(debug_assertions)]
     pub header_contextual_checks: AtomicU64,
     #[cfg(debug_assertions)]
@@ -851,6 +854,8 @@ impl ChainHub {
             header_inv_challenge: AtomicBool::new(false),
             #[cfg(debug_assertions)]
             block_at_height_calls: AtomicU64::new(0),
+            #[cfg(debug_assertions)]
+            side_branch_walks: AtomicU64::new(0),
             #[cfg(debug_assertions)]
             header_contextual_checks: AtomicU64::new(0),
             #[cfg(debug_assertions)]
@@ -3134,7 +3139,7 @@ impl ChainHub {
         let mut under_valid = HashSet::new();
         let mut kept = Vec::new();
         for branch in self.side_branches(leaves, restored, &HashSet::new()) {
-            let hashes: Vec<BlockHash> = branch.iter().map(Block::block_hash).collect();
+            let hashes: Vec<BlockHash> = branch.iter().map(|b| b.block_hash()).collect();
             let (tip, below) = hashes.split_last().expect("a side branch is not empty");
             let was_connected = hashes
                 .iter()
@@ -3165,7 +3170,7 @@ impl ChainHub {
         leaves: &[BlockHash],
         restored: &'a HashSet<BlockHash>,
         skip: &HashSet<BlockHash>,
-    ) -> impl Iterator<Item = Vec<Block>> + 'a {
+    ) -> impl Iterator<Item = Vec<Arc<Block>>> + 'a {
         let inv = self.invalidated.set.read().unwrap().clone();
         let mut starts: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
         starts.extend(self.held_bodies.read().unwrap().keys());
@@ -3185,11 +3190,11 @@ impl ChainHub {
     /// skipped. The first store fault among those is kept in `fault`.
     fn most_work_branch(
         &self,
-        branches: impl Iterator<Item = Vec<Block>>,
+        branches: impl Iterator<Item = Vec<Arc<Block>>>,
         fault: &mut Option<NetError>,
-    ) -> Option<Vec<Block>> {
+    ) -> Option<Vec<Arc<Block>>> {
         let precious = *self.precious.read().unwrap();
-        let mut best: Option<(Work, bool, u64, Vec<Block>)> = None;
+        let mut best: Option<(Work, bool, u64, Vec<Arc<Block>>)> = None;
         for branch in branches {
             let w = match self.branch_chain_work(&branch) {
                 Ok(w) => w,
@@ -3399,7 +3404,7 @@ impl ChainHub {
                         // Re-hold so a trusted session can set the waive bit.
                         self.hold_body(Arc::clone(&block), waive);
                     }
-                    let out = self.accept_branch_locked(std::slice::from_ref(block.as_ref()));
+                    let out = self.accept_branch_locked(std::slice::from_ref(&block));
                     if hold_unconnected
                         && !already
                         && !matches!(out, Ok(AcceptOutcome::IgnoredWeaker))
@@ -3419,12 +3424,12 @@ impl ChainHub {
 
     /// Connect a contiguous branch `[blocks[0]…blocks[n]]` where `blocks[0].prev` is on our chain.
     /// Reorgs if the new path has strictly more work than our path from the fork.
-    pub fn accept_branch(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
+    pub fn accept_branch(&self, blocks: &[Arc<Block>]) -> Result<AcceptOutcome, NetError> {
         crate::tip_accept::run_on_tip_accept(|| self.accept_branch_inner(blocks))
     }
 
     #[doc(hidden)]
-    pub fn accept_branch_inner(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
+    pub fn accept_branch_inner(&self, blocks: &[Arc<Block>]) -> Result<AcceptOutcome, NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.accept_branch_locked(blocks)
     }
@@ -3432,7 +3437,7 @@ impl ChainHub {
     /// Err when any block of `blocks` fails connect, even when a heavier
     /// valid prefix stays the tip.
     #[doc(hidden)]
-    pub fn accept_branch_locked(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
+    pub fn accept_branch_locked(&self, blocks: &[Arc<Block>]) -> Result<AcceptOutcome, NetError> {
         let (out, failed) = self.accept_branch_prefix(blocks)?;
         failed.map_or(Ok(out), Err)
     }
@@ -3443,7 +3448,7 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn accept_branch_prefix(
         &self,
-        blocks: &[Block],
+        blocks: &[Arc<Block>],
     ) -> Result<(AcceptOutcome, Option<NetError>), NetError> {
         self.accept_branch_precheck(blocks)?;
         let fork_height = self.accept_branch_fork_height(blocks)?;
@@ -3486,7 +3491,7 @@ impl ChainHub {
     }
 
     #[doc(hidden)]
-    pub fn accept_branch_precheck(&self, blocks: &[Block]) -> Result<(), NetError> {
+    pub fn accept_branch_precheck(&self, blocks: &[Arc<Block>]) -> Result<(), NetError> {
         if blocks.is_empty() {
             return Err(NetError::Protocol("empty branch"));
         }
@@ -3505,7 +3510,10 @@ impl ChainHub {
     }
 
     #[doc(hidden)]
-    pub fn accept_branch_fork_height(&self, blocks: &[Block]) -> Result<Option<u32>, NetError> {
+    pub fn accept_branch_fork_height(
+        &self,
+        blocks: &[Arc<Block>],
+    ) -> Result<Option<u32>, NetError> {
         let fork_prev = blocks[0].header.prev_blockhash;
         if fork_prev.to_byte_array() == [0u8; 32] {
             if self.tip_height().is_some() {
@@ -3523,7 +3531,7 @@ impl ChainHub {
     }
 
     #[doc(hidden)]
-    pub fn branch_header_work(&self, blocks: &[Block]) -> Result<Work, NetError> {
+    pub fn branch_header_work(&self, blocks: &[Arc<Block>]) -> Result<Work, NetError> {
         if self.tip_height().is_some()
             && blocks
                 .iter()
@@ -3544,7 +3552,7 @@ impl ChainHub {
 
     /// Total chain work of `blocks` connected on their fork point.
     #[doc(hidden)]
-    pub fn branch_chain_work(&self, blocks: &[Block]) -> Result<Work, NetError> {
+    pub fn branch_chain_work(&self, blocks: &[Arc<Block>]) -> Result<Work, NetError> {
         let branch = self.branch_header_work(blocks)?;
         let Some(fork_height) = self.accept_branch_fork_height(blocks)? else {
             return Ok(branch);
@@ -3565,9 +3573,13 @@ impl ChainHub {
     }
 
     #[doc(hidden)]
-    pub fn accept_branch_weaker(&self, blocks: &[Block], old_work: Work) -> Result<bool, NetError> {
+    pub fn accept_branch_weaker(
+        &self,
+        blocks: &[Arc<Block>],
+        old_work: Work,
+    ) -> Result<bool, NetError> {
         let new_work = self.branch_header_work(blocks)?;
-        let branch_tip = blocks.last().map(Block::block_hash);
+        let branch_tip = blocks.last().map(|b| b.block_hash());
         let precious = *self.precious.read().unwrap() == branch_tip;
         let equal_work = !work_better(new_work, old_work) && !work_better(old_work, new_work);
         Ok(self.tip_height().is_some()
@@ -3579,7 +3591,7 @@ impl ChainHub {
     pub fn accept_branch_collect_old(
         &self,
         fork_height: Option<u32>,
-    ) -> Result<Vec<Block>, NetError> {
+    ) -> Result<Vec<Arc<Block>>, NetError> {
         let tip_h = self.tip_height().unwrap_or(0);
         let Some(fh) = fork_height.filter(|fh| tip_h > *fh) else {
             return Ok(Vec::new());
@@ -3589,7 +3601,7 @@ impl ChainHub {
             let b = self.block_at_height(h)?.ok_or_else(|| {
                 NetError::Store(format!("invariant: no body at connected height {h}"))
             })?;
-            old_path.push(b);
+            old_path.push(Arc::new(b));
         }
         Ok(old_path)
     }
@@ -3599,7 +3611,7 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn accept_branch_check_headers(
         &self,
-        blocks: &[Block],
+        blocks: &[Arc<Block>],
         fork_height: Option<u32>,
     ) -> Result<(), NetError> {
         let Some(fork_h) = fork_height else {
@@ -3736,19 +3748,19 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn accept_branch_connect<'b>(
         &self,
-        blocks: &'b [Block],
+        blocks: &'b [Arc<Block>],
         fork_height: Option<u32>,
         old_work: Work,
-        old_path: &[Block],
+        old_path: &[Arc<Block>],
         reorg: &mut BranchReorg<'_>,
-    ) -> Result<(&'b [Block], Option<NetError>), NetError> {
+    ) -> Result<(&'b [Arc<Block>], Option<NetError>), NetError> {
         let base = fork_height.map(|h| h + 1).unwrap_or(0);
         for (i, b) in blocks.iter().enumerate() {
             self.announce_reorg_len
                 .store(i as u32 + 1, Ordering::Relaxed);
             let Err(e) = self.connect_at(
                 base + i as u32,
-                Arc::new(b.clone()),
+                Arc::clone(b),
                 self.waive_for_connect(&b.block_hash()),
                 Some(&mut *reorg),
             ) else {
@@ -3792,7 +3804,7 @@ impl ChainHub {
     pub fn accept_branch_restore(
         &self,
         fork_height: Option<u32>,
-        old_path: &[Block],
+        old_path: &[Arc<Block>],
         e: &NetError,
         reorg: &mut BranchReorg<'_>,
     ) -> Result<(), NetError> {
@@ -3813,7 +3825,7 @@ impl ChainHub {
             // Flag-off stays strict. No second set.
             if let Err(re) = self.connect_at(
                 fh + 1 + j as u32,
-                Arc::new(ob.clone()),
+                Arc::clone(ob),
                 self.query.trust_peer(),
                 Some(&mut *reorg),
             ) {
@@ -4083,9 +4095,10 @@ impl ChainHub {
         self.held_bodies.read().unwrap().waive(hash)
     }
 
-    /// Never-confirmed side-branch body in RAM. Once-confirmed disconnected
-    /// blocks are reconstructed from Class A — they are not held here.
-    pub fn held_body(&self, hash: &BlockHash) -> Option<Block> {
+    /// Never-confirmed side-branch body in RAM, shared with the hold. Once-
+    /// confirmed disconnected blocks are reconstructed from Class A — they
+    /// are not held here.
+    pub fn held_body(&self, hash: &BlockHash) -> Option<Arc<Block>> {
         self.held_bodies.read().unwrap().get(hash).cloned()
     }
 
@@ -4127,7 +4140,7 @@ impl ChainHub {
     }
 
     #[doc(hidden)]
-    pub fn load_side_body(&self, hash: &BlockHash) -> Option<Block> {
+    pub fn load_side_body(&self, hash: &BlockHash) -> Option<Arc<Block>> {
         if let Some(b) = self.held_body(hash) {
             return Some(b);
         }
@@ -4135,6 +4148,7 @@ impl ChainHub {
             .reconstruct_archived_block(&hash.to_byte_array())
             .ok()
             .flatten()
+            .map(Arc::new)
     }
 
     /// Walk hold + archive from `tip` back to a best-chain parent. The walk
@@ -4145,7 +4159,9 @@ impl ChainHub {
         &self,
         tip: BlockHash,
         restored: &HashSet<BlockHash>,
-    ) -> Option<Vec<Block>> {
+    ) -> Option<Vec<Arc<Block>>> {
+        #[cfg(debug_assertions)]
+        self.side_branch_walks.fetch_add(1, Ordering::Relaxed);
         if self.is_connected(&tip) {
             return None;
         }
@@ -4178,17 +4194,33 @@ impl ChainHub {
     /// Core's `CBlockIndexWorkComparator`. Equal work prefers the precious
     /// tip, then the first-seen held tip.
     #[doc(hidden)]
-    pub fn best_held_branch(&self) -> Option<Vec<Block>> {
-        let mut starts: Vec<BlockHash> = self.held_bodies.read().unwrap().keys().collect();
+    pub fn best_held_branch(&self) -> Option<Vec<Arc<Block>>> {
+        // A ranked branch holds its held ancestors and beats each of them
+        // on work, so a held block is walked only while no ranked branch
+        // has covered it. Leaves go first: one walk per held tip.
+        let rows: Vec<(BlockHash, BlockHash)> = self
+            .held_bodies
+            .read()
+            .unwrap()
+            .entries()
+            .map(|(h, b)| (h, b.header.prev_blockhash))
+            .collect();
+        let parents: HashSet<BlockHash> = rows.iter().map(|(_, prev)| *prev).collect();
+        let (mut starts, inner): (Vec<BlockHash>, Vec<BlockHash>) = rows
+            .iter()
+            .map(|(h, _)| *h)
+            .partition(|h| !parents.contains(h));
+        starts.extend(inner);
         let precious = *self.precious.read().unwrap();
         if let Some(p) = precious {
             if !starts.contains(&p) {
                 starts.push(p);
             }
         }
-        let mut best: Option<(Work, bool, u64, Vec<Block>)> = None;
+        let mut covered: HashSet<BlockHash> = HashSet::new();
+        let mut best: Option<(Work, bool, u64, Vec<Arc<Block>>)> = None;
         for start in starts {
-            if self.is_block_invalid(&start) {
+            if covered.contains(&start) || self.is_block_invalid(&start) {
                 continue;
             }
             let Some(branch) = self.assemble_side_branch(start, &HashSet::new()) else {
@@ -4203,6 +4235,7 @@ impl ChainHub {
             let Ok(w) = self.branch_chain_work(&branch) else {
                 continue;
             };
+            covered.extend(branch.iter().map(|b| b.block_hash()));
             let tip = branch[branch.len() - 1].block_hash();
             let is_p = Some(tip) == precious;
             let seq = self.held_bodies.read().unwrap().seq(tip);
@@ -4529,6 +4562,16 @@ impl ChainHub {
     #[cfg(debug_assertions)]
     pub fn block_at_height_calls(&self) -> u64 {
         self.block_at_height_calls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn reset_side_branch_walks(&self) {
+        self.side_branch_walks.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn side_branch_walks(&self) -> u64 {
+        self.side_branch_walks.load(Ordering::Relaxed)
     }
 
     #[cfg(debug_assertions)]
