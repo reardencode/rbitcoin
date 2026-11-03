@@ -24,9 +24,10 @@ pub const QUEUE_CAP: usize = 8;
 #[doc(hidden)]
 pub static LANE_SEND_GUARD_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Sync `send` calls in progress. Stays non-zero while the queue is full.
+/// Callers inside [`hold_lane_mutex_for_tests`] after the lock is taken.
+/// Condvar waiters do not increment this.
 #[doc(hidden)]
-pub static LANE_BLOCKING_SENDS: AtomicUsize = AtomicUsize::new(0);
+pub static LANE_MUTEX_HOLDERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Failed async `try_send`s on a full tip-accept queue. A parked sender
 /// records a handful. A yield loop keeps adding.
@@ -296,8 +297,8 @@ fn lane_poll_gate(exempt: bool) -> LaneGate {
     if exempt || !LANE_GATE_ON.load(Ordering::Acquire) {
         return LaneGate::Clear(None);
     }
-    // `try_lock`: a sync `send` on a full queue holds this mutex. Blocking
-    // here parks the worker inside `timeout`'s future.
+    // `try_lock`: `hold_lane_mutex_for_tests` keeps this mutex. `lock` here
+    // would park the worker inside `timeout`'s future. `send` does not.
     let g = match LANE_EXCLUSIVE_MU.try_lock() {
         Ok(g) => g,
         Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
@@ -410,13 +411,13 @@ pub fn try_enqueue(job: Job) -> Result<(), TrySendError<Job>> {
 pub fn hold_lane_mutex_for_tests(release: &std::sync::Arc<(Mutex<bool>, Condvar)>) {
     #[cfg(debug_assertions)]
     let _gate = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
-    LANE_SEND_GUARD_WAITERS.fetch_add(1, Ordering::SeqCst);
+    LANE_MUTEX_HOLDERS.fetch_add(1, Ordering::SeqCst);
     let (lock, cv) = &**release;
     let mut w = lock.lock().unwrap_or_else(|p| p.into_inner());
     while !*w {
         w = cv.wait(w).unwrap_or_else(|p| p.into_inner());
     }
-    LANE_SEND_GUARD_WAITERS.fetch_sub(1, Ordering::SeqCst);
+    LANE_MUTEX_HOLDERS.fetch_sub(1, Ordering::SeqCst);
 }
 
 fn poll_try_enqueue(exempt: bool, job: Job) -> PollEnqueue {
@@ -733,9 +734,7 @@ pub fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         let gate = lane_send_guard(exempt);
         note_queued();
         drop(gate);
-        LANE_BLOCKING_SENDS.fetch_add(1, Ordering::SeqCst);
         let sent = sender().send(job);
-        LANE_BLOCKING_SENDS.fetch_sub(1, Ordering::SeqCst);
         if sent.is_err() {
             note_dequeued();
             panic!("tip-accept thread");

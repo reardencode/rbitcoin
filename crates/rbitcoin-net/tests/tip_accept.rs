@@ -225,7 +225,7 @@ fn blocking_send_does_not_stall_another_runtime() {
     let rel = Arc::clone(&release);
     let holder = thread::spawn(move || hold_lane_mutex_for_tests(&rel));
     let t0 = std::time::Instant::now();
-    while LANE_SEND_GUARD_WAITERS.load(Ordering::SeqCst) == 0 {
+    while LANE_MUTEX_HOLDERS.load(Ordering::SeqCst) == 0 {
         assert!(
             t0.elapsed() < Duration::from_secs(2),
             "holder never took the permit mutex"
