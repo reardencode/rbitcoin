@@ -184,7 +184,7 @@ impl Drop for TipFlushAlive {
     }
 }
 
-#[cfg(all(debug_assertions, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn linux_task_id() -> Option<u64> {
     let path = std::fs::read_link("/proc/thread-self").ok()?;
     path.file_name()?.to_str()?.parse().ok()
@@ -1467,6 +1467,51 @@ pub fn request_sh_writebehind_halt(
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Class B scripthash appender. The builder name is `rbtc-sh-wb`.
+pub struct ShWritebehind {
+    join: std::thread::JoinHandle<()>,
+    #[cfg(target_os = "linux")]
+    os_tid: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(target_os = "linux")]
+    published: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl ShWritebehind {
+    pub fn join(self) -> std::thread::Result<()> {
+        self.join.join()
+    }
+
+    pub fn thread(&self) -> &std::thread::Thread {
+        self.join.thread()
+    }
+
+    /// Linux tid after the appender has published it. The name is already set.
+    #[cfg(target_os = "linux")]
+    #[doc(hidden)]
+    pub fn wait_published(&self, timeout: std::time::Duration) -> Option<u64> {
+        let (lock, cv) = &*self.published;
+        let mut ready = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *ready {
+                let tid = self.os_tid.load(std::sync::atomic::Ordering::Acquire);
+                return (tid != 0).then_some(tid);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (guard, status) = cv
+                .wait_timeout(ready, left)
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+            if status.timed_out() && !*ready {
+                return None;
+            }
+        }
+    }
+}
+
 /// One Class B appender for SH write-behind. Tests drain via [`Query::apply_sh_pending`].
 ///
 /// Apply errors request `stop` and `on_fatal` so the process exits instead of
@@ -1475,10 +1520,25 @@ pub fn spawn_sh_writebehind(
     query: std::sync::Arc<Query>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
-) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
+) -> ShWritebehind {
+    #[cfg(target_os = "linux")]
+    let os_tid = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[cfg(target_os = "linux")]
+    let published = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    #[cfg(target_os = "linux")]
+    let thread_tid = std::sync::Arc::clone(&os_tid);
+    #[cfg(target_os = "linux")]
+    let thread_published = std::sync::Arc::clone(&published);
+    let join = std::thread::Builder::new()
         .name("rbtc-sh-wb".into())
         .spawn(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(tid) = linux_task_id() {
+                thread_tid.store(tid, std::sync::atomic::Ordering::Release);
+                let (lock, cv) = &*thread_published;
+                *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                cv.notify_all();
+            }
             let mut on_fatal = Some(on_fatal);
             loop {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1521,5 +1581,12 @@ pub fn spawn_sh_writebehind(
                 rbitcoin_log::info!("sh: apply h={h} wall={wall_ms}ms lag={lag}");
             }
         })
-        .expect("spawn sh write-behind")
+        .expect("spawn sh write-behind");
+    ShWritebehind {
+        join,
+        #[cfg(target_os = "linux")]
+        os_tid,
+        #[cfg(target_os = "linux")]
+        published,
+    }
 }
