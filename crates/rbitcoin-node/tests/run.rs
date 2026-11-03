@@ -1111,6 +1111,17 @@ fn startup_sets_datadir_hdd_on_the_store() {
 }
 
 #[test]
+fn startup_names_the_genesis_coinbase_on_the_query() {
+    let dir = scratch_dir("genesis-coinbase");
+    let q = Query::open_or_create_tiny(&dir).unwrap();
+    let cfg = NodeConfig::default();
+    apply_startup_index_mode(&q, &cfg, 0).unwrap();
+    let want = cfg.chain_params().unwrap().genesis_coinbase_txid;
+    assert_eq!(q.genesis_coinbase_txid.get(), Some(&want));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn startup_sets_sh_force_rebuild_on_the_query() {
     let dir = scratch_dir("sh-force-rebuild");
     let q = Query::open_or_create_tiny(&dir).unwrap();

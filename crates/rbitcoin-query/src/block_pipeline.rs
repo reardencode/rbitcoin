@@ -450,8 +450,9 @@ pub fn assemble_non_cb_inputs(
     for (ii, input) in tx.input.iter().enumerate() {
         let op = input.previous_output;
         let key = (op.txid.to_byte_array(), op.vout);
-        // The genesis coinbase stays indexed for RPC and Electrum, but it is
-        // not a coin (Core `ConnectBlock` genesis early return).
+        // The genesis coinbase stays stored for RPC and Esplora, but it is
+        // not a coin (Core `ConnectBlock` genesis early return). Scripthash
+        // views skip it (`Query::set_genesis_coinbase_txid`).
         rbitcoin_consensus::block::reject_genesis_coinbase_spend(
             params.is_genesis_coinbase(&key.0),
         )?;

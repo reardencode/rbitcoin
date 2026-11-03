@@ -1663,3 +1663,125 @@ fn sh_collect_cold_then_disconnect_clears_tip() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Core's coins view never holds an `OP_RETURN` output or a script over
+/// 10,000 bytes. Balance, listunspent, and funded stats skip them. The
+/// transaction that paid them stays in that script's history.
+#[test]
+fn sh_views_skip_unspendable_outputs() {
+    let (dir, q) = temp_query("sh-unspendable");
+    let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+    let hash0 = h0.hash;
+    let hfk0 = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    let op_return = vec![0x6a, 0x01, 0x02];
+    let mut commitment = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    commitment.extend([0x5a; 32]);
+    let oversize = vec![0x51; 10_001];
+    let (h1, mut t1) = coinbase_block(1, hfk0, Some(hash0));
+    t1.outputs = vec![
+        OutputRecord::unspent(49_0000_0000, vec![0x51]),
+        OutputRecord::unspent(1_0000, op_return.clone()),
+        OutputRecord::unspent(0, commitment.clone()),
+        OutputRecord::unspent(2_0000, oversize.clone()),
+    ];
+    t1.tx.output_count = 4;
+    let txid1 = t1.tx.txid;
+    q.connect_block(Height(1), &h1, &[t1]).unwrap();
+
+    for script in [&op_return, &commitment, &oversize] {
+        let sh = script_hash(script);
+        assert!(q.scripthash_listunspent(&sh).unwrap().is_empty());
+        assert_eq!(q.scripthash_balance(&sh).unwrap().confirmed, 0);
+        let stats = q.scripthash_chain_stats(&sh).unwrap();
+        assert_eq!(stats.tx_count, 1, "the paying tx is still history");
+        assert_eq!((stats.funded_txo_count, stats.funded_txo_sum), (0, 0));
+        assert_eq!((stats.spent_txo_count, stats.spent_txo_sum), (0, 0));
+        let hist: Vec<_> = q
+            .scripthash_history(&sh)
+            .unwrap()
+            .iter()
+            .map(|row| row.txid)
+            .collect();
+        assert_eq!(hist, vec![txid1]);
+        let view = q.pin_sh_chain_view().unwrap().expect("SH view");
+        for filter in [
+            HistoryFilter::open(),
+            HistoryFilter::esplora_chain_page(None),
+        ] {
+            let rows: Vec<_> = q
+                .scripthash_history_summary_filtered_in(&sh, &filter, &view)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| (row.txid, row.value))
+                .collect();
+            assert_eq!(rows, vec![(txid1, 0)], "summary value is funded coins");
+        }
+    }
+    let sh = script_hash(&[0x51]);
+    assert_eq!(q.scripthash_listunspent(&sh).unwrap().len(), 2);
+    assert_eq!(q.scripthash_balance(&sh).unwrap().confirmed, 99_0000_0000);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The genesis coinbase is not a coin and not an ordinary transaction.
+/// Every scripthash view leaves it out, so Electrum never reports a
+/// confirmed height-0 row (height 0 there means mempool). That holds while
+/// its create is pending write-behind and after apply.
+#[test]
+fn sh_views_skip_the_genesis_coinbase() {
+    let (dir, q) = temp_query("sh-genesis-coinbase");
+    let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+    let genesis_txid = t0.tx.txid;
+    let hash0 = h0.hash;
+    q.commit_class_a_only(&h0, &[t0]).unwrap();
+    let hfk0 = q.confirm_block(Height(0), &hash0).unwrap();
+    let (h1, t1) = coinbase_block(1, hfk0, Some(hash0));
+    let txid1 = t1.tx.txid;
+    q.commit_class_a_only(&h1, &[t1]).unwrap();
+    q.confirm_block(Height(1), &h1.hash).unwrap();
+    let sh = script_hash(&[0x51]);
+    assert!(!q.pending_sh_create_fks(&sh).is_empty(), "creates pending");
+    assert_eq!(q.scripthash_history(&sh).unwrap().len(), 2, "unset: listed");
+
+    q.set_genesis_coinbase_txid(genesis_txid);
+    let check = |state: &str| {
+        let rows = |filter: &HistoryFilter| -> Vec<([u8; 32], i64)> {
+            q.scripthash_history_filtered(&sh, filter)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| (row.txid, row.height))
+                .collect()
+        };
+        let want = vec![(txid1, 1)];
+        assert_eq!(rows(&HistoryFilter::open()), want, "{state}");
+        assert_eq!(
+            rows(&HistoryFilter::esplora_chain_page(None)),
+            want,
+            "{state}"
+        );
+        assert_eq!(
+            rows(&HistoryFilter::height_window(0, Some(2))),
+            want,
+            "{state}"
+        );
+        let utxos = q.scripthash_listunspent(&sh).unwrap();
+        assert_eq!(utxos.len(), 1, "{state}");
+        assert_eq!((utxos[0].tx_hash, utxos[0].height), (txid1, 1), "{state}");
+        assert_eq!(q.scripthash_balance(&sh).unwrap().confirmed, 50_0000_0000);
+        let stats = q.scripthash_chain_stats(&sh).unwrap();
+        assert_eq!(
+            (stats.tx_count, stats.funded_txo_count, stats.funded_txo_sum),
+            (1, 1, 50_0000_0000),
+            "{state}"
+        );
+    };
+    check("pending");
+    q.release_index_writebehind(Height(1));
+    q.apply_sh_pending().unwrap();
+    assert_eq!(q.sh_indexed_through_height(), Some(1));
+    assert!(q.pending_sh_create_fks(&sh).is_empty(), "creates durable");
+    check("durable");
+    let _ = std::fs::remove_dir_all(&dir);
+}

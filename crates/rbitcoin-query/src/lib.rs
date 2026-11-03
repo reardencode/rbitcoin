@@ -475,6 +475,10 @@ pub struct Query {
     pub height_by_hash: Mutex<HeightByHashIndex>,
     /// `reconstruct_archived_block` calls (`/raw` and Esplora size/weight).
     pub reconstruct_archived: AtomicU64,
+    /// Network genesis coinbase txid ([`Self::set_genesis_coinbase_txid`]).
+    pub genesis_coinbase_txid: std::sync::OnceLock<[u8; 32]>,
+    /// That tx's fk once the genesis block is stored. Genesis never reorgs.
+    pub genesis_coinbase_fk: std::sync::OnceLock<Fk>,
     /// 0 = unlimited. Electrum + Esplora SH joins refuse above this create count.
     pub max_sh_creates: AtomicU32,
     /// 0 = off. An unpaged SH join above this create count holds
@@ -672,6 +676,8 @@ impl Query {
             header_read_cancel: std::sync::atomic::AtomicBool::new(false),
             height_by_hash: Mutex::new(HeightByHashIndex::default()),
             reconstruct_archived: AtomicU64::new(0),
+            genesis_coinbase_txid: std::sync::OnceLock::new(),
+            genesis_coinbase_fk: std::sync::OnceLock::new(),
             max_sh_creates: AtomicU32::new(DEFAULT_MAX_SH_CREATES),
             heavy_sh_creates: AtomicU32::new(DEFAULT_HEAVY_SH_CREATES),
             api_read_budget: std::sync::Mutex::new(Arc::new(tokio::sync::Semaphore::new(
@@ -1516,6 +1522,13 @@ impl Query {
     /// [`StoreError::Rejected`] payload from [`Self::block_queue_offer`] for
     /// wire that does not decode. Only this refusal is the sender's fault.
     pub const UNDECODABLE_WIRE_MSG: &'static str = "block wire does not decode";
+
+    /// Name the network's genesis coinbase. Scripthash views leave it out:
+    /// it is not a coin. Unset, a height-0 coinbase is an ordinary tx
+    /// (synthetic test chains). The first call wins.
+    pub fn set_genesis_coinbase_txid(&self, txid: [u8; 32]) {
+        let _ = self.genesis_coinbase_txid.set(txid);
+    }
 
     pub fn set_max_sh_creates(&self, n: u32) {
         self.max_sh_creates.store(n, AtomicOrdering::Relaxed);

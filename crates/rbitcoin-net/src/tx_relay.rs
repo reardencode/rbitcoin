@@ -6158,7 +6158,9 @@ impl MempoolHub {
                     txid,
                     vout: vout as u32,
                 };
-                if g.graph.mempool_utxo(&op) {
+                if g.graph.mempool_utxo(&op)
+                    && !rbitcoin_consensus::policy::is_unspendable(o.script_pubkey.as_bytes())
+                {
                     delta = delta.saturating_add(o.value.to_sat() as i64);
                 }
             }
