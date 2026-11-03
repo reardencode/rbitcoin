@@ -1372,6 +1372,36 @@ pub fn is_final_tx(tx: &Transaction, block_height: u32, lock_time_cutoff: u32) -
     tx.input.iter().all(|i| i.sequence.is_final())
 }
 
+/// The time [`is_final_tx`] compares a time lock with: the parent's median
+/// time once BIP113 (CSV) is active, else the block's own timestamp.
+pub fn lock_time_cutoff(ctx: &ValidationContext<'_>, block: &Block, prev_mtp: u32) -> u32 {
+    // Height 0 has no MTP history, so the cutoff is the block time even
+    // when CSV is active.
+    if ctx.height.0 == 0 || !ctx.params.csv_active_at(ctx.height.0) {
+        block.header.time
+    } else {
+        prev_mtp
+    }
+}
+
+/// Core `CheckBlock` and `ContextualCheckBlock` for a block at `ctx.height`
+/// whose parent has median time `prev_mtp`: structure, BIP34, the witness
+/// commitment, weight, sigops, and finality. Core runs these in `AcceptBlock`
+/// for every block, on the active chain or not; inputs and scripts wait for
+/// connect.
+pub fn check_block_on_parent(
+    block: &Block,
+    ctx: &ValidationContext<'_>,
+    prev_mtp: u32,
+) -> Result<(), ConsensusError> {
+    validate_block_structure(block, ctx)?;
+    let cutoff = lock_time_cutoff(ctx, block, prev_mtp);
+    for tx in &block.txdata {
+        reject_non_final(tx, ctx.height.0, cutoff)?;
+    }
+    Ok(())
+}
+
 /// BIP68 / CSV version gate: Core compares `nVersion` as **unsigned**
 /// (`uint32_t >= 2`). rust-bitcoin exposes `Version(i32)`; cast explicitly so
 /// `0xFFFFFFFF` enforces locks (not signed `-1 < 2`).

@@ -2038,6 +2038,29 @@ impl ChainHub {
         })
     }
 
+    /// Core `AcceptBlock` before a body is kept: `ContextualCheckBlockHeader`,
+    /// `CheckBlock`, and `ContextualCheckBlock` against the block's parent,
+    /// whether that parent is on the active chain, held, or a stored side
+    /// header. Inputs and scripts wait for the branch to connect. A parent
+    /// with no header, or past the stored height walk, is left to connect.
+    pub fn check_block_on_parent(&self, block: &Block) -> Result<(), NetError> {
+        let prev = block.header.prev_blockhash;
+        let (Some(parent), Some(parent_h)) =
+            (self.header_of(&prev), self.stored_header_height(&prev))
+        else {
+            return Ok(());
+        };
+        let none = HashMap::new();
+        self.header_sync_contextual(&block.header, &none)?;
+        let mtp = self.mtp_off_tip(&parent, &none);
+        let ctx = rbitcoin_consensus::ValidationContext::at(
+            &self.params,
+            Height(parent_h.saturating_add(1)),
+            self.milestone,
+        );
+        rbitcoin_consensus::block::check_block_on_parent(block, &ctx, mtp).map_err(NetError::Rules)
+    }
+
     #[doc(hidden)]
     pub fn sync_parent_header(
         &self,
@@ -3372,11 +3395,19 @@ impl ChainHub {
                     return Err(NetError::Consensus(BAD_PREVBLK.into()));
                 }
 
-                let Some(parent_h) = self
+                let parent_h = self
                     .query
                     .height_of_hash(&prev.to_byte_array())
-                    .map_err(NetError::store)?
-                else {
+                    .map_err(NetError::store)?;
+                // The tip path waives inside `connect_at`. This side block
+                // uses that same session bit. Proof-of-work and bad nBits stay
+                // errors because they are not on the warn list.
+                if parent_h.is_some() || self.knows_header(&prev) {
+                    rbitcoin_query::confirm_run::waive_batch(waive, || {
+                        self.check_block_on_parent(&block)
+                    })?;
+                }
+                let Some(parent_h) = parent_h else {
                     if hold_unconnected {
                         self.hold_body(block, waive);
                     }
@@ -3384,22 +3415,6 @@ impl ChainHub {
                 };
 
                 let new_height = parent_h.0.saturating_add(1);
-                // The tip path waives inside `connect_at`, which also freezes
-                // the node clock. This side block uses that same session bit
-                // and the same clock. Proof-of-work and bad nBits stay errors
-                // because they are not on the warn list.
-                self.clock
-                    .with_frozen(|| {
-                        rbitcoin_query::confirm_run::waive_batch(waive, || {
-                            validate_header(
-                                self.query.as_ref(),
-                                &self.params,
-                                Height(new_height),
-                                &block.header,
-                            )
-                        })
-                    })
-                    .map_err(|e| header_reject(&block.header, &e))?;
 
                 if new_height == tip_h {
                     // Park before the branch attempt so connect reads this
@@ -4787,7 +4802,7 @@ pub fn check_block_proposal_with(
     if let Err(e) = rbitcoin_consensus::validate_block_structure(block, &vctx) {
         return Err(rbitcoin_consensus::block_reject_reason(&e));
     }
-    let lock_time_cutoff = rbitcoin_query::assemble_lock_time_cutoff(&vctx, block, mtp);
+    let lock_time_cutoff = rbitcoin_consensus::block::lock_time_cutoff(&vctx, block, mtp);
     let (fees, prevouts) = proposal_connect(query, params, block, height, mtp, lock_time_cutoff)?;
     let subsidy = rbitcoin_consensus::block_subsidy(height, params) as u64;
     let mut coinbase_out = 0u64;

@@ -113,7 +113,56 @@ fn rpc_regtest_from_genesis() {
     chain_ops_reconsider_invalidated_side_block(&ctx, &hub);
     chain_ops_decode_acceptance(&ctx, &hub);
     chain_ops_child_of_invalidated_block(&ctx, &hub);
+    chain_ops_side_branch_contextual(&ctx, &hub);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `AcceptBlock` runs `ContextualCheckBlockHeader`, `CheckBlock`, and
+/// `ContextualCheckBlock` against the parent of every block, on the active
+/// chain or not. Only inputs and scripts wait for the branch to connect.
+fn chain_ops_side_branch_contextual(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let submit = |b: &Block| dispatch(ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+    let mine = |prev: BlockHash, time: u32, height: u32, txdata: Vec<Transaction>| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, true_spk(), txdata)
+    };
+    let nonfinal = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::from_consensus(1_000_000),
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x5a; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ZERO,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: true_spk(),
+        }],
+    };
+    let tip = hub.tip_header().unwrap();
+    let height = tip_count(ctx) as u32;
+    let sibling = mine(tip.prev_blockhash, tip.time + 30, height, vec![nonfinal.clone()]);
+    assert_eq!(submit(&sibling), "bad-txns-nonfinal", "an equal-work sibling");
+
+    let base = hub.query.header_at_height(Height(height - 2)).unwrap().unwrap().1;
+    let held = mine(BlockHash::from_byte_array(base.hash), tip.time + 31, height - 1, vec![]);
+    assert_eq!(submit(&held), "inconclusive", "a shorter side block is held");
+    let on_held = |time: u32, height: u32, txdata| mine(held.block_hash(), time, height, txdata);
+    for (block, want) in [
+        (on_held(held.header.time + 1, height + 5, vec![]), "bad-cb-height"),
+        (on_held(held.header.time + 2, height, vec![nonfinal]), "bad-txns-nonfinal"),
+        (on_held(1, height, vec![]), "time-too-old"),
+    ] {
+        assert_eq!(submit(&block), want, "a block on a held side parent");
+    }
+    let valid = on_held(held.header.time + 3, height, vec![]);
+    assert_eq!(submit(&valid), "inconclusive", "an equal-work side branch is held");
+    assert_eq!(hub.tip_hash(), Some(tip.block_hash()));
 }
 
 /// Core `AcceptBlockHeader`: a block whose parent is marked invalid is

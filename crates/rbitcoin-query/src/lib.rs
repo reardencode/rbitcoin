@@ -73,7 +73,6 @@ pub mod regtest_pad;
 pub mod sp_read;
 pub mod versionbits;
 
-pub use block_pipeline::assemble_lock_time_cutoff;
 pub use combined_stage::{load_creates_once, CombinedCreate};
 pub use confirm_error::ConfirmError;
 pub use connect_facade::*;

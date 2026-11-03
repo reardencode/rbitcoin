@@ -3533,29 +3533,29 @@ fn should_use_pres_requires_an_index_inside_the_slice() {
 
 #[test]
 fn lock_time_cutoff_uses_block_time_at_height_zero_even_when_csv_is_active() {
-    use rbitcoin_query::block_pipeline::assemble_lock_time_cutoff;
+    use rbitcoin_consensus::block::lock_time_cutoff;
     let mut block = block_with(vec![coinbase(0)]);
     block.header.time = 100;
     let mtp = 200;
-    assert_eq!(assemble_lock_time_cutoff(&ctx_h(0), &block, mtp), 100);
+    assert_eq!(lock_time_cutoff(&ctx_h(0), &block, mtp), 100);
     // Regtest CSV height is 1, so height 1 uses the previous median time.
-    assert_eq!(assemble_lock_time_cutoff(&ctx_h(1), &block, mtp), mtp);
+    assert_eq!(lock_time_cutoff(&ctx_h(1), &block, mtp), mtp);
 
     let mut params = ChainParams::regtest();
     params.apply_test_activation_height("csv", 0).unwrap();
     let params = Box::leak(Box::new(params));
     let at_genesis = ValidationContext::at(params, Height(0), Milestone::NONE);
     assert!(params.csv_active_at(0));
-    assert_eq!(assemble_lock_time_cutoff(&at_genesis, &block, mtp), 100);
+    assert_eq!(lock_time_cutoff(&at_genesis, &block, mtp), 100);
     let after_genesis = ValidationContext::at(params, Height(1), Milestone::NONE);
-    assert_eq!(assemble_lock_time_cutoff(&after_genesis, &block, mtp), mtp);
+    assert_eq!(lock_time_cutoff(&after_genesis, &block, mtp), mtp);
 
     let mut late = ChainParams::regtest();
     late.apply_test_activation_height("csv", 500).unwrap();
     let late = Box::leak(Box::new(late));
     let before_csv = ValidationContext::at(late, Height(10), Milestone::NONE);
     assert!(!late.csv_active_at(10));
-    assert_eq!(assemble_lock_time_cutoff(&before_csv, &block, mtp), 100);
+    assert_eq!(lock_time_cutoff(&before_csv, &block, mtp), 100);
 }
 
 #[test]
