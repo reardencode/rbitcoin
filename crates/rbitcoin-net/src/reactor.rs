@@ -3,7 +3,7 @@
 //! Tokio names both multi-thread workers and `spawn_blocking` threads
 //! `tokio-rt-worker`. Blocking-pool work must enter [`BlockingRegion`].
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -16,6 +16,7 @@ tokio::task_local! {
 
 thread_local! {
     static BLOCKING_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static HELD_STORE_PERMIT: RefCell<Option<OwnedSemaphorePermit>> = const { RefCell::new(None) };
 }
 
 /// Guard: this OS thread may take std locks / store IO (blocking pool or tests).
@@ -139,6 +140,33 @@ pub async fn acquire_armed_store_budget() -> Option<OwnedSemaphorePermit> {
         return None;
     };
     Some(sem.acquire_owned().await.expect("store budget"))
+}
+
+/// Park `permit` on this thread. [`release_store_permit`] drops it before
+/// later CPU on the same call. The guard drops whatever is still held.
+#[doc(hidden)]
+pub struct StorePermitGuard;
+
+#[doc(hidden)]
+pub fn hold_store_permit(permit: Option<OwnedSemaphorePermit>) -> StorePermitGuard {
+    HELD_STORE_PERMIT.with(|slot| {
+        *slot.borrow_mut() = permit;
+    });
+    StorePermitGuard
+}
+
+/// Drop this thread's store-read permit. A thread that never held one is unchanged.
+#[doc(hidden)]
+pub fn release_store_permit() {
+    HELD_STORE_PERMIT.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+impl Drop for StorePermitGuard {
+    fn drop(&mut self) {
+        release_store_permit();
+    }
 }
 
 /// [`off_pool`] that holds one armed store-read permit for `f` only.

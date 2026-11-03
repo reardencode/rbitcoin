@@ -1809,7 +1809,7 @@ async fn full_work_queue_is_503_before_the_store_budget() {
         rpc_post(
             State(state),
             axum::extract::Request::new(Body::from(
-                br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#.as_slice(),
+                br#"{"jsonrpc":"1.0","id":1,"method":"getbestblockhash"}"#.as_slice(),
             )),
         ),
     )
@@ -1850,6 +1850,93 @@ async fn long_poll_queue_full_is_503_before_the_store_budget() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// `getblockcount` reads the in-memory tip. It must finish while the only
+/// store permit is held, including a batch of calls that also skip the store.
+#[tokio::test]
+async fn getblockcount_finishes_while_the_store_permit_is_held() {
+    let (ctx, dir) = http_wait_ctx();
+    ctx.query.set_api_read_budget(1);
+    let budget = ctx.query.api_read_budget();
+    let hold = budget.clone().acquire_owned().await.expect("permit");
+    let state = AppState {
+        ctx: Arc::clone(&ctx),
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(4)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let one = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rpc_post(
+            State(state),
+            axum::extract::Request::new(Body::from(
+                br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#.as_slice(),
+            )),
+        ),
+    )
+    .await
+    .expect("getblockcount waited on a store permit");
+    assert_eq!(one.status(), StatusCode::OK);
+    let batch_state = AppState {
+        ctx: Arc::clone(&ctx),
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(4)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rpc_post(
+            State(batch_state),
+            axum::extract::Request::new(Body::from(
+                br#"[{"jsonrpc":"1.0","id":1,"method":"uptime"},{"jsonrpc":"1.0","id":2,"method":"getblockcount"}]"#
+                    .as_slice(),
+            )),
+        ),
+    )
+    .await
+    .expect("store-free batch waited on a store permit");
+    assert_eq!(batch.status(), StatusCode::OK);
+    let mixed = serde_json::json!([
+        {"jsonrpc":"1.0","id":1,"method":"getblockcount"},
+        {"jsonrpc":"1.0","id":2,"method":"getbestblockhash"}
+    ]);
+    let mixed_state = AppState {
+        ctx: Arc::clone(&ctx),
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(4)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let mixed_call = tokio::spawn(async move {
+        rpc_post(
+            State(mixed_state),
+            axum::extract::Request::new(Body::from(mixed.to_string())),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !mixed_call.is_finished(),
+        "a batch with a store read ran while the only permit was held"
+    );
+    assert_eq!(budget.available_permits(), 0);
+    drop(hold);
+    let mixed_response = tokio::time::timeout(std::time::Duration::from_secs(2), mixed_call)
+        .await
+        .expect("mixed batch finishes after the permit")
+        .expect("join");
+    assert_eq!(mixed_response.status(), StatusCode::OK);
+    assert_eq!(budget.available_permits(), 1);
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// One store permit: the second read waits on the async task. A parked
 /// blocking thread is not what it is waiting on. Releasing the permit lets
 /// the request take it while that thread is still parked.
@@ -1884,7 +1971,7 @@ fn store_budget_wait_does_not_need_a_pool_thread() {
             rpc_post(
                 State(state),
                 axum::extract::Request::new(Body::from(
-                    br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#.as_slice(),
+                    br#"{"jsonrpc":"1.0","id":1,"method":"getbestblockhash"}"#.as_slice(),
                 )),
             )
             .await
@@ -2163,6 +2250,79 @@ fn gbt_app(ctx: Arc<rbitcoin_rpc::methods::RpcContext>) -> AppState {
         rest: false,
         require_auth: false,
     }
+}
+
+/// Template selection runs after the disk permit is dropped, so one budget
+/// still serves `getbestblockhash` while the template is being chosen.
+#[cfg(debug_assertions)]
+#[test]
+fn template_selection_does_not_hold_the_store_permit() {
+    use rbitcoin_rpc::methods::mine::{arm_gbt_render_gate, GbtRenderGate};
+    let gate = Arc::new(GbtRenderGate::default());
+    arm_gbt_render_gate(Some(Arc::clone(&gate)));
+    struct Clear(Arc<GbtRenderGate>);
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            self.0.release();
+            arm_gbt_render_gate(None);
+        }
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    // Dropped before the runtime so a failed assert releases the gate and
+    // the blocking thread can leave.
+    let _clear = Clear(Arc::clone(&gate));
+    rt.block_on(async {
+        let (ctx, dir, _mp) = gbt_prev_ctx();
+        ctx.query.set_api_read_budget(1);
+        let gbt_state = gbt_app(Arc::clone(&ctx));
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
+            "method": "getblocktemplate",
+            "params": [{ "rules": ["segwit"] }]
+        });
+        let gbt = tokio::spawn(async move {
+            rpc_post(
+                State(gbt_state),
+                axum::extract::Request::new(Body::from(body.to_string())),
+            )
+            .await
+        });
+        let entered =
+            std::thread::spawn(move || gate.wait_entered(std::time::Duration::from_secs(2)))
+                .join()
+                .expect("gate wait");
+        assert!(entered, "template selection did not start");
+        let hash_state = gbt_app(Arc::clone(&ctx));
+        let hash = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            rpc_post(
+                State(hash_state),
+                axum::extract::Request::new(Body::from(
+                    br#"{"jsonrpc":"1.0","id":2,"method":"getbestblockhash"}"#.as_slice(),
+                )),
+            ),
+        )
+        .await
+        .expect("getbestblockhash waited on the permit held by template selection");
+        assert_eq!(hash.status(), StatusCode::OK);
+        assert!(
+            !gbt.is_finished(),
+            "template returned before selection was released"
+        );
+        _clear.0.release();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), gbt)
+            .await
+            .expect("template finishes after selection")
+            .expect("join");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(dir.path());
+    });
 }
 
 /// A plain template blocks in `template_prev` without the disk permit and

@@ -705,7 +705,14 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
-    let store_permit = budget.acquire_owned().await.expect("store budget");
+    // A batch takes one permit when any call reads the store. A body that
+    // never reads it does not wait, so a full disk budget still answers
+    // `getblockcount`.
+    let store_permit = if http_body_reads_store(&parsed) {
+        Some(budget.acquire_owned().await.expect("store budget"))
+    } else {
+        None
+    };
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
         let _store = store_permit;
@@ -858,6 +865,20 @@ pub fn v1_http_status(error: &serde_json::Value) -> StatusCode {
         Some(-32601) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+fn http_call_reads_store(req: &serde_json::Value) -> bool {
+    match req.get("method").and_then(|m| m.as_str()) {
+        Some(method) => crate::methods::rpc_call_reads_store(method),
+        None => true,
+    }
+}
+
+fn http_body_reads_store(parsed: &serde_json::Value) -> bool {
+    if let Some(arr) = parsed.as_array() {
+        return arr.iter().any(http_call_reads_store);
+    }
+    http_call_reads_store(parsed)
 }
 
 fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
@@ -1100,12 +1121,14 @@ async fn exec_blocking_method(
             rbitcoin_net::sample_template_prev_for_build(ctx.mempool.as_ref().map(Arc::clone))
                 .await;
         (sample.permit, sample.armed)
+    } else if !crate::methods::rpc_call_reads_store(method) {
+        (None, None)
     } else {
         (rbitcoin_net::acquire_armed_store_budget().await, None)
     };
     match tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
-        let _store = store_permit;
+        let _store = rbitcoin_net::hold_store_permit(store_permit);
         let _prev = template_prev.map(rbitcoin_net::arm_template_prev_sample);
         if waited {
             crate::methods::set_http_wait_satisfied(true);
