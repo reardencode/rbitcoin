@@ -5,6 +5,9 @@ Fixed
 - **`waitforblock` and `waitforblockheight` return a tip-read error on the
   poll that sees it.** A missing tip or a failed header read no longer
   holds the call until the timeout.
-- **`invalidateblock` wakes `waitforblock`, `waitforblockheight`, and
-  `waitfornewblock`.** The new tip is published even when that RPC context
-  has no mempool.
+- **`invalidateblock` wakes `waitforblock`, `waitforblockheight`,
+  `waitfornewblock`, and a `getblocktemplate` longpoll.** The tip that call
+  leaves, including a replacement fork, is what those waits see. A mempool
+  eviction or admit while that call is still choosing the tip does not
+  publish the stump. A pool that is still catching up publishes that same
+  fork tip.

@@ -918,6 +918,9 @@ pub struct MempoolHub {
     /// Tip whose mempool strip has finished. Block templates build on this.
     /// The query tip is visible earlier, before `remove_for_block_spent`.
     template_prev: Mutex<Option<[u8; 32]>>,
+    /// Hash the active [`TemplateHold`] will publish on drop. Nested holds
+    /// write this; only the outer hold sends it.
+    template_commit: Mutex<Option<[u8; 32]>>,
     /// Odd while a [`TemplateHold`] is out, so the pool may not match the tip.
     pool_settle: AtomicU64,
     /// INV immediately instead of waiting on mocktime.
@@ -1000,31 +1003,59 @@ pub struct CommitOutcome {
     pub prevouts: Vec<TxOut>,
 }
 
+std::thread_local! {
+    /// Holds taken on this thread. A nested hold does not lock again and
+    /// does not publish; the outer drop sends the last commit.
+    static TEMPLATE_HOLD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn template_hold_enter() {
+    TEMPLATE_HOLD_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+fn template_hold_leave() {
+    TEMPLATE_HOLD_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
 /// Lock held for the whole of a block connect. `commit` records the hash
-/// whose pool strip has finished; the drop writes it.
+/// whose pool strip has finished; the outer drop writes it.
 #[doc(hidden)]
 pub struct TemplateHold<'a> {
     updates: &'a AtomicU64,
     watch: &'a tokio::sync::watch::Sender<u64>,
     settle: &'a AtomicU64,
-    slot: std::sync::MutexGuard<'a, Option<[u8; 32]>>,
-    commit: Option<[u8; 32]>,
+    slot: Option<std::sync::MutexGuard<'a, Option<[u8; 32]>>>,
+    commit: &'a std::sync::Mutex<Option<[u8; 32]>>,
+    /// This thread already holds the mark. Drop does not publish.
+    nested: bool,
 }
 
 impl TemplateHold<'_> {
     pub(crate) fn commit(&mut self, hash: [u8; 32]) {
-        self.commit = Some(hash);
+        *self.commit.lock().unwrap() = Some(hash);
+    }
+
+    /// True when an outer hold on this thread owns the publish.
+    pub(crate) fn is_nested(&self) -> bool {
+        self.nested
     }
 }
 
 impl Drop for TemplateHold<'_> {
     fn drop(&mut self) {
-        if let Some(hash) = self.commit {
-            *self.slot = Some(hash);
-            let next = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
-            self.watch.send_replace(next);
+        if !self.nested {
+            if let Some(hash) = self.commit.lock().unwrap().take() {
+                if let Some(slot) = self.slot.as_mut() {
+                    **slot = Some(hash);
+                }
+                let next = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
+                self.watch.send_replace(next);
+            }
+            self.settle.fetch_add(1, Ordering::SeqCst);
         }
-        self.settle.fetch_add(1, Ordering::SeqCst);
+        // After the publish, so a re-entrant hold sees this one and does not
+        // lock `template_prev` again.
+        template_hold_leave();
     }
 }
 
@@ -1199,6 +1230,7 @@ impl MempoolHub {
             template_updates: AtomicU64::new(0),
             template_watch: tokio::sync::watch::channel(0).0,
             template_prev: Mutex::new(None),
+            template_commit: Mutex::new(None),
             pool_settle: AtomicU64::new(0),
             age_inv: Mutex::new(BTreeMap::new()),
             min_live_accept_at: AtomicU64::new(u64::MAX),
@@ -4047,7 +4079,12 @@ impl MempoolHub {
     #[doc(hidden)]
     pub fn note_template_update(&self) {
         let next = self.template_updates.fetch_add(1, Ordering::Relaxed) + 1;
-        self.template_watch.send_replace(next);
+        // A hold publishes once, on drop, for the tip it commits. Sending
+        // here would wake a one-shot wait on the stump, or on an
+        // intermediate block of a fork that is still connecting.
+        if self.pool_settle.load(Ordering::SeqCst) & 1 == 0 {
+            self.template_watch.send_replace(next);
+        }
     }
 
     /// Wakes when [`Self::note_template_update`] bumps the generation.
@@ -4067,14 +4104,29 @@ impl MempoolHub {
     /// mutex, so callers must record the hash through [`TemplateHold::commit`].
     #[doc(hidden)]
     pub fn template_hold(&self) -> TemplateHold<'_> {
+        // Same thread already holds `template_prev`. Locking again deadlocks,
+        // and a second publish would wake a one-shot wait on an intermediate tip.
+        if TEMPLATE_HOLD_DEPTH.with(|depth| depth.get()) > 0 {
+            template_hold_enter();
+            return TemplateHold {
+                updates: &self.template_updates,
+                watch: &self.template_watch,
+                settle: &self.pool_settle,
+                slot: None,
+                commit: &self.template_commit,
+                nested: true,
+            };
+        }
         let slot = self.template_prev.lock().unwrap();
         self.pool_settle.fetch_add(1, Ordering::SeqCst);
+        template_hold_enter();
         TemplateHold {
             updates: &self.template_updates,
             watch: &self.template_watch,
             settle: &self.pool_settle,
-            slot,
-            commit: None,
+            slot: Some(slot),
+            commit: &self.template_commit,
+            nested: false,
         }
     }
 
