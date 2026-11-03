@@ -720,3 +720,93 @@ fn cleared_anchor_range_still_drops_the_tip() {
     assert!(!s.header_txs.has_body(tail).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Swaps a directory onto one table's read fd until dropped. A pread on it
+/// fails with `EISDIR`, a real OS error on the real read path.
+#[cfg(unix)]
+struct UnreadableFd {
+    fd: std::os::fd::RawFd,
+    saved: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl UnreadableFd {
+    fn arm(handle: rbitcoin_store::io_handle::IoHandle, dir: &std::path::Path) -> Self {
+        use std::os::fd::IntoRawFd;
+        let fd = handle.as_raw_fd();
+        // SAFETY: `fd` is open for the store's life. `dup` keeps the file.
+        let saved = unsafe { libc::dup(fd) };
+        assert!(saved >= 0);
+        let dir_fd = std::fs::File::open(dir).unwrap().into_raw_fd();
+        // SAFETY: both fds are open. `dup2` replaces `fd` in place.
+        assert!(unsafe { libc::dup2(dir_fd, fd) } >= 0);
+        // SAFETY: `fd` now holds its own reference to the directory.
+        unsafe { libc::close(dir_fd) };
+        Self { fd, saved }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnreadableFd {
+    fn drop(&mut self) {
+        // SAFETY: `saved` is the store's file. Put it back, then drop the dup.
+        unsafe {
+            libc::dup2(self.saved, self.fd);
+            libc::close(self.saved);
+        }
+    }
+}
+
+/// A read that fails is not a divergent block. Open stops with that error
+/// and leaves the tip and every body association as they were. The next
+/// open, with the read working, keeps the whole chain. A record torn past
+/// the body end, or a create with no locator, still drops that block.
+#[cfg(unix)]
+#[test]
+fn failed_read_in_tip_window_shrinks_nothing_but_a_torn_record_does() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let mut prev = Fk::NULL;
+    let mut parent_hash = [0u8; 32];
+    let mut headers = Vec::new();
+    for h in 0u8..8 {
+        (prev, parent_hash) = connect_coinbase(&s, &write, h, prev, parent_hash);
+        headers.push(prev);
+    }
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    s.note_spend_snapshot(7);
+    s.checkpoint_spend_through(7).unwrap();
+    assert!(s.revalidate_tip_window_n(6).unwrap().is_clean());
+
+    let fault = UnreadableFd::arm(s.txs.seqsigwit.body.read_fd(), &dir);
+    let err = s.revalidate_tip_window_n(6).unwrap_err();
+    drop(fault);
+    assert!(
+        matches!(err, rbitcoin_store::StoreError::Io { .. }),
+        "the read error, not a verdict: {err}"
+    );
+    assert_eq!(s.confirmed.tip_height(), Some(Height(7)));
+    for fk in &headers {
+        assert!(s.header_txs.has_body(*fk).unwrap());
+    }
+
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert!(r.is_clean(), "{r:?}");
+    assert_eq!(r.tip_after, Some(7));
+
+    let body = &s.txs.seqsigwit.body;
+    body.set_logical_len(body.logical_len() - 1).unwrap();
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert_eq!(r.first_bad_height, Some(7), "{r:?}");
+    assert_eq!(r.first_bad_reason, Some("seqsigwit read"));
+    assert_eq!(r.tip_after, Some(6), "a torn record still shrinks");
+    assert!(!s.header_txs.has_body(headers[7]).unwrap());
+
+    s.txs.seqsigwit_loc.truncate_to_count(6).unwrap();
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert_eq!(r.first_bad_reason, Some("seqsigwit range"), "{r:?}");
+    assert_eq!(r.tip_after, Some(5), "a missing locator still shrinks");
+    let _ = std::fs::remove_dir_all(&dir);
+}

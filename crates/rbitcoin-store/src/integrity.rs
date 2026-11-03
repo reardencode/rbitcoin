@@ -181,6 +181,31 @@ impl TipRevalidateReport {
     }
 }
 
+/// Why one tip-window height did not pass.
+#[derive(Debug)]
+pub enum TipFault {
+    /// The stored bytes disagree with the chain. The tip shrinks below this
+    /// height.
+    Bad(&'static str),
+    /// A read failed and says nothing about the stored bytes. Open stops with
+    /// this error and changes nothing.
+    Read(StoreError),
+}
+
+impl TipFault {
+    /// Classify a failed read. A corrupt or missing record is `Bad(reason)`.
+    /// An OS error, a completion-session fault, or any other error is `Read`.
+    pub fn read(reason: &'static str) -> impl FnOnce(StoreError) -> TipFault {
+        move |e| match e {
+            StoreError::Corrupt(m) if !StoreError::is_uring_session_fault_msg(m) => {
+                TipFault::Bad(reason)
+            }
+            StoreError::NotFound => TipFault::Bad(reason),
+            other => TipFault::Read(other),
+        }
+    }
+}
+
 impl Store {
     /// Persist tip seal after a complete Class C tip barrier (connect or disconnect).
     ///
@@ -293,11 +318,12 @@ impl Store {
         for h in lo..=tip.0 {
             match self.check_confirmed_height(&write, Height(h), tx_count, &mut report) {
                 Ok(()) => last_good = Some(h),
-                Err(reason) => {
+                Err(TipFault::Bad(reason)) => {
                     report.first_bad_height = Some(h);
                     report.first_bad_reason = Some(reason);
                     break;
                 }
+                Err(TipFault::Read(e)) => return Err(e),
             }
             progress.step(h);
         }
@@ -318,7 +344,8 @@ impl Store {
 
     /// Structural + content check for one confirmed height.
     ///
-    /// Returns `Err(reason)` on first hard failure that requires tip shrink.
+    /// [`TipFault::Bad`] is the first stored mismatch; the tip shrinks below
+    /// it. [`TipFault::Read`] is a read that failed and changed nothing.
     /// Body clear alone (without tip claim failure) is counted in report and Ok.
     #[doc(hidden)]
     pub fn check_confirmed_height(
@@ -327,18 +354,22 @@ impl Store {
         height: Height,
         tx_count: u64,
         report: &mut TipRevalidateReport,
-    ) -> Result<(), &'static str> {
-        let Some(fk) = self.confirmed.get(height).map_err(|_| "confirmed read")? else {
-            return Err("confirmed null header_fk");
+    ) -> Result<(), TipFault> {
+        let Some(fk) = self
+            .confirmed
+            .get(height)
+            .map_err(TipFault::read("confirmed read"))?
+        else {
+            return Err(TipFault::Bad("confirmed null header_fk"));
         };
-        let rec = match self.headers.get(fk) {
-            Ok(r) => r,
-            Err(_) => return Err("header load"),
-        };
+        let rec = self
+            .headers
+            .get(fk)
+            .map_err(TipFault::read("header load"))?;
 
         if height.0 == 0 {
             if !rec.prev_fk.is_null() {
-                return Err("genesis prev_fk non-null");
+                return Err(TipFault::Bad("genesis prev_fk non-null"));
             }
             let zeros = [0u8; 32];
             let expect = block_header_hash(
@@ -350,24 +381,24 @@ impl Store {
                 rec.nonce,
             );
             if expect != rec.hash {
-                return Err("genesis header hash mismatch");
+                return Err(TipFault::Bad("genesis header hash mismatch"));
             }
         } else {
             let parent_h = Height(height.0 - 1);
             let Some(parent_fk) = self
                 .confirmed
                 .get(parent_h)
-                .map_err(|_| "parent confirmed read")?
+                .map_err(TipFault::read("parent confirmed read"))?
             else {
-                return Err("parent confirmed null");
+                return Err(TipFault::Bad("parent confirmed null"));
             };
             if rec.prev_fk != parent_fk {
-                return Err("prev_fk != confirmed parent");
+                return Err(TipFault::Bad("prev_fk != confirmed parent"));
             }
-            let parent = match self.headers.get(parent_fk) {
-                Ok(p) => p,
-                Err(_) => return Err("parent header load"),
-            };
+            let parent = self
+                .headers
+                .get(parent_fk)
+                .map_err(TipFault::read("parent header load"))?;
             let expect = block_header_hash(
                 rec.version,
                 &parent.hash,
@@ -377,13 +408,17 @@ impl Store {
                 rec.nonce,
             );
             if expect != rec.hash {
-                return Err("header hash mismatch vs parent");
+                return Err(TipFault::Bad("header hash mismatch vs parent"));
             }
         }
 
-        match self.header_txs.get_range(fk) {
-            Ok(None) => Ok(()),
-            Ok(Some((first, count))) => self.check_header_tx_range(
+        match self
+            .header_txs
+            .get_range(fk)
+            .map_err(TipFault::read("header_txs read"))?
+        {
+            None => Ok(()),
+            Some((first, count)) => self.check_header_tx_range(
                 write,
                 fk,
                 first,
@@ -392,7 +427,6 @@ impl Store {
                 &rec.merkle_root,
                 report,
             ),
-            Err(_) => Err("header_txs read"),
         }
     }
 
@@ -407,42 +441,61 @@ impl Store {
         tx_count: u64,
         merkle_root: &[u8; 32],
         report: &mut TipRevalidateReport,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), TipFault> {
+        self.block_txid_fault(first, count, tx_count, merkle_root)
+            .map_err(|fault| self.drop_body_on_bad(write, fk, report, fault))?;
+        if !self
+            .strong_tx
+            .all_strong_range(first, count)
+            .map_err(TipFault::read("strong_tx read"))?
+        {
+            return Err(TipFault::Bad("strong bits missing in tip window"));
+        }
+        self.check_block_input_edges(write, fk, first.0, count, report)
+    }
+
+    /// Range bounds and merkle root of one block's txids.
+    fn block_txid_fault(
+        &self,
+        first: Fk,
+        count: u32,
+        tx_count: u64,
+        merkle_root: &[u8; 32],
+    ) -> Result<(), TipFault> {
         if count == 0 || first.is_null() {
-            let _ = self.header_txs.clear_body(write, fk);
-            report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-            return Err("header_txs empty association");
+            return Err(TipFault::Bad("header_txs empty association"));
         }
         let last = first.0.saturating_add(u64::from(count)).saturating_sub(1);
         if first.0 == 0 || last > tx_count {
-            let _ = self.header_txs.clear_body(write, fk);
+            return Err(TipFault::Bad("header_txs range OOB"));
+        }
+        let leaves = self
+            .txs
+            .body_txid_range(first.0, last)
+            .map_err(TipFault::read("txid.body read"))?;
+        if leaves.len() != count as usize {
+            return Err(TipFault::Bad("txid.body short for header_txs range"));
+        }
+        if merkle_root_from_txids(&leaves) != *merkle_root {
+            return Err(TipFault::Bad("merkle root mismatch"));
+        }
+        Ok(())
+    }
+
+    /// A stored mismatch drops the block's body association. A failed read
+    /// leaves it.
+    fn drop_body_on_bad(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+        header_fk: Fk,
+        report: &mut TipRevalidateReport,
+        fault: TipFault,
+    ) -> TipFault {
+        if let TipFault::Bad(_) = fault {
+            let _ = self.header_txs.clear_body(write, header_fk);
             report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-            return Err("header_txs range OOB");
         }
-        let leaves = match self.txs.body_txid_range(first.0, last) {
-            Ok(v) if v.len() == count as usize => v,
-            Ok(_) => {
-                let _ = self.header_txs.clear_body(write, fk);
-                report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-                return Err("txid.body short for header_txs range");
-            }
-            Err(_) => {
-                let _ = self.header_txs.clear_body(write, fk);
-                report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-                return Err("txid.body read");
-            }
-        };
-        let root = merkle_root_from_txids(&leaves);
-        if root != *merkle_root {
-            let _ = self.header_txs.clear_body(write, fk);
-            report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-            return Err("merkle root mismatch");
-        }
-        match self.strong_tx.all_strong_range(first, count) {
-            Ok(true) => self.check_block_input_edges(write, fk, first.0, count, report),
-            Ok(false) => Err("strong bits missing in tip window"),
-            Err(_) => Err("strong_tx read"),
-        }
+        fault
     }
 
     /// Parent edges for one confirmed block. The first tx is the coinbase.
@@ -459,52 +512,47 @@ impl Store {
         first: u64,
         count: u32,
         report: &mut TipRevalidateReport,
-    ) -> Result<(), &'static str> {
-        let reason = self.block_input_edge_reason(first, count);
-        if let Err(reason) = reason {
-            let _ = self.header_txs.clear_body(write, header_fk);
-            report.bodies_cleared = report.bodies_cleared.saturating_add(1);
-            return Err(reason);
-        }
-        Ok(())
+    ) -> Result<(), TipFault> {
+        self.block_input_edge_reason(first, count)
+            .map_err(|fault| self.drop_body_on_bad(write, header_fk, report, fault))
     }
 
     #[doc(hidden)]
-    pub fn block_input_edge_reason(&self, first: u64, count: u32) -> Result<(), &'static str> {
+    pub fn block_input_edge_reason(&self, first: u64, count: u32) -> Result<(), TipFault> {
         if count == 0 {
-            return Err("input edges short");
+            return Err(TipFault::Bad("input edges short"));
         }
         let last = first.saturating_add(u64::from(count)).saturating_sub(1);
         let spans = self
             .txs
             .input
             .edges_span(first, last)
-            .map_err(|_| "input edges read")?;
+            .map_err(TipFault::read("input edges read"))?;
         if spans.len() != count as usize {
-            return Err("input edges short");
+            return Err(TipFault::Bad("input edges short"));
         }
         let prune = self.txs.prune_seqsigwit_mode();
         let mut parents: Vec<(Fk, u32)> = Vec::new();
         for (i, slot) in spans.iter().enumerate() {
             let Some(edges) = slot else {
-                return Err("input unstamped");
+                return Err(TipFault::Bad("input unstamped"));
             };
             if !prune {
                 let n = self.seqsigwit_input_count(Fk(first + i as u64))?;
                 if n != edges.len() {
-                    return Err("input edge count");
+                    return Err(TipFault::Bad("input edge count"));
                 }
             }
             if i == 0 {
                 let coinbase = edges.len() == 1 && edges[0].parent.is_null() && edges[0].vout == 0;
                 if !coinbase {
-                    return Err("coinbase input edge");
+                    return Err(TipFault::Bad("coinbase input edge"));
                 }
                 continue;
             }
             for edge in edges {
                 if edge.parent.is_null() {
-                    return Err("non-coinbase input edge");
+                    return Err(TipFault::Bad("non-coinbase input edge"));
                 }
                 parents.push((edge.parent, edge.vout));
             }
@@ -517,27 +565,27 @@ impl Store {
             .txs
             .create_loc
             .range_batch(&fks)
-            .map_err(|_| "input parent read")?;
+            .map_err(TipFault::read("input parent read"))?;
         if locs.len() != parents.len() {
-            return Err("input parent missing");
+            return Err(TipFault::Bad("input parent missing"));
         }
         for ((_, vout), loc) in parents.iter().zip(locs.iter()) {
             let Some(pair) = loc else {
-                return Err("input parent missing");
+                return Err(TipFault::Bad("input parent missing"));
             };
             if *vout >= pair.n_out {
-                return Err("input vout OOB");
+                return Err(TipFault::Bad("input vout OOB"));
             }
         }
         Ok(())
     }
 
     #[doc(hidden)]
-    pub fn seqsigwit_input_count(&self, fk: Fk) -> Result<usize, &'static str> {
+    pub fn seqsigwit_input_count(&self, fk: Fk) -> Result<usize, TipFault> {
         let (off, len) = self
             .txs
             .seqsigwit_range(fk)
-            .map_err(|_| "seqsigwit range")?;
+            .map_err(TipFault::read("seqsigwit range"))?;
         if len == 0 {
             return Ok(0);
         }
@@ -545,10 +593,10 @@ impl Store {
             .txs
             .seqsigwit
             .with_bytes_at(off, len, |b| Ok(b.to_vec()))
-            .map_err(|_| "seqsigwit read")?;
+            .map_err(TipFault::read("seqsigwit read"))?;
         crate::tx_table::decode_seqsigwit_secret_to_end(&raw, None)
             .map(|ins| ins.len())
-            .map_err(|_| "seqsigwit decode")
+            .map_err(|_| TipFault::Bad("seqsigwit decode"))
     }
 
     /// Truncate confirmed tip to `last_good` (inclusive), or empty if `None`.
