@@ -494,10 +494,13 @@ async fn redial_skips_a_connect_target_still_dialling() {
     let proxy_addr = proxy.local_addr().unwrap();
     let accepts = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&accepts);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake_accept = Arc::clone(&wake);
     let stall = tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((sock, _)) = proxy.accept().await {
             seen.fetch_add(1, Ordering::SeqCst);
+            wake_accept.notify_waiters();
             held.push(sock);
         }
     });
@@ -524,31 +527,50 @@ async fn redial_skips_a_connect_target_still_dialling() {
     )]);
     node.peers.redial_remembered();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while accepts.load(Ordering::SeqCst) == 0 {
+    loop {
+        let notified = wake.notified();
+        if accepts.load(Ordering::SeqCst) > 0 {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "the first dial never reached the proxy"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        notified.await;
     }
+    assert!(
+        !node.peers.in_flight_nets().is_empty(),
+        "the first dial stays in flight while the proxy holds it"
+    );
     for _ in 0..3 {
         node.peers.redial_remembered();
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         accepts.load(Ordering::SeqCst),
         1,
         "a dial still connecting must not be dialled again"
     );
-    // The stalled connect times out and frees the target for the next pass.
+    // The stalled connect times out and drops the in-flight flag.
     let deadline = std::time::Instant::now() + connect_bound * 3;
-    while accepts.load(Ordering::SeqCst) < 2 {
+    while !node.peers.in_flight_nets().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a connect that never finishes must time out"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    node.peers.redial_remembered();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = wake.notified();
+        if accepts.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "a connect that never finishes must time out and be redialled"
         );
-        node.peers.redial_remembered();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        notified.await;
     }
     stall.abort();
     drop(node);
