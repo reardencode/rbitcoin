@@ -1235,6 +1235,7 @@ pub fn chain_name(n: Network) -> &'static str {
         Network::Testnet => "test",
         Network::Signet => "signet",
         Network::Regtest => "regtest",
+        Network::Testnet4 => unimplemented!("testnet4 chain name"),
     }
 }
 

@@ -75,6 +75,7 @@ pub fn dns_seeds(network: Network) -> &'static [&'static str] {
             "seed.signet.achownodes.xyz.",
         ],
         Network::Regtest => &[],
+        Network::Testnet4 => unimplemented!("testnet4 dns seeds"),
     }
 }
 
@@ -86,6 +87,7 @@ fn fixed_seed_text(network: Network) -> &'static str {
         Network::Testnet => include_str!("../seeds/nodes_test.txt"),
         Network::Signet => include_str!("../seeds/nodes_signet.txt"),
         Network::Regtest => "",
+        Network::Testnet4 => unimplemented!("testnet4 fixed seeds"),
     }
 }
 

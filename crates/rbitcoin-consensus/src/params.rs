@@ -60,6 +60,7 @@ impl ChainParams {
             rbitcoin_primitives::Network::Mainnet => Self::mainnet(),
             rbitcoin_primitives::Network::Testnet => Self::testnet(),
             rbitcoin_primitives::Network::Signet => Self::signet(),
+            rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 chain params"),
             rbitcoin_primitives::Network::Regtest => Self::regtest(),
         }
     }
@@ -458,6 +459,7 @@ pub fn default_milestone_height(network: rbitcoin_primitives::Network) -> u32 {
         rbitcoin_primitives::Network::Mainnet => 840_000,
         rbitcoin_primitives::Network::Testnet => 2_500_000,
         rbitcoin_primitives::Network::Signet => 0,
+        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 milestone"),
         rbitcoin_primitives::Network::Regtest => 0,
     }
 }
@@ -473,6 +475,7 @@ pub fn default_milestone_anchor(
         rbitcoin_primitives::Network::Signet | rbitcoin_primitives::Network::Regtest => {
             return None
         }
+        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 milestone"),
     };
     Some(crate::milestone::MilestoneAnchor {
         hash: block_hash_from_display_hex(hash),
@@ -490,6 +493,7 @@ pub fn default_min_chain_work_be(network: rbitcoin_primitives::Network) -> Optio
             Some(min_work_from_display_hex(TESTNET_MIN_CHAIN_WORK))
         }
         rbitcoin_primitives::Network::Signet | rbitcoin_primitives::Network::Regtest => None,
+        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 min chain work"),
     }
 }
 

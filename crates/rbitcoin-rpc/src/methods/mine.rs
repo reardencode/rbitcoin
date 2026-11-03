@@ -57,6 +57,7 @@ pub fn rpc_btc_network(n: Network) -> BtcNetwork {
         Network::Testnet => BtcNetwork::Testnet,
         Network::Signet => BtcNetwork::Signet,
         Network::Regtest => BtcNetwork::Regtest,
+        Network::Testnet4 => unimplemented!("testnet4 rpc network"),
     }
 }
 
