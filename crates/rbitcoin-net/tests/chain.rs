@@ -5944,9 +5944,6 @@ fn review_trust_merkle_mismatch_stays_refetchable() {
 
 #[test]
 fn connect_finishes_while_the_blocking_pool_is_parked() {
-    // Own the lane before the deadlines. A foreign permit must not eat the
-    // 5s/20s timeout, and this thread's spawned generate inherits the hold.
-    let _lane = rbitcoin_net::tip_accept::LanePermit::take();
     let (_dir, hub) = tmp_hub();
     let hub = ChainHub::into_arc(hub);
     let rt = tokio::runtime::Builder::new_multi_thread()
