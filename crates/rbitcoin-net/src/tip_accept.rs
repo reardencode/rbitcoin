@@ -295,9 +295,6 @@ impl Drop for LanePermit {
             let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
             LANE_EXCLUSIVE.store(false, Ordering::Release);
             LANE_EXCLUSIVE_CV.notify_all();
-            // Async senders wait on this. A condvar would park the worker
-            // inside the poll, so the caller's timeout would not run.
-            lane_exclusive_notify().notify_waiters();
         }
     }
 }
@@ -324,12 +321,6 @@ pub fn spawn_inherits_lane_permit() -> bool {
 #[doc(hidden)]
 pub async fn enter_lane_task_exemption<F: Future>(fut: F) -> F::Output {
     LANE_TASK_EXEMPT.scope((), fut).await
-}
-
-#[cfg(debug_assertions)]
-fn lane_exclusive_notify() -> &'static tokio::sync::Notify {
-    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
-    N.get_or_init(tokio::sync::Notify::new)
 }
 
 #[cfg(debug_assertions)]
@@ -478,8 +469,6 @@ async fn send_or_full(exempt: bool, job: Job) -> Result<(), Job> {
 #[cfg(debug_assertions)]
 async fn send_or_full_gated(job: Job) -> Result<(), Job> {
     loop {
-        let notified = lane_exclusive_notify().notified();
-        tokio::pin!(notified);
         {
             let _gate = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
             if !LANE_EXCLUSIVE.load(Ordering::Acquire) {
@@ -492,9 +481,10 @@ async fn send_or_full_gated(job: Job) -> Result<(), Job> {
                     Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
                 };
             }
-            notified.as_mut().enable();
         }
-        notified.await;
+        // Poll, do not park the worker on the condvar. A missed condvar
+        // wake must not leave the send waiting after the permit drops.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 }
 
