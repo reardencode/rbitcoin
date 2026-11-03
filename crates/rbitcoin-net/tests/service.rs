@@ -225,25 +225,58 @@ async fn service_listen_shutdown() {
     assert_ne!(extra, node.local_addr);
     assert!(std::net::TcpStream::connect(extra).is_ok());
 
+    tokio::time::pause();
+    let go = Arc::new(tokio::sync::Notify::new());
     let done = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&done);
+    let (go_task, flag) = (Arc::clone(&go), Arc::clone(&done));
     node.tasks.push(tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        go_task.notified().await;
         flag.store(true, Ordering::SeqCst);
     }));
-    node.tasks.push(tokio::spawn(async {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    }));
-    let t0 = std::time::Instant::now();
-    node.shutdown().await;
+    node.tasks.push(tokio::spawn(std::future::pending()));
+    let started = tokio::time::Instant::now();
+    let mut shutdown = std::pin::pin!(node.shutdown());
+    for _ in 0..8 {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => panic!("shutdown returned before the grace advance"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    go.notify_one();
+    for _ in 0..8 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert!(
         done.load(Ordering::SeqCst),
-        "shutdown lets a task that finishes within the grace window finish"
+        "the short task runs when released, before the grace elapses"
+    );
+    tokio::time::advance(Duration::from_millis(750)).await;
+    let mut finished = false;
+    for _ in 0..64 {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                finished = true;
+                break;
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    assert!(finished, "shutdown did not return on the grace advance");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(750),
+        "shutdown returned before the grace: {elapsed:?}"
     );
     assert!(
-        t0.elapsed() < Duration::from_secs(2),
-        "shutdown must not wait out a 30s session task"
+        elapsed < Duration::from_secs(2),
+        "shutdown waited past the grace: {elapsed:?}"
     );
+    tokio::time::resume();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
