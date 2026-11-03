@@ -4383,6 +4383,14 @@ pub async fn on_block(
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
     }
+    // One frame at a time: the ping behind this body is not read until we
+    // return. A duplicate must not take the process-wide tip-accept lane.
+    if hub.already_have(hash) {
+        drop_pending_cmpct(follow, session, hash);
+        take_requested_block(hub, &mut follow.requested_blocks, &hash);
+        hub.drop_held(hash);
+        return drain_after_accept(hub, out_tx, follow, session, hash, false).await;
+    }
     let prev = block.header.prev_blockhash;
     if prev.to_byte_array() != [0u8; 32]
         && !hub.knows_header(&prev)

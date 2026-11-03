@@ -4061,6 +4061,59 @@ fn store_fault_on_block_releases_the_body_ask() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A body we already have must return while another accept still owns the
+/// lane. The session reads the next frame only after `on_block` returns, so
+/// a resent tip that waits here holds the ping that follows it.
+#[test]
+fn resent_block_returns_while_the_tip_accept_lane_is_busy() {
+    let (_dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let tip = hub.block_at_height(1).unwrap().expect("generated tip");
+    assert!(hub.already_have(tip.block_hash()));
+    // A live session accepts through `shared_arc`. Without it, `on_block`
+    // blocks the caller thread and a timeout on that same thread never fires.
+    let hub = hub.into_arc();
+
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        rbitcoin_net::tip_accept::run_on_tip_accept(move || {
+            started_tx.send(()).expect("lane started");
+            let _ = release_rx.recv();
+        });
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("tip-accept job did not start");
+
+    let hub_for_block = Arc::clone(&hub);
+    let block = tip.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let handler = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("on_block runtime");
+        let result = rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut follow = rbitcoin_net::peer::PeerFollowState::new();
+            rbitcoin_net::peer::on_block(&hub_for_block, &tx, &mut follow, None, &block).await
+        });
+        let _ = done_tx.send(result);
+    });
+    let in_time = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+    let _ = release_tx.send(());
+    handler.join().expect("on_block thread");
+    holder.join().expect("lane job");
+    let result = in_time.expect("a block we already have waited on the tip-accept lane");
+    assert!(
+        result.is_ok(),
+        "resent tip is not a session error: {result:?}"
+    );
+}
+
 /// Coinbase outputs with distinct values and scripts. Sum is the subsidy.
 fn mine_split(prev: BlockHash, time: u32, height: u32, scripts: &[u8]) -> Block {
     let subsidy = rbitcoin_consensus::block_subsidy(height, &ChainParams::regtest()) as u64;
