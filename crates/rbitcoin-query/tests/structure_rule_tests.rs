@@ -1085,6 +1085,7 @@ fn p3_default_milestone_heights() {
     assert_eq!(default_milestone_height(Network::Mainnet), 840_000);
     assert_eq!(default_milestone_height(Network::Testnet), 2_500_000);
     assert_eq!(default_milestone_height(Network::Signet), 0);
+    assert_eq!(default_milestone_height(Network::Testnet4), 0);
     let anchor = rbitcoin_consensus::default_milestone_anchor(Network::Mainnet).unwrap();
     assert_eq!(
         anchor.hash.to_string(),
@@ -1098,6 +1099,7 @@ fn p3_default_milestone_heights() {
     );
     assert!(rbitcoin_consensus::default_milestone_anchor(Network::Signet).is_none());
     assert!(rbitcoin_consensus::default_milestone_anchor(Network::Regtest).is_none());
+    assert!(rbitcoin_consensus::default_milestone_anchor(Network::Testnet4).is_none());
 }
 
 #[test]

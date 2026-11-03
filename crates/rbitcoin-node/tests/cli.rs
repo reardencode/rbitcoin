@@ -322,6 +322,15 @@ fn operator_conf_and_argv() {
         !testnet.milestone().skips_scripts_at(1),
         "anchored testnet milestone does not skip on height alone"
     );
+    let testnet4 = ready_config(["rbitcoin-node", "--network=testnet4"]);
+    assert_eq!(testnet4.milestone_height, 0);
+    assert!(testnet4.milestone().anchor.is_none());
+    assert!(!testnet4.milestone().skips_scripts_at(1));
+    assert_eq!(
+        testnet4.minimum_chain_work,
+        rbitcoin_consensus::default_min_chain_work_be(Network::Testnet4)
+    );
+    assert!(testnet4.minimum_chain_work.is_some());
     let signet_skip = ready_config([
         "rbitcoin-node",
         "--network=signet",

@@ -52,6 +52,9 @@ pub struct ChainParams {
     pub bip34_hash: Option<BlockHash>,
     /// Core `DEPLOYMENT_TESTDUMMY`. `None` is Core's `NEVER_ACTIVE`.
     pub testdummy: Option<Bip9Deployment>,
+    /// Core `enforce_BIP94`: a retarget multiplies the period's first `nBits`,
+    /// and a period's first header is at most 600 seconds before its parent.
+    pub enforce_bip94: bool,
 }
 
 impl ChainParams {
@@ -60,7 +63,7 @@ impl ChainParams {
             rbitcoin_primitives::Network::Mainnet => Self::mainnet(),
             rbitcoin_primitives::Network::Testnet => Self::testnet(),
             rbitcoin_primitives::Network::Signet => Self::signet(),
-            rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 chain params"),
+            rbitcoin_primitives::Network::Testnet4 => Self::testnet4(),
             rbitcoin_primitives::Network::Regtest => Self::regtest(),
         }
     }
@@ -91,6 +94,7 @@ impl ChainParams {
                 period: 144,
                 threshold: 108,
             }),
+            enforce_bip94: false,
         }
     }
 
@@ -112,6 +116,7 @@ impl ChainParams {
                 "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8",
             )),
             testdummy: None,
+            enforce_bip94: false,
         }
     }
 
@@ -132,6 +137,28 @@ impl ChainParams {
                 "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8",
             )),
             testdummy: None,
+            enforce_bip94: false,
+        }
+    }
+
+    /// Core `CTestNet4Params`. BIP34's hash is null there, so BIP30 stays on
+    /// at every height, as on signet.
+    pub fn testnet4() -> Self {
+        let genesis = constants::genesis_block(Network::Testnet4);
+        Self {
+            network: Network::Testnet4,
+            genesis_hash: genesis.block_hash(),
+            genesis_coinbase_txid: genesis.txdata[0].compute_txid().to_byte_array(),
+            pow_limit: Target::MAX_ATTAINABLE_TESTNET,
+            btc: BtcParams::new(Network::Testnet4),
+            signet_challenge: None,
+            csv_height_overlay: None,
+            segwit_height_overlay: None,
+            subsidy_halving_overlay: None,
+            regtest_pow_bits_overlay: None,
+            bip34_hash: None,
+            testdummy: None,
+            enforce_bip94: true,
         }
     }
 
@@ -164,6 +191,7 @@ impl ChainParams {
             regtest_pow_bits_overlay: None,
             bip34_hash: None,
             testdummy: None,
+            enforce_bip94: false,
         })
     }
 
@@ -447,9 +475,13 @@ pub const TESTNET_MILESTONE_HASH: &str =
 pub const TESTNET_MIN_CHAIN_WORK: &str =
     "0000000000000000000000000000000000000000000017f49f702147f10c0eb6";
 
+/// Core testnet4 `nMinimumChainWork` (display hex, big-endian).
+pub const TESTNET4_MIN_CHAIN_WORK: &str =
+    "0000000000000000000000000000000000000000000009a0fe15d0177d086304";
+
 /// Default IBD milestone height. `0` means full script validation.
 ///
-/// Signet is 0 on purpose: signet IBD runs every script (slower than a
+/// Signet and testnet4 are 0 on purpose: their IBD runs every script (slower than a
 /// height skip; that is the dress rehearsal). Mainnet (840_000) and testnet3
 /// (2_500_000) defaults are paired with [`default_milestone_anchor`].
 /// Operators still override with `--milestone HEIGHT` (height-only) or
@@ -458,9 +490,9 @@ pub fn default_milestone_height(network: rbitcoin_primitives::Network) -> u32 {
     match network {
         rbitcoin_primitives::Network::Mainnet => 840_000,
         rbitcoin_primitives::Network::Testnet => 2_500_000,
-        rbitcoin_primitives::Network::Signet => 0,
-        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 milestone"),
-        rbitcoin_primitives::Network::Regtest => 0,
+        rbitcoin_primitives::Network::Signet
+        | rbitcoin_primitives::Network::Testnet4
+        | rbitcoin_primitives::Network::Regtest => 0,
     }
 }
 
@@ -472,10 +504,9 @@ pub fn default_milestone_anchor(
     let hash = match network {
         rbitcoin_primitives::Network::Mainnet => MAINNET_MILESTONE_HASH,
         rbitcoin_primitives::Network::Testnet => TESTNET_MILESTONE_HASH,
-        rbitcoin_primitives::Network::Signet | rbitcoin_primitives::Network::Regtest => {
-            return None
-        }
-        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 milestone"),
+        rbitcoin_primitives::Network::Signet
+        | rbitcoin_primitives::Network::Testnet4
+        | rbitcoin_primitives::Network::Regtest => return None,
     };
     Some(crate::milestone::MilestoneAnchor {
         hash: block_hash_from_display_hex(hash),
@@ -492,8 +523,10 @@ pub fn default_min_chain_work_be(network: rbitcoin_primitives::Network) -> Optio
         rbitcoin_primitives::Network::Testnet => {
             Some(min_work_from_display_hex(TESTNET_MIN_CHAIN_WORK))
         }
+        rbitcoin_primitives::Network::Testnet4 => {
+            Some(min_work_from_display_hex(TESTNET4_MIN_CHAIN_WORK))
+        }
         rbitcoin_primitives::Network::Signet | rbitcoin_primitives::Network::Regtest => None,
-        rbitcoin_primitives::Network::Testnet4 => unimplemented!("testnet4 min chain work"),
     }
 }
 
