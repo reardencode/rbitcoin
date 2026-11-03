@@ -870,11 +870,11 @@ pub fn apply_block_framed(
     if hub.query.block_queue_has_hash(&raw) {
         return;
     }
-    match hub.query.block_queue_offer_from(
+    match hub.query.block_queue_offer_vec(
         height,
         raw,
         header_fk.0,
-        &payload,
+        payload,
         u64::try_from(peer).ok(),
     ) {
         Ok(_offer) => {

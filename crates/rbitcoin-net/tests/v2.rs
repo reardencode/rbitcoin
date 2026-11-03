@@ -229,6 +229,72 @@ async fn bip324_duplex_ping_pong() {
         .expect("bip324 duplex timed out");
 }
 
+/// IBD readers keep one 4 MiB ciphertext buffer and decrypt into a payload-sized
+/// vec. Tip-follow readers leave that buffer off and still return a small payload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ibd_reader_reuses_one_ciphertext_buffer() {
+    let magic = signet_magic();
+    let magic_b = magic.to_bytes();
+    let (client, server) = duplex(64 * 1024);
+
+    let server_task = tokio::spawn(async move {
+        let (rh, wh) = tokio::io::split(server);
+        let reader = BufReader::new(rh);
+        let protocol = Protocol::new(magic_b, Role::Responder, None, None, reader, wh)
+            .await
+            .expect("server handshake");
+        let (_r, mut w) = protocol.into_split();
+        for n in [1u64, 2, 3] {
+            let contents = encode_v2_contents(NetworkMessage::Pong(n)).unwrap();
+            w.write(&Payload::genuine(contents)).await.unwrap();
+        }
+    });
+
+    let client_task = async move {
+        let (rh, wh) = tokio::io::split(client);
+        let reader = BufReader::new(rh);
+        let protocol = Protocol::new(magic_b, Role::Initiator, None, None, reader, wh)
+            .await
+            .expect("client handshake");
+        let (r, _w) = protocol.into_split();
+        let mut reader = V2SessionReader::from_protocol_reader(r);
+        assert!(reader.ibd_ciphertext_buf().is_none());
+
+        let first = read_v2_frame(&mut reader, magic).await.unwrap();
+        assert!(
+            first.payload.capacity() < 64,
+            "tip payload cap {}",
+            first.payload.capacity()
+        );
+        assert!(matches!(first.decode().payload(), NetworkMessage::Pong(1)));
+        assert!(reader.ibd_ciphertext_buf().is_none());
+
+        reader.enable_ibd_ciphertext_buf();
+        let ptr = reader.ibd_ciphertext_buf().expect("scratch").as_ptr();
+        assert_eq!(
+            reader.ibd_ciphertext_buf().unwrap().len(),
+            IBD_CIPHERTEXT_BUF_LEN
+        );
+        for n in [2u64, 3] {
+            let frame = read_v2_frame(&mut reader, magic).await.unwrap();
+            assert!(
+                frame.payload.capacity() < 64,
+                "ibd payload cap {}",
+                frame.payload.capacity()
+            );
+            assert!(matches!(frame.decode().payload(), NetworkMessage::Pong(got) if *got == n));
+            let buf = reader.ibd_ciphertext_buf().unwrap();
+            assert_eq!(buf.len(), IBD_CIPHERTEXT_BUF_LEN);
+            assert_eq!(buf.as_ptr(), ptr);
+        }
+        server_task.await.unwrap();
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), client_task)
+        .await
+        .expect("ibd ciphertext scratch timed out");
+}
+
 /// V1-looking ellswift slot (network magic in first 4 of 64 bytes) → V1Peer.
 ///
 /// bip324 detects this only after a full 64-byte key read — sending fewer

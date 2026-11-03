@@ -1894,6 +1894,9 @@ impl Query {
         owned: Vec<u8>,
         sender: Option<u64>,
     ) -> Result<BlockQueueOffer, QueryError> {
+        if let Some(id) = self.block_queue.lock().unwrap().id_for_height(height) {
+            return Ok(BlockQueueOffer { queue_id: id });
+        }
         let Some(n_inputs) = rbitcoin_store::block_wire_input_count(&owned) else {
             return Err(StoreError::Rejected(Self::UNDECODABLE_WIRE_MSG));
         };

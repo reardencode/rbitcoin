@@ -217,6 +217,12 @@ pub const MAX_V2_CONTENTS_LEN: usize = 1 + 12 + MAX_PROTOCOL_MESSAGE_LENGTH;
 #[doc(hidden)]
 pub const V2_PACKET_REST_OVERHEAD: usize = 1 + 16;
 
+/// Fixed ciphertext scratch for one IBD reader. Covers the largest v2 packet
+/// body (`MAX_V2_CONTENTS_LEN` + header + tag) and is never resized.
+#[doc(hidden)]
+pub const IBD_CIPHERTEXT_BUF_LEN: usize = 4 * 1024 * 1024;
+const _: () = assert!(MAX_V2_CONTENTS_LEN + V2_PACKET_REST_OVERHEAD <= IBD_CIPHERTEXT_BUF_LEN);
+
 /// Core `BIP324Cipher::EXPANSION`: 3-byte length + header + Poly1305 tag.
 /// `bytesrecv_per_msg['*other*']` = contents + this (test_msgtype expects 23).
 pub const V2_CIPHER_EXPANSION: usize = 3 + V2_PACKET_REST_OVERHEAD;
@@ -239,7 +245,9 @@ pub enum DecryptState {
         bytes_read: usize,
     },
     ReadingPayload {
-        packet_bytes: Vec<u8>,
+        /// `None` reads into [`V2SessionReader`]'s IBD ciphertext scratch.
+        owned: Option<Vec<u8>>,
+        packet_len: usize,
         bytes_read: usize,
     },
 }
@@ -260,6 +268,8 @@ pub struct V2SessionReader<R> {
     pub inbound_cipher: InboundCipher,
     pub reader: ProtocolSessionReader<R>,
     pub state: DecryptState,
+    /// Present only on an IBD block reader. Tip-follow leaves this empty.
+    ibd_ciphertext: Option<Box<[u8]>>,
 }
 
 impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
@@ -269,7 +279,21 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
             inbound_cipher,
             reader,
             state: DecryptState::reading_length(),
+            ibd_ciphertext: None,
         }
+    }
+
+    /// Keep one 4 MiB ciphertext buffer for the rest of this reader.
+    /// IBD calls this once. Tip-follow does not.
+    pub fn enable_ibd_ciphertext_buf(&mut self) {
+        if self.ibd_ciphertext.is_none() {
+            self.ibd_ciphertext = Some(vec![0u8; IBD_CIPHERTEXT_BUF_LEN].into_boxed_slice());
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn ibd_ciphertext_buf(&self) -> Option<&[u8]> {
+        self.ibd_ciphertext.as_deref()
     }
     /// Next genuine application contents (skips decoys). Checks the decrypted
     /// length prefix against [`MAX_V2_CONTENTS_LEN`] before reading the body.
@@ -283,7 +307,7 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
         D: FnMut(usize) -> Result<(), NetError>,
     {
         loop {
-            let (packet_type, plaintext) = self.read_packet(&mut on_progress).await?;
+            let (packet_type, mut plaintext) = self.read_packet(&mut on_progress).await?;
             if packet_type == PacketType::Decoy {
                 on_decoy(plaintext.len())?;
                 continue;
@@ -292,7 +316,8 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
             if plaintext.is_empty() {
                 return Err(NetError::Protocol("empty v2 packet plaintext"));
             }
-            return Ok(plaintext[1..].to_vec());
+            slide_off(&mut plaintext, 1);
+            return Ok(plaintext);
         }
     }
 
@@ -327,38 +352,83 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
                         self.state = DecryptState::reading_length();
                         return Err(NetError::MessageTooLarge(contents_len));
                     }
+                    let owned = if self.ibd_ciphertext.is_some() {
+                        None
+                    } else {
+                        Some(vec![0u8; rest])
+                    };
                     self.state = DecryptState::ReadingPayload {
-                        packet_bytes: vec![0u8; rest],
+                        owned,
+                        packet_len: rest,
                         bytes_read: 0,
                     };
                 }
                 DecryptState::ReadingPayload {
-                    packet_bytes,
+                    owned,
+                    packet_len,
                     bytes_read,
                 } => {
-                    while *bytes_read < packet_bytes.len() {
-                        let n = self.reader.read(&mut packet_bytes[*bytes_read..]).await?;
-                        if n == 0 {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "v2 packet body eof",
-                            )
-                            .into());
-                        }
-                        *bytes_read += n;
-                        on_progress(*bytes_read);
+                    let packet_len = *packet_len;
+                    if let Some(packet) = owned.as_mut() {
+                        fill_packet(&mut self.reader, packet, bytes_read, on_progress).await?;
+                        let decrypted = decrypt_packet(&mut self.inbound_cipher, packet)?;
+                        self.state = DecryptState::reading_length();
+                        return Ok(decrypted);
                     }
-                    let mut plaintext = vec![0u8; packet_bytes.len().saturating_sub(16)];
-                    let packet_type = self
-                        .inbound_cipher
-                        .decrypt(packet_bytes, &mut plaintext, None)
-                        .map_err(|e| NetError::Bip324(e.to_string()))?;
+                    let scratch = self
+                        .ibd_ciphertext
+                        .as_mut()
+                        .ok_or(NetError::Protocol("ibd ciphertext buffer missing"))?;
+                    let packet = &mut scratch[..packet_len];
+                    fill_packet(&mut self.reader, packet, bytes_read, on_progress).await?;
+                    let decrypted = decrypt_packet(&mut self.inbound_cipher, packet)?;
                     self.state = DecryptState::reading_length();
-                    return Ok((packet_type, plaintext));
+                    return Ok(decrypted);
                 }
             }
         }
     }
+}
+
+async fn fill_packet<R, F>(
+    reader: &mut ProtocolSessionReader<R>,
+    packet: &mut [u8],
+    filled: &mut usize,
+    on_progress: &mut F,
+) -> Result<(), NetError>
+where
+    R: AsyncRead + Unpin + Send,
+    F: FnMut(usize),
+{
+    while *filled < packet.len() {
+        let n = reader.read(&mut packet[*filled..]).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "v2 packet body eof",
+            )
+            .into());
+        }
+        *filled += n;
+        on_progress(*filled);
+    }
+    Ok(())
+}
+
+fn decrypt_packet(
+    cipher: &mut InboundCipher,
+    packet: &[u8],
+) -> Result<(PacketType, Vec<u8>), NetError> {
+    let mut plaintext = vec![0u8; packet.len().saturating_sub(16)];
+    let packet_type = cipher
+        .decrypt(packet, &mut plaintext, None)
+        .map_err(|e| NetError::Bip324(e.to_string()))?;
+    Ok((packet_type, plaintext))
+}
+
+fn slide_off(buf: &mut Vec<u8>, n: usize) {
+    buf.copy_within(n.., 0);
+    buf.truncate(buf.len() - n);
 }
 
 /// Async read half after BIP324 handshake (buffered TCP).
@@ -508,13 +578,19 @@ pub fn encode_v2_contents(payload: NetworkMessage) -> Result<Vec<u8>, NetError> 
 ///
 /// v2 plaintext is command + payload only (no checksum).
 pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage, NetError> {
+    parse_v2_contents_vec(magic, contents.to_vec())
+}
+
+/// [`parse_v2_contents`] for a buffer this reader already owns. The command
+/// prefix is slid off in place; the payload `Vec` keeps that allocation.
+fn parse_v2_contents_vec(magic: Magic, mut contents: Vec<u8>) -> Result<FramedMessage, NetError> {
     if contents.is_empty() {
         return Err(NetError::Protocol("empty v2 message contents"));
     }
     let first = contents[0];
-    let (command, payload) = if first != 0 {
+    let command = if first != 0 {
         match command_for_short_id(first) {
-            Some(name) => (command_to_12(name), contents[1..].to_vec()),
+            Some(name) => command_to_12(name),
             None => {
                 return Err(NetError::InvalidV2Type {
                     contents_len: contents.len(),
@@ -532,17 +608,17 @@ pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage,
                 contents_len: contents.len(),
             });
         }
-        (cmd12, contents[13..].to_vec())
+        cmd12
     };
-
-    if payload.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
-        return Err(NetError::MessageTooLarge(payload.len()));
+    let prefix = if first == 0 { 13 } else { 1 };
+    slide_off(&mut contents, prefix);
+    if contents.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
+        return Err(NetError::MessageTooLarge(contents.len()));
     }
-
     Ok(FramedMessage {
         magic,
         command,
-        payload,
+        payload: contents,
     })
 }
 
@@ -787,5 +863,5 @@ where
         .read_genuine_contents(&mut on_progress, on_decoy)
         .await?;
     on_progress(contents.len());
-    parse_v2_contents(magic, &contents)
+    parse_v2_contents_vec(magic, contents)
 }

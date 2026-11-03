@@ -943,6 +943,7 @@ pub async fn read_ibd_peer(
         logged_invalid_v2: false,
         ban_score: 0,
     };
+    reader.enable_ibd_ciphertext_buf();
     loop {
         let frame = read_v2_frame_with_progress(
             &mut reader,
