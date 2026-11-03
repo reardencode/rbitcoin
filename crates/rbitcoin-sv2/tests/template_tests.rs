@@ -1222,10 +1222,12 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         // One millisecond past the deadline: an exact advance leaves the
         // timer due but not fired.
         tokio::time::advance(interval + Duration::from_millis(1)).await;
-        // Poll. An unbounded await would auto-advance the paused clock to a
-        // later timer and accept a push this interval did not produce.
+        // The build runs on rbtc-off-pool. Poll until that thread sends.
+        // A tokio sleep would advance the paused clock and accept a push
+        // this interval did not produce.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut pushed = None;
-        for _ in 0..64 {
+        while std::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::ZERO, &mut recv).await {
                 Ok(Ok(frame)) => {
                     pushed = Some(frame);

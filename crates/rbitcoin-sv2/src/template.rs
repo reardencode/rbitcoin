@@ -11,9 +11,11 @@ use rbitcoin_consensus::{
 use rbitcoin_net::{ChainHub, SelectBudget};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{expected_next_bits, next_block_mintime};
+use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use template_distribution_sv2::{NewTemplate, SetNewPrevHash};
+use tokio::sync::Semaphore;
 
 /// Coinbase witness reserved value the template's witness commitment is
 /// built with (BIP141).
@@ -26,6 +28,7 @@ pub const COINBASE_BASE_WU: u64 = 1168;
 #[doc(hidden)]
 pub const MIN_COINBASE_RESERVE_WU: u64 = 2000;
 
+#[derive(Clone)]
 pub struct Template {
     pub version: u32,
     pub coinbase_prefix: Vec<u8>,
@@ -88,9 +91,69 @@ pub fn build(
     max_additional_size: u32,
     max_additional_sigops: u16,
 ) -> io::Result<Option<Template>> {
+    let Some((prev, stamp)) = prepare_stamp(chain)? else {
+        return Ok(None);
+    };
+    build_stamped(
+        chain,
+        max_additional_size,
+        max_additional_sigops,
+        prev,
+        stamp,
+    )
+}
+
+/// Timestamp and `nBits` for `prev`, using the same rules as [`build`].
+/// `Ok(None)` when `prev` is not the header at its height.
+pub(crate) fn stamp_for(chain: &ChainHub, prev: [u8; 32]) -> io::Result<Option<TemplateStamp>> {
+    let Some(tip) = chain
+        .query
+        .height_of_hash(&prev)
+        .map_err(|e| io::Error::other(format!("sv2: template tip: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let header = chain
+        .query
+        .wire_header_at_height(tip)
+        .map_err(|e| io::Error::other(format!("sv2: tip header: {e}")))?;
+    if header.block_hash().to_byte_array() != prev {
+        return Ok(None);
+    }
+    let header_timestamp = next_block_mintime(&chain.query, &chain.params, tip)
+        .map_err(|e| io::Error::other(format!("sv2: tip mintime: {e}")))?
+        .max(chain.clock.now_secs() as u32);
+    let bits = expected_next_bits(
+        &chain.query,
+        &chain.params,
+        Height(tip.0 + 1),
+        header_timestamp,
+    )
+    .map_err(|e| io::Error::other(format!("sv2: next bits: {e}")))?;
+    Ok(Some(TemplateStamp {
+        header_timestamp,
+        n_bits: bits.to_consensus(),
+    }))
+}
+
+/// `template_prev` plus the bits and time a template on that tip would use.
+/// `Ok(None)` when the pool has not recorded a stripped tip.
+pub(crate) fn prepare_stamp(chain: &ChainHub) -> io::Result<Option<([u8; 32], TemplateStamp)>> {
     let Some(prev) = chain.mempool().and_then(|m| m.template_prev()) else {
         return Ok(None);
     };
+    Ok(stamp_for(chain, prev)?.map(|stamp| (prev, stamp)))
+}
+
+/// [`build`] with a timestamp and `nBits` already chosen. The flight key
+/// carries those values, so a cached template matches the key that built it.
+pub(crate) fn build_stamped(
+    chain: &ChainHub,
+    max_additional_size: u32,
+    max_additional_sigops: u16,
+    prev: [u8; 32],
+    stamp: TemplateStamp,
+) -> io::Result<Option<Template>> {
     let Some(tip) = chain
         .query
         .height_of_hash(&prev)
@@ -110,16 +173,8 @@ pub fn build(
         .query
         .testdummy_state(&chain.params, tip)
         .map_err(|e| io::Error::other(format!("sv2: versionbits: {e}")))?;
-    let header_timestamp = next_block_mintime(&chain.query, &chain.params, tip)
-        .map_err(|e| io::Error::other(format!("sv2: tip mintime: {e}")))?
-        .max(chain.clock.now_secs() as u32);
-    let bits = expected_next_bits(
-        &chain.query,
-        &chain.params,
-        Height(height),
-        header_timestamp,
-    )
-    .map_err(|e| io::Error::other(format!("sv2: next bits: {e}")))?;
+    let header_timestamp = stamp.header_timestamp;
+    let bits = bitcoin::CompactTarget::from_consensus(stamp.n_bits);
     let reserve =
         (COINBASE_BASE_WU + 4 * u64::from(max_additional_size)).max(MIN_COINBASE_RESERVE_WU);
     let budget = SelectBudget {
@@ -155,4 +210,118 @@ pub fn build(
         target: Target::from_compact(bits).to_le_bytes(),
         txs: selected.into_iter().map(|(tx, _)| tx).collect(),
     }))
+}
+
+/// Timestamp and `nBits` frozen into a [`TemplateKey`] before the build.
+#[derive(Clone, Copy)]
+pub(crate) struct TemplateStamp {
+    pub header_timestamp: u32,
+    pub n_bits: u32,
+}
+
+/// One template build. Sessions that share this key share one build.
+/// `n_bits` and `header_timestamp` are part of the key: on testnet a later
+/// session must not reuse an earlier template's time or difficulty.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TemplateKey {
+    pub prev_hash: [u8; 32],
+    pub max_additional_size: u32,
+    pub max_additional_sigops: u16,
+    pub template_updates: u64,
+    pub header_timestamp: u32,
+    pub n_bits: u32,
+}
+
+/// Idle templates kept per listener. A live build is never evicted.
+const FLIGHT_CAP: usize = 8;
+
+struct FlightGate {
+    one: Arc<Semaphore>,
+    slot: Mutex<Option<Template>>,
+}
+
+/// One [`build`] at a time for each [`TemplateKey`]. A different coinbase
+/// budget, bits, or time does not wait on the others and does not evict
+/// their template. The permit is taken on the caller's task before
+/// `rbtc-off-pool`. `Ok(None)` is not stored.
+pub struct TemplateFlight {
+    gates: Mutex<HashMap<TemplateKey, Arc<FlightGate>>>,
+}
+
+impl Default for TemplateFlight {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn template_matches(key: &TemplateKey, t: &Template) -> bool {
+    t.prev_hash == key.prev_hash
+        && t.header_timestamp == key.header_timestamp
+        && t.n_bits == key.n_bits
+}
+
+impl TemplateFlight {
+    pub fn new() -> Self {
+        Self {
+            gates: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn gate(&self, key: TemplateKey) -> Arc<FlightGate> {
+        let mut map = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= FLIGHT_CAP && !map.contains_key(&key) {
+            map.retain(|_, gate| Arc::strong_count(gate) > 1);
+        }
+        map.entry(key)
+            .or_insert_with(|| {
+                Arc::new(FlightGate {
+                    one: Arc::new(Semaphore::new(1)),
+                    slot: Mutex::new(None),
+                })
+            })
+            .clone()
+    }
+
+    /// Run `build` off the reactor when `key` is not already stored.
+    /// The permit lives in the build task, so dropping this call does not
+    /// let a second build of `key` start and does not abort the one in
+    /// flight. A template that does not match `key` is not stored.
+    pub async fn get_or_build(
+        self: &Arc<Self>,
+        key: TemplateKey,
+        build: impl FnOnce() -> io::Result<Option<Template>> + Send + 'static,
+    ) -> io::Result<Option<Template>> {
+        let gate = self.gate(key);
+        if let Some(hit) = cached(&gate) {
+            return Ok(Some(hit));
+        }
+        let permit = Arc::clone(&gate.one)
+            .acquire_owned()
+            .await
+            .expect("sv2 template flight");
+        if let Some(hit) = cached(&gate) {
+            drop(permit);
+            return Ok(Some(hit));
+        }
+        let gate = Arc::clone(&gate);
+        // Await so this caller sees the result. Dropping the future detaches
+        // the task and does not abort it. The permit stays in the task, so a
+        // second build of this key still waits.
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let built = rbitcoin_net::off_pool(build).await?;
+            if let Some(t) = built.clone() {
+                if template_matches(&key, &t) {
+                    *gate.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(t);
+                }
+            }
+            Ok(built)
+        });
+        task.await
+            .map_err(|_| io::Error::other("sv2 template flight dropped"))?
+    }
+}
+
+fn cached(gate: &FlightGate) -> Option<Template> {
+    gate.slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }

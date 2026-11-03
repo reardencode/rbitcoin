@@ -82,7 +82,10 @@ Do not copy them here.
   `rust-bitcoin`. No sv2 types in other crates' APIs.
 - Reactor rule: template builds and solution assembly run in a blocking
   region, never on tokio workers. `MempoolHub` accessors assert
-  not-reactor.
+  not-reactor. Sessions that share a previous-block hash, coinbase size,
+  coinbase sigops, and `template_updates` share one build. The second
+  session waits on its task before it takes a blocking-pool thread. A
+  missed build (`None`) is not reused.
 - Named RAM trade (CONTRIBUTING 9): each session retains its templates
   (up to 64) holding the mempool's own `Arc<Transaction>` bodies, about
   24 KB of pointers per full template while the txs are still pooled.
@@ -502,12 +505,14 @@ when fees rise enough to matter, throttled. Requires Plan B.
   100 ms (`MIN_TEMPLATE_INTERVAL`) or over a day; the node flag takes whole
   seconds. The fee push goes through the B6 publish path, so
   it keeps the `SetNewPrevHash` nBits and target (`sent_bits`, B4a); bits
-  are not recomputed. CPU trade: at most `MAX_SESSIONS` builds per interval
-  under the mempool read lock. The interval is a check period: sv2-tp
-  suppresses fee updates for `-templateinterval` after a push and then
-  rechecks on Core's 1 s waitNext tick, so a gain can reach a client here
-  up to one interval later than there; `--sv2-tp-template-interval 1`
-  matches that latency at 1 build per second per session. A check whose
+  are not recomputed. CPU trade: one build at a time for the same
+  previous-block hash, coinbase budget, and `template_updates`. The mempool
+  read lock covers that selection and is not held while another session
+  waits. A different budget still builds. The interval is a check period:
+  sv2-tp suppresses fee updates for `-templateinterval` after a push and
+  then rechecks on Core's 1 s waitNext tick, so a gain can reach a client
+  here up to one interval later than there; `--sv2-tp-template-interval 1`
+  matches that latency. A check whose
   build fails (a reorg pops the tip block by block with no event until the
   new branch connects) is skipped; the tip event publishes.
 - **Retention:** fee pushes add one same-tip template per interval while a
