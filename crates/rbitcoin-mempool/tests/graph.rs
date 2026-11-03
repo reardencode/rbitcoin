@@ -664,6 +664,73 @@ fn diamond_cheap_parent_hot_children_cheap_sink_two_chunks() {
     assert_eq!(d_fee, 1_000, "d's chunk fee ignores sibling deltas");
 }
 
+fn spend_all(prevouts: &[(Txid, u32)], n_out: u32, seed: u8) -> Transaction {
+    let mut tx = make_tx(None, n_out, seed);
+    tx.input = prevouts
+        .iter()
+        .map(|&(txid, vout)| TxIn {
+            previous_output: OutPoint { txid, vout },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        })
+        .collect();
+    tx
+}
+
+/// Chunks match Core's optimal diagram where ancestor-set order alone does
+/// not: `PostLinearize` moves the lone child `e` behind the `b, c, d` group
+/// that out-earns it. Equal feerates stay separate chunks (Core
+/// `ChunkLinearization` merges only at a strictly higher feerate).
+#[test]
+fn chunks_match_core_postlinearize_and_tie_split() {
+    let mut g = TxGraph::new();
+    let add = |g: &mut TxGraph, tx: &Transaction, fee: u64, weight: u64| {
+        let mut e = entry_for(tx, fee, 0);
+        e.weight = weight;
+        let id = e.txid;
+        g.insert(e, tx);
+        id
+    };
+    //   a     b
+    //  / \   / \
+    // e   d─┘   c
+    let a_tx = spend_all(&[(txid_n(0xa0), 0)], 2, 1);
+    let a = add(&mut g, &a_tx, 9_976, 2_427);
+    let b_tx = spend_all(&[(txid_n(0xb0), 0)], 2, 2);
+    let b = add(&mut g, &b_tx, 5_233, 3_237);
+    let c = add(&mut g, &spend_all(&[(b, 0)], 1, 3), 8_302, 1_646);
+    let d = add(&mut g, &spend_all(&[(a, 0), (b, 1)], 1, 4), 7_004, 629);
+    let e = add(&mut g, &spend_all(&[(a, 1)], 1, 5), 7_274, 1_984);
+    let cl = g.cluster_of(&a).unwrap();
+    let sets: Vec<(BTreeSet<Txid>, u64, u64)> = cl
+        .chunks
+        .iter()
+        .map(|ch| (ch.txids.iter().copied().collect(), ch.fee_sat, ch.weight))
+        .collect();
+    assert_eq!(
+        sets,
+        vec![
+            (BTreeSet::from([a]), 9_976, 2_427),
+            (
+                BTreeSet::from([b, c, d]),
+                5_233 + 8_302 + 7_004,
+                3_237 + 1_646 + 629
+            ),
+            (BTreeSet::from([e]), 7_274, 1_984),
+        ]
+    );
+
+    let mut g = TxGraph::new();
+    let p_tx = make_tx(None, 1, 6);
+    let p = add(&mut g, &p_tx, 3_000, 1_000);
+    let k = add(&mut g, &make_tx(Some((p, 0)), 1, 7), 6_000, 2_000);
+    let cl = g.cluster_of(&p).unwrap();
+    let chunks: Vec<Vec<Txid>> = cl.chunks.iter().map(|ch| ch.txids.clone()).collect();
+    assert_eq!(chunks, vec![vec![p], vec![k]]);
+    assert_eq!(g.chunk_of(&k, |_| 0), Some((6_000, 2_000, vec![k])));
+}
+
 #[test]
 fn oversize_cluster_detected() {
     let mut g = TxGraph::new();

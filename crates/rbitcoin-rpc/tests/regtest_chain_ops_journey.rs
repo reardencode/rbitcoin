@@ -2657,9 +2657,9 @@ fn send_tx(ctx: &RpcContext, tx: &Transaction) -> String {
         .to_string()
 }
 
-/// `getblocktemplate` lists a cluster in linearization order: higher rate,
-/// then higher fee, then the lesser txid. A negative `prioritisetransaction`
-/// drops that child from the template.
+/// `getblocktemplate` lists a cluster in Core's order: chunk by chunk, and
+/// inside a chunk higher exact feerate, then the lesser txid. A negative
+/// `prioritisetransaction` drops that child from the template.
 fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
     let h = cbs.take();
     let cb = generated_coinbase_value(ctx, h);
@@ -2718,8 +2718,9 @@ fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinb
     chain_ops_mine_pool_empty(ctx);
 
     // 400_000 sat at vsize 2000 and 200_000 sat at vsize 1000 floor to the
-    // same sat/kvB. The higher fee is the later txid, so the fee compare is
-    // what puts it first in the template.
+    // same sat/kvB, and both join the parent's chunk. Inside a chunk Core
+    // orders ready transactions by exact feerate, so the smaller child, whose
+    // exact feerate is higher, goes first even though the higher fee does not.
     let h = cbs.take();
     let cb = generated_coinbase_value(ctx, h);
     let each = (cb - 10_000) / 2;
@@ -2753,10 +2754,24 @@ fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinb
             (hi.compute_txid() > lo.compute_txid()).then_some((hi, lo))
         })
         .expect("higher-fee txid after the lower-fee sibling");
+    assert!(
+        200_000 * hi.weight().to_wu() > 400_000 * lo.weight().to_wu(),
+        "the smaller child has the higher exact feerate"
+    );
     let hi_id = send_tx(ctx, &hi);
     let lo_id = send_tx(ctx, &lo);
     let ids = gbt_txids(ctx);
-    assert_template_before(&ids, &hi_id, &lo_id);
+    assert_template_before(&ids, &lo_id, &hi_id);
+    let cluster = dispatch(ctx, "getmempoolcluster", vec![json!(lo_id.clone())]).unwrap();
+    assert_eq!(
+        cluster["chunks"],
+        json!([{
+            "chunkfee": cluster["chunks"][0]["chunkfee"],
+            "chunkweight": cluster["clusterweight"],
+            "txs": [pid.to_string(), lo_id, hi_id],
+        }]),
+        "{cluster}"
+    );
     chain_ops_mine_pool_empty(ctx);
 }
 

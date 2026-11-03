@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use std::sync::Mutex;
 
-use crate::linearize::{DepGraph, FeeFrac};
+use crate::linearize::{chunk_lengths, DepGraph, FeeFrac};
 
 /// Hard cap on txs in one cluster.
 pub const MAX_CLUSTER_COUNT: usize = 64;
@@ -938,43 +938,39 @@ impl TxGraph {
             .collect()
     }
 
-    /// Split a linearization into prefix-maximal-feerate chunks (Core diagram).
+    /// Split a linearization into chunks (Core `ChunkLinearization`).
     ///
-    /// Each chunk is the longest remaining prefix whose combined feerate is
-    /// maximal. A cheap parent plus hot children is one chunk (CPFP); a hot
-    /// parent plus a cheap descendant stays split so the parent is not diluted.
+    /// A transaction joins the chunk before it only when the joined set has a
+    /// strictly higher feerate. A cheap parent plus hot children is one chunk
+    /// (CPFP); a hot parent plus a cheap descendant stays split so the parent
+    /// is not diluted; equal feerates stay split.
     #[doc(hidden)]
     pub fn chunkify_delta(&self, lin: &[Txid], delta: &impl Fn(Txid) -> i64) -> Vec<Chunk> {
+        let lin: Vec<Txid> = lin
+            .iter()
+            .copied()
+            .filter(|t| self.entries.contains_key(t))
+            .collect();
+        let feerates: Vec<FeeFrac> = lin
+            .iter()
+            .map(|t| FeeFrac::new(self.modified_fee(t, delta), self.adjusted_weight_of(t)))
+            .collect();
         let mut chunks = Vec::new();
-        let mut i = 0;
-        while i < lin.len() {
-            let mut acc_fee = 0i128;
-            let mut acc_w = 0u64;
-            let mut best_end = i;
-            let mut best_fee = 0i128;
-            let mut best_w = 0u64;
-            for (j, t) in lin.iter().enumerate().skip(i) {
-                let Some(e) = self.entries.get(t) else {
-                    continue;
-                };
-                acc_fee = acc_fee.saturating_add(i128::from(self.modified_fee(t, delta)));
-                acc_w = acc_w.saturating_add(e.adjusted_weight(self.bytes_per_sigop));
-                // acc/acc_w >= best/best_w  (longest prefix on a tie).
-                let better = best_w == 0
-                    || acc_fee.saturating_mul(i128::from(best_w))
-                        >= best_fee.saturating_mul(i128::from(acc_w));
-                if better {
-                    best_end = j;
-                    best_fee = acc_fee;
-                    best_w = acc_w;
-                }
-            }
-            chunks.push(Chunk {
-                txids: lin[i..=best_end].to_vec(),
-                fee_sat: best_fee.max(0) as u64,
-                weight: best_w,
+        let mut start = 0;
+        for len in chunk_lengths(&feerates) {
+            let txids = lin[start..start + len].to_vec();
+            start += len;
+            let (fee, weight) = txids.iter().fold((0i128, 0u64), |(f, w), t| {
+                (
+                    f.saturating_add(i128::from(self.modified_fee(t, delta))),
+                    w.saturating_add(self.adjusted_weight_of(t)),
+                )
             });
-            i = best_end + 1;
+            chunks.push(Chunk {
+                txids,
+                fee_sat: fee.clamp(0, i128::from(u64::MAX)) as u64,
+                weight,
+            });
         }
         chunks
     }
