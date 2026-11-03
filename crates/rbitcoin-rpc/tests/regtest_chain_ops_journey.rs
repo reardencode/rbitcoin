@@ -2221,6 +2221,14 @@ fn chain_ops_submit_tx_shape(
     assert_eq!(submit(&next(vec![negative_dup.clone()])), "bad-txns-vout-negative");
     let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_dup)])]).unwrap();
     assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
+    let empty_dup = bare(vec![tx_in(op), tx_in(op)], vec![]);
+    assert_eq!(submit(&next(vec![empty_dup])), "bad-txns-vout-empty");
+    // A coinbase's outputs are checked before its scriptSig length.
+    let mut short_coinbase = with_outputs(&[negative]);
+    short_coinbase.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    short_coinbase.header.merkle_root = short_coinbase.compute_merkle_root().unwrap();
+    regrind(&mut short_coinbase);
+    assert_eq!(submit(&short_coinbase), "bad-txns-vout-negative");
 
     let spend = bare(
         vec![tx_in(OutPoint {

@@ -65,16 +65,7 @@ pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usiz
 /// Core `CheckTransaction` in Core's order, except duplicate inputs: a block
 /// checks those for every transaction before its coinbase layout.
 pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
-    if tx.input.is_empty() {
-        return Err(ConsensusError::BadTx("no inputs"));
-    }
-    if tx.output.is_empty() {
-        return Err(ConsensusError::BadTx("no outputs"));
-    }
-    if base_size > MAX_BLOCK_STRIPPED_SIZE {
-        return Err(ConsensusError::BadTx("bad-txns-oversize"));
-    }
-    tx_value_out(tx)?;
+    check_tx_shape(tx, base_size)?;
     if tx.is_coinbase() {
         return Ok(());
     }
@@ -84,6 +75,21 @@ pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), Consensu
         }
     }
     Ok(())
+}
+
+/// Core `CheckTransaction` before its input walk: an empty vin or vout, the
+/// stripped size, then each output value.
+fn check_tx_shape(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+    if tx.input.is_empty() {
+        return Err(ConsensusError::BadTx("no inputs"));
+    }
+    if tx.output.is_empty() {
+        return Err(ConsensusError::BadTx("no outputs"));
+    }
+    if base_size > MAX_BLOCK_STRIPPED_SIZE {
+        return Err(ConsensusError::BadTx("bad-txns-oversize"));
+    }
+    tx_value_out(tx).map(|_| ())
 }
 
 fn reject_duplicate_outpoints(
@@ -213,14 +219,15 @@ pub fn validate_block_structure_with_pres(
     // One set for the block. A one-input tx cannot repeat an outpoint, so it
     // does not allocate. Runs before the coinbase layout check: two null
     // coinbase inputs are `bad-txns-inputs-duplicate`, not "first tx not coinbase".
-    // Core CheckTransaction walks the outputs before the inputs, so a tx this
-    // scan reaches has its outputs walked here and again in `check_tx_local`.
+    // Core CheckTransaction checks a tx's shape and outputs before its inputs,
+    // so a tx this scan reaches is shape-checked here and again in
+    // `check_tx_local`.
     let mut block_outs: Option<crate::OutPointSet> = None;
-    for tx in &block.txdata {
+    for (tx, p) in block.txdata.iter().zip(pres.iter()) {
         if tx.input.len() < 2 {
             continue;
         }
-        tx_value_out(tx)?;
+        check_tx_shape(tx, p.base_size)?;
         let seen = block_outs.get_or_insert_with(|| {
             crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default())
         });
@@ -229,7 +236,9 @@ pub fn validate_block_structure_with_pres(
     reject_bad_block_tx_layout(block, &pres)?;
 
     // Core CheckTransaction: after the root matches, so a swapped scriptSig is
-    // a merkle mismatch, and before ContextualCheckBlock's BIP34 height.
+    // a merkle mismatch, after the coinbase's shape and outputs, and before
+    // ContextualCheckBlock's BIP34 height.
+    check_tx_shape(&block.txdata[0], pres[0].base_size)?;
     let cb_ss = block.txdata[0].input[0].script_sig.len();
     if !(2..=100).contains(&cb_ss) {
         return Err(ConsensusError::BadBlock("bad-cb-length"));
