@@ -82,10 +82,10 @@ fn rpc_regtest_from_genesis() {
     let (addr, p2wpkh) = p2wpkh_regtest();
     let store = dir.join("store");
     chain_ops_genesis_client_edges(&ctx);
-    chain_ops_at_genesis(&ctx, &hub, &store);
+    let size_at_genesis = chain_ops_at_genesis(&ctx, &hub, &store);
     chain_ops_refusals_at_genesis(&ctx, &hub);
     chain_ops_first_block_to_an_address(&ctx, &hub, &addr, &p2wpkh);
-    chain_ops_first_block_info(&ctx, &hub, &store, &p2wpkh);
+    chain_ops_first_block_info(&ctx, &hub, &store, &p2wpkh, size_at_genesis);
     chain_ops_mocktime(&ctx, &hub, &p2wpkh);
     chain_ops_coinbase_only_blocks(&ctx);
     chain_ops_empty_template_and_proposals(&ctx);
@@ -954,14 +954,18 @@ fn chain_ops_getblockstats_errors(ctx: &RpcContext, header_only: &Block) {
     assert_eq!(e["message"], "Block not available (not fully downloaded)");
 }
 
-fn chain_ops_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, store: &std::path::Path) {
+fn chain_ops_at_genesis(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::ChainHub,
+    store: &std::path::Path,
+) -> u64 {
     let info = dispatch(ctx, "getblockchaininfo", vec![]).unwrap();
     assert_eq!(info["chain"], "regtest", "{info}");
     let store_bytes = dir_file_bytes(store);
     assert!(store_bytes > 0, "open store has table files");
+    let reported = info["size_on_disk"].as_u64().unwrap();
     assert_eq!(
-        info["size_on_disk"].as_u64().unwrap(),
-        store_bytes,
+        reported, store_bytes,
         "size_on_disk is a walk of {{datadir}}/store"
     );
     assert_eq!(info["blocks"], 0);
@@ -990,7 +994,7 @@ fn chain_ops_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, store: &
     assert_eq!(buried_deployments(&over, 100)["csv"]["height"], 102);
     assert_eq!(buried_deployments(&over, 100)["csv"]["active"], false);
     assert_eq!(buried_deployments(&over, 101)["csv"]["active"], true);
-
+    reported
 }
 
 fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
@@ -1143,6 +1147,7 @@ fn chain_ops_first_block_info(
     hub: &rbitcoin_net::ChainHub,
     store: &std::path::Path,
     p2wpkh: &ScriptBuf,
+    size_at_genesis: u64,
 ) {
     let best = best_hash(ctx);
     let tip = hub.tip_hash().unwrap();
@@ -1152,9 +1157,13 @@ fn chain_ops_first_block_info(
     assert_eq!(info["bestblockhash"], best);
     assert!(info["time"].as_u64().unwrap() > 0);
     assert!(info["mediantime"].as_u64().is_some());
-    assert_eq!(
-        info["size_on_disk"].as_u64().unwrap(),
-        dir_file_bytes(store)
+    // The genesis `getblockchaininfo` sampled this store. Inside 30 seconds
+    // the same sample is reused, including after this block grew the files.
+    let reported = info["size_on_disk"].as_u64().unwrap();
+    let fresh = dir_file_bytes(store);
+    assert!(
+        reported == size_at_genesis || reported == fresh,
+        "size_on_disk is the 30s sample ({size_at_genesis}) or a new walk ({fresh}), got {reported}"
     );
     // `feature_maxtipage`: Core computes IsInitialBlockDownload on the call.
     // A stale node-loop copy must not win or resurrect a dummy 0.5 progress.

@@ -438,7 +438,7 @@ impl P2PNode {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
         for p in self.peers.live_peers() {
-            p.request_disconnect();
+            p.wake_for_disconnect();
         }
         let mut join = Vec::new();
         join.append(&mut self.tasks);

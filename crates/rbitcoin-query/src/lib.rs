@@ -480,6 +480,9 @@ pub struct Query {
     /// 0 = off. An unpaged SH join above this create count holds
     /// [`Self::heavy_sh_join`] for its whole walk.
     pub heavy_sh_creates: AtomicU32,
+    /// Shared API store-read slots. Tests leave this at `tokio::sync::Semaphore::MAX_PERMITS`.
+    /// The node replaces it once at listen from `--store-read-budget`.
+    pub api_read_budget: std::sync::Mutex<Arc<tokio::sync::Semaphore>>,
     /// One heavy unpaged SH join at a time across every Electrum and Esplora
     /// client: one near the cap can peak above 2 GiB.
     pub heavy_sh_join: Mutex<()>,
@@ -671,6 +674,9 @@ impl Query {
             reconstruct_archived: AtomicU64::new(0),
             max_sh_creates: AtomicU32::new(DEFAULT_MAX_SH_CREATES),
             heavy_sh_creates: AtomicU32::new(DEFAULT_HEAVY_SH_CREATES),
+            api_read_budget: std::sync::Mutex::new(Arc::new(tokio::sync::Semaphore::new(
+                tokio::sync::Semaphore::MAX_PERMITS,
+            ))),
             heavy_sh_join: Mutex::new(()),
             #[cfg(debug_assertions)]
             sh_join_probe: crate::scripthash::ShJoinProbe::default(),
@@ -1525,6 +1531,26 @@ impl Query {
 
     pub fn heavy_sh_creates(&self) -> u32 {
         self.heavy_sh_creates.load(AtomicOrdering::Relaxed)
+    }
+
+    /// The process API store-read semaphore. Callers acquire on the async
+    /// task and move the permit into the blocking read.
+    pub fn api_read_budget(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(
+            &self
+                .api_read_budget
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
+    /// Replace the API store-read semaphore. `0` waits forever. The node
+    /// passes a count of at least 1.
+    pub fn set_api_read_budget(&self, n: usize) {
+        *self
+            .api_read_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(tokio::sync::Semaphore::new(n));
     }
 
     pub fn note_reconstruct_archived(&self) {

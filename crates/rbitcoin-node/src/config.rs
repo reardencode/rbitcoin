@@ -445,6 +445,9 @@ pub struct NodeConfig {
     /// Max Esplora requests in flight across the whole listener (>= 1).
     /// Default [`rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS`].
     pub esplora_max_inflight: usize,
+    /// `--store-read-budget`. `None` is omitted. `Some(0)` uses the formula.
+    /// `Some(n)` with `n >= 1` is that many API store reads.
+    pub store_read_budget: Option<usize>,
     /// Opt-in Esplora `GET /block-template` (GBT template JSON). Default off.
     pub esplora_block_template: bool,
     /// Prometheus `GET /metrics` on the health listener. Default off.
@@ -589,6 +592,7 @@ impl Default for NodeConfig {
             heavy_sh_creates: rbitcoin_query::DEFAULT_HEAVY_SH_CREATES,
             electrum_max_subs: rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS,
             esplora_max_inflight: rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS,
+            store_read_budget: None,
             esplora_block_template: false,
             metrics: false,
             esplora_onion: true,
@@ -1458,6 +1462,18 @@ impl NodeConfig {
                     ));
                 }
                 self.electrum_max_subs = n;
+            }
+            "store_read_budget" => {
+                let n: i64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf store_read_budget: {e}")))?;
+                if n < 0 || n as usize > tokio::sync::Semaphore::MAX_PERMITS {
+                    return Err(NodeError::Config(format!(
+                        "conf store_read_budget must be >= 0 and <= {}",
+                        tokio::sync::Semaphore::MAX_PERMITS
+                    )));
+                }
+                self.store_read_budget = Some(n as usize);
             }
             "esplora_max_inflight" => {
                 let n: usize = val
