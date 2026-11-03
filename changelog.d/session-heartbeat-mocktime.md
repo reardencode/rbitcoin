@@ -15,3 +15,6 @@ Fixed
   admit or `prioritisetransaction` during that connect used to leave the
   longpoll parked until the next tip or the two-minute timeout. Dropping
   the template hold publishes the generation when it moved.
+- **Invalidating the tip does not inv a stump the peer already walked
+  past.** Electrum still full-rescans. A reorg onto a block the peer does
+  not have still announces.

@@ -5341,6 +5341,20 @@ pub fn tip_event_for_announce(
     }
 }
 
+/// `hash` is a strict ancestor of a header this peer already has.
+/// An equal mark still needs a block inv.
+fn peer_already_walked_past(
+    hub: &ChainHub,
+    sent: Option<BlockHash>,
+    known: Option<BlockHash>,
+    hash: BlockHash,
+) -> bool {
+    [sent, known]
+        .into_iter()
+        .flatten()
+        .any(|mark| mark != hash && hub.is_header_ancestor(hash, mark))
+}
+
 #[doc(hidden)]
 pub fn peer_has_header(
     hub: &ChainHub,
@@ -5607,12 +5621,17 @@ pub fn tip_announce_decision(
         return TipAnnounce::Skip;
     }
     if ev.reorg_branch_len > MAX_BLOCKS_TO_ANNOUNCE {
-        if hub.tip_hash() == Some(ev.hash) {
+        if hub.tip_hash() == Some(ev.hash)
+            && !peer_already_walked_past(hub, best_header_sent, best_known, ev.hash)
+        {
             return TipAnnounce::Inv(ev.hash);
         }
         return TipAnnounce::Skip;
     }
     if !wants_headers {
+        if peer_already_walked_past(hub, best_header_sent, best_known, ev.hash) {
+            return TipAnnounce::Skip;
+        }
         return TipAnnounce::Inv(ev.hash);
     }
     if peer_has_header(hub, best_header_sent, best_known, ev.hash) {

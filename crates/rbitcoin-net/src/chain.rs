@@ -69,8 +69,10 @@ pub struct TipEvent {
     pub height: u32,
     pub hash: BlockHash,
     pub header: Header,
-    /// New-branch length when this tip came from `accept_branch` (0 = tip-extend).
-    /// `p2p_sendheaders`: >8 → announce inv and pause headers.
+    /// New-branch length from `accept_branch` (0 = tip-extend). A disconnect
+    /// stores how many blocks came off, which is what makes Electrum rescan.
+    /// Announcement skips this hash when the peer already walked past it.
+    /// `p2p_sendheaders`: more than 8 → inv, and pause headers.
     pub reorg_branch_len: u32,
 }
 

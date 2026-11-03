@@ -1350,6 +1350,44 @@ fn tip_announce_kept_prefix_of_failed_reorg_is_headers() {
     }
 }
 
+/// A pure disconnect's tip is an ancestor the peer already had. Announcing
+/// it by inv offers a block the peer has. Core sends nothing on invalidate.
+#[test]
+fn tip_announce_skips_a_stump_the_peer_already_has() {
+    let (_dir, hub) = open_tip_announce_hub("tip-stump-already-known");
+    let hub = &hub;
+    let sent_tip = hub.tip_hash().unwrap();
+    let height = hub.tip_height().unwrap();
+    let cut = hub
+        .block_at_height(height - 8)
+        .unwrap()
+        .unwrap()
+        .block_hash();
+    let mut tips = hub.subscribe_tips();
+    hub.invalidate_block(cut).unwrap();
+    let mut ev = None;
+    while let Ok(got) = tips.try_recv() {
+        ev = Some(got);
+    }
+    let ev = ev.expect("stump tip");
+    assert!(ev.reorg_branch_len > 8, "{}", ev.reorg_branch_len);
+    assert_eq!(hub.tip_hash(), Some(ev.hash));
+    assert!(
+        matches!(
+            tip_announce_decision(hub, &ev, true, Some(sent_tip), None, false),
+            TipAnnounce::Skip
+        ),
+        "sendheaders peer was offered the stump"
+    );
+    assert!(
+        matches!(
+            tip_announce_decision(hub, &ev, false, Some(sent_tip), None, false),
+            TipAnnounce::Skip
+        ),
+        "non-sendheaders peer was offered the stump"
+    );
+}
+
 /// After a reorg longer than eight blocks, announce inv until the peer's
 /// best header is on the new chain.
 #[test]
