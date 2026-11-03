@@ -123,11 +123,19 @@ pub fn spawn_with_store_budget<T: Send + 'static>(
     fut: impl Future<Output = T> + Send + 'static,
 ) -> tokio::task::JoinHandle<T> {
     let budget = API_STORE_BUDGET.try_with(Arc::clone).ok();
+    let lane_exempt = crate::tip_accept::spawn_inherits_lane_permit();
     tokio::spawn(async move {
-        if let Some(budget) = budget {
-            with_store_budget(budget, fut).await
+        let run = async move {
+            if let Some(budget) = budget {
+                with_store_budget(budget, fut).await
+            } else {
+                fut.await
+            }
+        };
+        if lane_exempt {
+            crate::tip_accept::enter_lane_task_exemption(run).await
         } else {
-            fut.await
+            run.await
         }
     })
 }

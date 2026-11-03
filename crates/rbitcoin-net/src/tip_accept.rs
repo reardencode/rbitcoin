@@ -217,7 +217,10 @@ fn take_lane_exemption() -> bool {
         return true;
     }
     let oneshot = LANE_ONESHOT.with(|c| c.replace(false));
-    oneshot || lane_held_after_revoke() > 0
+    if oneshot || lane_held_after_revoke() > 0 {
+        return true;
+    }
+    LANE_TASK_EXEMPT.try_with(|_| ()).is_ok()
 }
 
 #[cfg(not(debug_assertions))]
@@ -292,8 +295,41 @@ impl Drop for LanePermit {
             let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
             LANE_EXCLUSIVE.store(false, Ordering::Release);
             LANE_EXCLUSIVE_CV.notify_all();
+            // Async senders wait on this. A condvar would park the worker
+            // inside the poll, so the caller's timeout would not run.
+            lane_exclusive_notify().notify_waiters();
         }
     }
+}
+
+tokio::task_local! {
+    static LANE_TASK_EXEMPT: ();
+}
+
+/// The spawning thread holds a [`LanePermit`]. `spawn_with_store_budget`
+/// copies that into the child so an async accept does not wait on its own
+/// caller's permit.
+#[doc(hidden)]
+pub fn spawn_inherits_lane_permit() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        lane_test_gate_enabled() && lane_held_after_revoke() > 0
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+#[doc(hidden)]
+pub async fn enter_lane_task_exemption<F: Future>(fut: F) -> F::Output {
+    LANE_TASK_EXEMPT.scope((), fut).await
+}
+
+#[cfg(debug_assertions)]
+fn lane_exclusive_notify() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
 }
 
 #[cfg(debug_assertions)]
@@ -420,6 +456,46 @@ pub fn send_parked_notify() -> &'static tokio::sync::Notify {
 
 fn note_send_parked() {
     send_parked().notify_one();
+}
+
+/// `Err(job)` when the queue is full. A held permit is awaited here, not
+/// inside a worker-blocking condvar.
+async fn send_or_full(exempt: bool, job: Job) -> Result<(), Job> {
+    #[cfg(debug_assertions)]
+    if !exempt && lane_test_gate_enabled() {
+        return send_or_full_gated(job).await;
+    }
+    match sender().try_send(job) {
+        Ok(()) => {
+            note_async_enqueued();
+            Ok(())
+        }
+        Err(TrySendError::Full(j)) => Err(j),
+        Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn send_or_full_gated(job: Job) -> Result<(), Job> {
+    loop {
+        let notified = lane_exclusive_notify().notified();
+        tokio::pin!(notified);
+        {
+            let _gate = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+            if !LANE_EXCLUSIVE.load(Ordering::Acquire) {
+                return match sender().try_send(job) {
+                    Ok(()) => {
+                        note_async_enqueued();
+                        Ok(())
+                    }
+                    Err(TrySendError::Full(j)) => Err(j),
+                    Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+                };
+            }
+            notified.as_mut().enable();
+        }
+        notified.await;
+    }
 }
 
 fn note_async_enqueued() {
@@ -556,21 +632,10 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
     });
     let mut job = job;
     loop {
-        let blocked = {
-            let _gate = lane_send_guard(exempt);
-            match sender().try_send(job) {
-                Ok(()) => {
-                    note_async_enqueued();
-                    None
-                }
-                Err(TrySendError::Full(j)) => Some(j),
-                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
-            }
-        };
-        let Some(j) = blocked else {
-            break;
-        };
-        job = j;
+        match send_or_full(exempt, job).await {
+            Ok(()) => break,
+            Err(j) => job = j,
+        }
         FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
         #[cfg(debug_assertions)]
         wait_park_gate().await;
@@ -583,21 +648,10 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
         if notified.as_mut().enable() {
             continue;
         }
-        let blocked = {
-            let _gate = lane_send_guard(exempt);
-            match sender().try_send(job) {
-                Ok(()) => {
-                    note_async_enqueued();
-                    None
-                }
-                Err(TrySendError::Full(j)) => Some(j),
-                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
-            }
-        };
-        let Some(j) = blocked else {
-            break;
-        };
-        job = j;
+        match send_or_full(exempt, job).await {
+            Ok(()) => break,
+            Err(j) => job = j,
+        }
         FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
         note_send_parked();
         notified.await;

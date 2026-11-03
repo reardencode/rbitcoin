@@ -140,9 +140,10 @@ async fn lane_permit_wait_does_not_block_the_async_worker() {
     let permit = LanePermit::take();
     let (tx, rx) = std::sync::mpsc::channel();
     let task = tokio::spawn(async move {
-        let timed_out = tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
-            .await
-            .is_err();
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+                .await
+                .is_err();
         tx.send(timed_out).ok();
     });
     let reported = rx.recv_timeout(Duration::from_millis(800));
