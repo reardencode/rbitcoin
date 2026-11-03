@@ -1776,8 +1776,8 @@ pub fn estimaterawfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
         return Err(rpc_error(ERR_MISC, method_help("estimaterawfee")));
     }
     let conf_target = parse_conf_target(params.get(0, "conf_target").unwrap())?;
-    if let Some(th) = params.get(1, "threshold") {
-        if !matches!(th, Value::Null) && json_u64(th).is_none() && th.as_f64().is_none() {
+    if let Some(th) = params.get(1, "threshold").filter(|th| !th.is_null()) {
+        let Some(threshold) = th.as_f64() else {
             return Err(rpc_error(
                 ERR_TYPE_ERROR,
                 format!(
@@ -1785,6 +1785,9 @@ pub fn estimaterawfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
                     json_type_name(th)
                 ),
             ));
+        };
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(rpc_error(ERR_INVALID_PARAMETER, "Invalid threshold"));
         }
     }
     estimate_fee_result(ctx, conf_target)

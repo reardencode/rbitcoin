@@ -870,6 +870,15 @@ fn chain_ops_estimate_fee_param_gates(ctx: &RpcContext) {
         e["message"].as_str().unwrap().contains("JSON value of type number is not of expected type string"),
         "{e}"
     );
+    // Core `estimaterawfee`: a threshold outside `0..=1` is `-8`.
+    for threshold in [json_num("1.01"), json!(2), json_num("-0.5")] {
+        let e = dispatch(ctx, "estimaterawfee", vec![json!(2), threshold.clone()]).unwrap_err();
+        assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{threshold}: {e}");
+        assert_eq!(e["message"], "Invalid threshold", "{threshold}: {e}");
+    }
+    for threshold in [json!(0), json!(1), json_num("0.95")] {
+        dispatch(ctx, "estimaterawfee", vec![json!(2), threshold]).unwrap();
+    }
 }
 
 fn chain_ops_estimate_fee_options(ctx: &RpcContext) {
