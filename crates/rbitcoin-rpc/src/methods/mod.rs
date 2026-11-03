@@ -591,6 +591,10 @@ impl RpcParams {
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, format!("{name} must be an integer")))
     }
 
+    pub fn req_core_int(&self, index: usize, name: &str) -> Result<i32, Value> {
+        core_json_int(self.req(index, name)?)
+    }
+
     pub fn opt_u64(&self, index: usize, name: &str) -> Result<Option<u64>, Value> {
         match self.get(index, name) {
             None | Some(Value::Null) => Ok(None),
@@ -653,6 +657,23 @@ impl RpcParams {
 pub fn json_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+}
+
+/// Core `UniValue::getInt<int>`: a non-number is `-3`. A fraction, an
+/// exponent, or a value outside `i32` is `-1` `JSON integer out of range`.
+pub fn core_json_int(v: &Value) -> Result<i32, Value> {
+    let Value::Number(n) = v else {
+        return Err(rpc_error(
+            ERR_TYPE_ERROR,
+            format!(
+                "JSON value of type {} is not of expected type number",
+                json_type_name(v)
+            ),
+        ));
+    };
+    n.as_i64()
+        .and_then(|t| i32::try_from(t).ok())
+        .ok_or_else(|| rpc_error(ERR_MISC, "JSON integer out of range"))
 }
 
 pub fn json_i64(v: &Value) -> Option<i64> {

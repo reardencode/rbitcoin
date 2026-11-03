@@ -1635,20 +1635,7 @@ pub fn tx_confirmed_on_active_chain(ctx: &RpcContext, tx: &Transaction) -> Resul
 
 /// Core `ParseConfirmTarget`: an `int` (else `JSON integer out of range`) in `1..=1008`.
 pub fn parse_conf_target(v: &Value) -> Result<u32, Value> {
-    let Value::Number(n) = v else {
-        return Err(rpc_error(
-            ERR_TYPE_ERROR,
-            format!(
-                "JSON value of type {} is not of expected type number",
-                json_type_name(v)
-            ),
-        ));
-    };
-    let conf_target = n
-        .as_i64()
-        .and_then(|t| i32::try_from(t).ok())
-        .ok_or_else(|| rpc_error(ERR_MISC, "JSON integer out of range"))?;
-    u32::try_from(conf_target)
+    u32::try_from(core_json_int(v)?)
         .ok()
         .filter(|t| (1..=1008).contains(t))
         .ok_or_else(|| {

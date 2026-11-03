@@ -219,6 +219,7 @@ fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
     chain_ops_unknown_named_param(ctx);
     chain_ops_wrong_json_types(ctx);
     chain_ops_regtest_type_errors(ctx);
+    chain_ops_generate_count_is_core_int(ctx);
     chain_ops_junk_tx_hex(ctx);
     chain_ops_network_identity(ctx);
     ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -501,6 +502,48 @@ fn chain_ops_regtest_type_errors(ctx: &RpcContext) {
             "{method}: expected {needle:?} in {err}"
         );
     }
+}
+
+/// Core reads the block count with `getInt<int>`: past `i32` is `-1`
+/// `JSON integer out of range` (not a truncated count), and a count at or
+/// below zero mines nothing.
+fn chain_ops_generate_count_is_core_int(ctx: &RpcContext) {
+    let (addr, _) = p2wpkh_regtest();
+    let calls = |count: Value| {
+        [
+            ("generate", vec![count.clone()]),
+            ("generatetoaddress", vec![count.clone(), json!(addr)]),
+            ("generatetodescriptor", vec![count, json!("raw(51)")]),
+        ]
+    };
+    let out_of_range = [
+        json!(4_294_967_297_u64),
+        json!(2_147_483_648_u64),
+        json!(-2_147_483_649_i64),
+        json_num("1.5"),
+    ];
+    for count in out_of_range {
+        for (method, params) in calls(count.clone()) {
+            let err = dispatch(ctx, method, params).unwrap_err();
+            assert_eq!(err["code"], ERR_MISC, "{method} {count}: {err}");
+            assert_eq!(err["message"], "JSON integer out of range", "{method} {count}: {err}");
+        }
+    }
+    for count in [json!(-1), json!(-2_147_483_648_i64), json!(0)] {
+        for (method, params) in calls(count.clone()) {
+            let got = dispatch(ctx, method, params).unwrap();
+            assert_eq!(got, json!([]), "{method} {count}");
+        }
+    }
+    for (method, params) in calls(json!("1")) {
+        let err = dispatch(ctx, method, params).unwrap_err();
+        assert_eq!(err["code"], ERR_TYPE_ERROR, "{method}: {err}");
+        assert_eq!(
+            err["message"], "JSON value of type string is not of expected type number",
+            "{method}: {err}"
+        );
+    }
+    assert_eq!(tip_count(ctx), 0);
 }
 
 /// Version 2, an empty vin, flags 0, locktime 0. Core's witness decode reads

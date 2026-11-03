@@ -259,7 +259,7 @@ pub async fn generate_async(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
         return Err(rpc_error(ERR_METHOD_NOT_FOUND, GENERATE_REPLACED));
     }
     let _miner = require_regtest_miner(ctx, "generate")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let _maxtries = params.opt_u64(1, "maxtries")?;
     let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
     generate_with_mempool_async(ctx, nblocks, script).await
@@ -268,7 +268,7 @@ pub async fn generate_async(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
 pub async fn generatetoaddress_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "address", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let addr = params.req_str(1, "address")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = decode_output_script(ctx, addr)?;
@@ -281,7 +281,7 @@ pub async fn generatetodescriptor_async(
 ) -> Result<Value, Value> {
     params.reject_unknown(&["num_blocks", "descriptor", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetodescriptor")?;
-    let nblocks = params.req_u64(0, "num_blocks")? as u32;
+    let nblocks = generate_count(params, "num_blocks")?;
     let desc = params.req_str(1, "descriptor")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = parse_output_descriptor(ctx, desc)?;
@@ -370,10 +370,16 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
     Ok(json!({ "hash": hash.to_string() }))
 }
 
+/// Core reads the count with `getInt<int>`, and `generateBlocks` mines
+/// nothing for a count at or below zero.
+fn generate_count(params: &RpcParams, name: &str) -> Result<u32, Value> {
+    Ok(params.req_core_int(0, name)?.max(0) as u32)
+}
+
 pub fn generatetoaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "address", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let addr = params.req_str(1, "address")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = decode_output_script(ctx, addr)?;
@@ -559,7 +565,7 @@ pub fn generate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         return Err(rpc_error(ERR_METHOD_NOT_FOUND, GENERATE_REPLACED));
     }
     let _miner = require_regtest_miner(ctx, "generate")?;
-    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let nblocks = generate_count(params, "nblocks")?;
     let _maxtries = params.opt_u64(1, "maxtries")?;
     let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
     generate_with_mempool(ctx, nblocks, script)
@@ -568,7 +574,7 @@ pub fn generate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
 pub fn generatetodescriptor(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["num_blocks", "descriptor", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetodescriptor")?;
-    let nblocks = params.req_u64(0, "num_blocks")? as u32;
+    let nblocks = generate_count(params, "num_blocks")?;
     let desc = params.req_str(1, "descriptor")?;
     let _maxtries = params.opt_u64(2, "maxtries")?;
     let script = parse_output_descriptor(ctx, desc)?;
