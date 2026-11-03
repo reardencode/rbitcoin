@@ -3,35 +3,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-/// The tip-accept lane and the park-gate atomics are process-wide. Cargo
-/// runs this binary's tests in parallel, so one permit keeps them apart.
-fn lane_gate() -> &'static (Mutex<bool>, Condvar) {
-    static LANE: std::sync::OnceLock<(Mutex<bool>, Condvar)> = std::sync::OnceLock::new();
-    LANE.get_or_init(|| (Mutex::new(false), Condvar::new()))
-}
-
-struct LanePermit;
-
-impl LanePermit {
-    fn take() -> Self {
-        let (mu, cv) = lane_gate();
-        let mut busy = mu.lock().unwrap_or_else(|p| p.into_inner());
-        while *busy {
-            busy = cv.wait(busy).unwrap_or_else(|p| p.into_inner());
-        }
-        *busy = true;
-        Self
-    }
-}
-
-impl Drop for LanePermit {
-    fn drop(&mut self) {
-        let (mu, cv) = lane_gate();
-        *mu.lock().unwrap_or_else(|p| p.into_inner()) = false;
-        cv.notify_one();
-    }
-}
-
 /// A panic while the debug park gate is armed must not leave later senders
 /// asleep in `wait_park_gate`.
 struct ParkGate;
@@ -54,6 +25,14 @@ impl Drop for ParkGate {
 }
 
 #[test]
+fn lane_gate_is_on_before_any_permit() {
+    assert!(
+        lane_test_gate_enabled(),
+        "the suite must arm the lane permit before tests run"
+    );
+}
+
+#[test]
 fn lane_runs_on_named_thread() {
     let _lane = LanePermit::take();
     let name = run_on_tip_accept(|| thread::current().name().map(str::to_string));
@@ -69,6 +48,7 @@ fn wait_idle_blocks_until_job_finishes() {
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
+        arm_lane_oneshot();
         run_on_tip_accept(move || {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
@@ -76,9 +56,18 @@ fn wait_idle_blocks_until_job_finishes() {
     });
     started_rx.recv().unwrap();
     let seen = subscribe_wait_seen();
-    let waiter = thread::spawn(wait_idle);
-    seen.recv_timeout(Duration::from_secs(2))
-        .expect("wait_idle did not observe the running job");
+    let (id_tx, id_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        id_tx.send(thread::current().id()).unwrap();
+        wait_idle();
+    });
+    let id = id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiter started");
+    assert!(
+        wait_seen_from(&seen, id, Duration::from_secs(2)),
+        "wait_idle did not observe the running job"
+    );
     assert!(
         !waiter.is_finished(),
         "wait_idle must not return while a tip-accept job is running"
@@ -87,6 +76,223 @@ fn wait_idle_blocks_until_job_finishes() {
     waiter.join().expect("wait_idle");
     worker.join().expect("job");
     wait_idle();
+}
+
+/// `LanePermit::take` drains an in-flight job through [`quiet_drain_for_tests`].
+/// That drain must not publish `subscribe_wait_seen`. The permit is held
+/// first so the job cannot enter while another test is filling the lane.
+#[test]
+fn lane_permit_take_does_not_publish_wait_seen() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let _lane = LanePermit::take();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        arm_lane_oneshot();
+        run_on_tip_accept(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    started_rx.recv().unwrap();
+    let seen = subscribe_wait_seen();
+    let quiet = subscribe_quiet_drain();
+    let (id_tx, id_rx) = mpsc::channel();
+    let drainer = thread::spawn(move || {
+        id_tx.send(thread::current().id()).unwrap();
+        quiet_drain_for_tests();
+    });
+    let id = id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("drainer started");
+    assert!(
+        wait_seen_from(&quiet, id, Duration::from_secs(2)),
+        "quiet drain did not park on the running job"
+    );
+    let mut published = false;
+    while let Ok(noted) = seen.try_recv() {
+        if noted == id {
+            published = true;
+        }
+    }
+    assert!(
+        !published,
+        "LanePermit drain published wait_seen while the job was running"
+    );
+    assert!(
+        !drainer.is_finished(),
+        "quiet drain returned while the tip-accept job was running"
+    );
+    release_tx.send(()).unwrap();
+    drainer.join().expect("drain");
+    worker.join().expect("job");
+}
+
+/// A permit must not park the worker inside `run_on_tip_accept_async`.
+/// The caller's timeout has to finish while the permit is still held.
+/// Reporting that only after `drop(permit)` is a pass: a blocked worker
+/// wakes when the permit drops, and `timeout` then sees a ready job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_permit_wait_does_not_block_the_async_worker() {
+    use std::time::Duration;
+
+    let permit = LanePermit::take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let task = tokio::spawn(async move {
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+                .await
+                .is_err();
+        tx.send(timed_out).ok();
+    });
+    let reported = rx.recv_timeout(Duration::from_millis(800));
+    let finished_while_held = matches!(reported, Ok(true));
+    drop(permit);
+    let _ = rx.recv_timeout(Duration::from_secs(2));
+    task.await.expect("task");
+    assert!(
+        finished_while_held,
+        "the async entry blocked a worker in the permit wait; the caller's timeout did not run"
+    );
+}
+
+/// Jobs sitting in the sync channel have not called `begin_job`. Filler
+/// jobs never do. `LanePermit::take` must wait for those too, and that
+/// wait must not publish `subscribe_wait_seen`.
+#[test]
+fn lane_permit_take_waits_for_a_job_that_has_not_begun() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let permit = LanePermit::take();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_tx = ReleaseOnDropSend(release_tx);
+    assert!(
+        enqueue_or_full(Box::new(move || {
+            started_tx.send(()).ok();
+            let _ = release_rx.recv();
+        })),
+        "filler job did not enter the lane queue"
+    );
+    drop(permit);
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("queued job started");
+    let seen = subscribe_wait_seen();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let taker = thread::spawn(move || {
+        let id = thread::current().id();
+        let _hold = LanePermit::take();
+        entered_tx.send(id).ok();
+    });
+    let slipped = entered_rx.recv_timeout(Duration::from_millis(300));
+    assert!(
+        slipped.is_err(),
+        "LanePermit::take returned while a queued job was still running"
+    );
+    drop(release_tx);
+    let id = entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("take did not finish after the queued job");
+    taker.join().expect("take");
+    while let Ok(noted) = seen.try_recv() {
+        assert_ne!(
+            noted, id,
+            "LanePermit::take published wait_seen for its own drain"
+        );
+    }
+}
+
+struct ReleaseOnDropSend(std::sync::mpsc::SyncSender<()>);
+
+impl Drop for ReleaseOnDropSend {
+    fn drop(&mut self) {
+        self.0.send(()).ok();
+    }
+}
+
+/// Holding the permit mutex must not freeze another runtime's async entry.
+/// The exclusive condvar releases that mutex; this holder does not.
+#[test]
+fn blocking_send_does_not_stall_another_runtime() {
+    use std::time::Duration;
+
+    let _lane = LanePermit::take();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let rel = Arc::clone(&release);
+    let holder = thread::spawn(move || hold_lane_mutex_for_tests(&rel));
+    let t0 = std::time::Instant::now();
+    while LANE_MUTEX_HOLDERS.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "holder never took the permit mutex"
+        );
+        thread::yield_now();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let timed_out = rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+                .await
+                .is_err()
+        });
+        tx.send(timed_out).ok();
+    });
+    let reported = rx.recv_timeout(Duration::from_millis(800));
+    let finished_while_held = matches!(reported, Ok(true));
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    holder.join().expect("holder");
+    waiter.join().expect("waiter");
+    assert!(
+        finished_while_held,
+        "an async entry blocked on the permit mutex"
+    );
+}
+
+/// The permit holder is one tokio task. Another task later polled on that
+/// same worker is not the holder and must not enqueue.
+#[tokio::test(flavor = "current_thread")]
+async fn lane_permit_does_not_exempt_another_task_on_the_holder_worker() {
+    use std::time::Duration;
+
+    let permit = LanePermit::take();
+    let task = tokio::spawn(async {
+        tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+            .await
+            .is_err()
+    });
+    let reported = tokio::time::timeout(Duration::from_millis(800), task).await;
+    let finished_while_held = matches!(reported, Ok(Ok(true)));
+    drop(permit);
+    assert!(
+        finished_while_held,
+        "another task on the permit worker enqueued while the permit was held"
+    );
+}
+
+/// Drop on the taking thread clears `LANE_HELD` there. Drop on another
+/// thread must not leave that take exempt for a later full-queue test.
+#[test]
+fn lane_permit_drop_on_another_thread_clears_the_taker_exemption() {
+    let permit = LanePermit::take();
+    assert!(lane_held_for_tests() >= 1);
+    thread::spawn(move || drop(permit)).join().expect("drop");
+    assert_eq!(
+        lane_held_for_tests(),
+        0,
+        "dropping LanePermit on another thread left the taker exempt"
+    );
 }
 
 #[test]
@@ -100,6 +306,7 @@ fn wait_current_job_returns_while_second_job_queued() {
     let (started2_tx, started2_rx) = mpsc::sync_channel(1);
     let (release2_tx, release2_rx) = mpsc::sync_channel(1);
     let first = thread::spawn(move || {
+        arm_lane_oneshot();
         run_on_tip_accept(move || {
             started1_tx.send(()).unwrap();
             release1_rx.recv().unwrap();
@@ -107,19 +314,27 @@ fn wait_current_job_returns_while_second_job_queued() {
     });
     started1_rx.recv().unwrap();
     let second = thread::spawn(move || {
+        arm_lane_oneshot();
         run_on_tip_accept(move || {
             started2_tx.send(()).unwrap();
             release2_rx.recv().unwrap();
         });
     });
     let seen = subscribe_wait_seen();
+    let (id_tx, id_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
+        id_tx.send(thread::current().id()).unwrap();
         wait_current_job();
         done_tx.send(()).ok();
     });
-    seen.recv_timeout(Duration::from_secs(2))
-        .expect("wait_current_job did not observe the running job");
+    let id = id_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiter started");
+    assert!(
+        wait_seen_from(&seen, id, Duration::from_secs(2)),
+        "wait_current_job did not observe the running job"
+    );
     assert_eq!(
         done_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty),
@@ -163,6 +378,7 @@ async fn lane_async_is_not_tokio_worker() {
     let _lane = LanePermit::take();
     let task = tokio::spawn(async {
         let caller = thread::current().name().map(str::to_string);
+        arm_lane_oneshot();
         let name = run_on_tip_accept_async(|| thread::current().name().map(str::to_string)).await;
         (caller, name)
     });
@@ -190,6 +406,7 @@ async fn drop_join_does_not_park_worker() {
     let s2 = Arc::clone(&started);
     let r2 = Arc::clone(&release);
     let waiter = tokio::spawn(async move {
+        arm_lane_oneshot();
         run_on_tip_accept_async(move || {
             s2.store(true, Ordering::Release);
             let (lock, cv) = &*r2;
@@ -235,7 +452,7 @@ impl Drop for ReleaseFillers {
 /// `Full` stops the filler. A blocking `send` waits for a slot while the
 /// holder is the tip-accept thread, so that slot never frees.
 fn enqueue_or_full(job: Job) -> bool {
-    match sender().try_send(job) {
+    match try_enqueue(job) {
         Ok(()) => true,
         Err(std::sync::mpsc::TrySendError::Full(_)) => false,
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
@@ -263,6 +480,7 @@ async fn full_lane_parks_instead_of_spinning() {
     let _wake = ReleaseOnDrop(Arc::clone(&release));
     let rel = Arc::clone(&release);
     let holder = thread::spawn(move || {
+        arm_lane_oneshot();
         run_on_tip_accept(move || {
             holder_tx.send(()).ok();
             let (lock, cv) = &*rel;
@@ -292,7 +510,10 @@ async fn full_lane_parks_instead_of_spinning() {
     FULL_QUEUE_SPINS.store(0, Ordering::Relaxed);
     let parked_note = send_parked_notify().notified();
     tokio::pin!(parked_note);
-    let ninth = tokio::spawn(async { run_on_tip_accept_async(|| 9u8).await });
+    let ninth = tokio::spawn(async {
+        arm_lane_oneshot();
+        run_on_tip_accept_async(|| 9u8).await
+    });
     tokio::time::timeout(Duration::from_secs(2), parked_note)
         .await
         .expect("ninth sender did not park on a full queue");
@@ -340,6 +561,7 @@ async fn two_full_senders_both_enqueue() {
     let _wake = ReleaseOnDrop(Arc::clone(&release));
     let rel = Arc::clone(&release);
     let holder = thread::spawn(move || {
+        arm_lane_oneshot();
         run_on_tip_accept(move || {
             holder_tx.send(()).ok();
             let (lock, cv) = &*rel;
@@ -377,8 +599,14 @@ async fn two_full_senders_both_enqueue() {
     );
 
     let _park = ParkGate::arm();
-    let first = tokio::spawn(async { run_on_tip_accept_async(|| 1u8).await });
-    let second = tokio::spawn(async { run_on_tip_accept_async(|| 2u8).await });
+    let first = tokio::spawn(async {
+        arm_lane_oneshot();
+        run_on_tip_accept_async(|| 1u8).await
+    });
+    let second = tokio::spawn(async {
+        arm_lane_oneshot();
+        run_on_tip_accept_async(|| 2u8).await
+    });
     let t0 = Instant::now();
     while TIP_PARK_ENTERED.load(Ordering::SeqCst) < 2 {
         assert!(
@@ -437,6 +665,7 @@ async fn owned_job_finishes_after_waiter_abort() {
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let waiter = tokio::spawn(async move {
+        arm_lane_oneshot();
         run_on_tip_accept_async(move || {
             saw_job.fetch_add(1, Ordering::SeqCst);
             started_tx.send(()).unwrap();
