@@ -131,6 +131,134 @@ pub fn on_tip_accept_thread() -> bool {
     thread::current().name() == Some(TIP_ACCEPT_THREAD_NAME)
 }
 
+/// Process-wide exclusion for tests that fill or inspect the lane.
+///
+/// Debug builds take [`LANE_EXCLUSIVE_MU`] across each enqueue only after
+/// [`enable_lane_test_gate`]. Release accepts do not. A test holds
+/// [`LanePermit`] for its whole body. Other enqueues wait until that permit
+/// drops, unless the caller is the permit thread or armed
+/// [`arm_lane_oneshot`] for this entry. Production never sets the flag, so
+/// the accept path does not take the lock.
+#[cfg(debug_assertions)]
+static LANE_GATE_ON: AtomicBool = AtomicBool::new(false);
+#[cfg(debug_assertions)]
+static LANE_EXCLUSIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(debug_assertions)]
+static LANE_EXCLUSIVE_MU: Mutex<()> = Mutex::new(());
+#[cfg(debug_assertions)]
+static LANE_EXCLUSIVE_CV: Condvar = Condvar::new();
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static LANE_HELD: Cell<u32> = const { Cell::new(0) };
+    static LANE_ONESHOT: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(debug_assertions)]
+use std::cell::Cell;
+
+/// Let the next [`run_on_tip_accept`] or [`run_on_tip_accept_async`] on this
+/// thread enter while a [`LanePermit`] is held. Consumed at that entry, before
+/// any `.await`, so a tokio worker does not stay exempt for the next task.
+/// Opt in for the process. The net suite calls this before any test. A node
+/// never does, and then [`lane_send_guard`] does not lock.
+#[doc(hidden)]
+pub fn enable_lane_test_gate() {
+    #[cfg(debug_assertions)]
+    LANE_GATE_ON.store(true, Ordering::Release);
+}
+
+/// The suite initializer ran. [`LanePermit::take`] does not set this.
+#[doc(hidden)]
+pub fn lane_test_gate_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        LANE_GATE_ON.load(Ordering::Acquire)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+#[doc(hidden)]
+pub fn arm_lane_oneshot() {
+    #[cfg(debug_assertions)]
+    LANE_ONESHOT.with(|c| c.set(true));
+}
+
+/// True for this whole entry. The oneshot is consumed once so a retry loop
+/// does not lose it, and a tokio worker is not left exempt after the poll.
+#[cfg(debug_assertions)]
+fn take_lane_exemption() -> bool {
+    if on_tip_accept_thread() {
+        return true;
+    }
+    let oneshot = LANE_ONESHOT.with(|c| c.replace(false));
+    oneshot || LANE_HELD.with(|c| c.get() > 0)
+}
+
+#[cfg(not(debug_assertions))]
+fn take_lane_exemption() -> bool {
+    true
+}
+
+/// Held across `send` / `try_send` so [`LanePermit::take`] cannot miss a
+/// caller that already decided the lane was free. `None` when this entry is
+/// exempt (the permit holder, or release builds).
+#[cfg(debug_assertions)]
+fn lane_send_guard(exempt: bool) -> Option<std::sync::MutexGuard<'static, ()>> {
+    if exempt || !LANE_GATE_ON.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+    while LANE_EXCLUSIVE.load(Ordering::Acquire) {
+        g = LANE_EXCLUSIVE_CV.wait(g).unwrap_or_else(|p| p.into_inner());
+    }
+    Some(g)
+}
+
+#[cfg(not(debug_assertions))]
+fn lane_send_guard(_exempt: bool) -> Option<std::sync::MutexGuard<'static, ()>> {
+    None
+}
+
+/// Hold for a test that uses the process-wide tip-accept lane. Other lane
+/// entries in this process wait until the guard drops.
+#[doc(hidden)]
+pub struct LanePermit {
+    _private: (),
+}
+
+impl LanePermit {
+    pub fn take() -> Self {
+        #[cfg(debug_assertions)]
+        {
+            let mut g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+            while LANE_EXCLUSIVE.load(Ordering::Acquire) {
+                g = LANE_EXCLUSIVE_CV.wait(g).unwrap_or_else(|p| p.into_inner());
+            }
+            LANE_EXCLUSIVE.store(true, Ordering::Release);
+            drop(g);
+            LANE_HELD.with(|c| c.set(c.get().saturating_add(1)));
+            wait_idle();
+        }
+        Self { _private: () }
+    }
+}
+
+impl Drop for LanePermit {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            LANE_HELD.with(|c| c.set(c.get().saturating_sub(1)));
+            let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+            LANE_EXCLUSIVE.store(false, Ordering::Release);
+            LANE_EXCLUSIVE_CV.notify_all();
+        }
+    }
+}
+
 fn slot_freed() -> &'static tokio::sync::Notify {
     static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
     N.get_or_init(tokio::sync::Notify::new)
@@ -233,6 +361,7 @@ pub fn erase_lifetime(job: Box<dyn FnOnce() + Send + '_>) -> Job {
 
 /// Run `f` on `tip-accept`. Always enqueues (nested connect uses inner methods).
 pub fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    let exempt = take_lane_exemption();
     crate::reactor::assert_not_reactor("tip-accept wait");
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let job = erase_lifetime(Box::new(move || {
@@ -241,7 +370,10 @@ pub fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         let r = panic::catch_unwind(AssertUnwindSafe(f));
         let _ = tx.send(r);
     }));
-    sender().send(job).expect("tip-accept thread");
+    {
+        let _gate = lane_send_guard(exempt);
+        sender().send(job).expect("tip-accept thread");
+    }
     match rx.recv().expect("tip-accept job") {
         Ok(v) => v,
         Err(p) => panic::resume_unwind(p),
@@ -287,6 +419,8 @@ pub fn finish_cell<R>(cell: &JobCell<R>, r: thread::Result<R>) {
 pub async fn run_on_tip_accept_async<R: Send + 'static>(
     f: impl FnOnce() -> R + Send + 'static,
 ) -> R {
+    // Before the first `.await`, so [`arm_lane_oneshot`] is consumed on this poll.
+    let exempt = take_lane_exemption();
     let cell = Arc::new(JobCell {
         result: Mutex::new(None),
         waker: Mutex::new(None),
@@ -300,41 +434,51 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
     });
     let mut job = job;
     loop {
-        match sender().try_send(job) {
-            Ok(()) => {
-                note_async_enqueued();
-                break;
-            }
-            Err(TrySendError::Full(j)) => {
-                job = j;
-                FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
-                #[cfg(debug_assertions)]
-                wait_park_gate().await;
-                let notified = slot_freed().notified();
-                tokio::pin!(notified);
-                // `notify_one` keeps a single permit when no waiter is
-                // registered. `enable` consumes that permit for one sender.
-                // Every other sender that already saw Full must try again
-                // before it sleeps, or a free slot stays empty.
-                if notified.as_mut().enable() {
-                    continue;
+        let blocked = {
+            let _gate = lane_send_guard(exempt);
+            match sender().try_send(job) {
+                Ok(()) => {
+                    note_async_enqueued();
+                    None
                 }
-                match sender().try_send(job) {
-                    Ok(()) => {
-                        note_async_enqueued();
-                        break;
-                    }
-                    Err(TrySendError::Full(j)) => {
-                        job = j;
-                        FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
-                        note_send_parked();
-                        notified.await;
-                    }
-                    Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
-                }
+                Err(TrySendError::Full(j)) => Some(j),
+                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
             }
-            Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+        };
+        let Some(j) = blocked else {
+            break;
+        };
+        job = j;
+        FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        wait_park_gate().await;
+        let notified = slot_freed().notified();
+        tokio::pin!(notified);
+        // `notify_one` keeps a single permit when no waiter is
+        // registered. `enable` consumes that permit for one sender.
+        // Every other sender that already saw Full must try again
+        // before it sleeps, or a free slot stays empty.
+        if notified.as_mut().enable() {
+            continue;
         }
+        let blocked = {
+            let _gate = lane_send_guard(exempt);
+            match sender().try_send(job) {
+                Ok(()) => {
+                    note_async_enqueued();
+                    None
+                }
+                Err(TrySendError::Full(j)) => Some(j),
+                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+            }
+        };
+        let Some(j) = blocked else {
+            break;
+        };
+        job = j;
+        FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
+        note_send_parked();
+        notified.await;
     }
     match (JoinOnDrop { cell }).await {
         Ok(v) => v,
