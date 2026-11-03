@@ -2608,11 +2608,18 @@ fn published_tip_wakes_wait_for_tip() {
     let height = hub.tip_height().expect("height");
     let hash = hub.tip_hash().expect("hash");
     let header = hub.tip_header().expect("header");
-    let seen = AtomicBool::new(false);
+    let seen = Arc::new(AtomicBool::new(false));
+    let parked = Arc::new(AtomicU64::new(0));
+    let published = Arc::new(std::sync::Mutex::new(None));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(15));
-            seen.store(true, Ordering::Release);
+        let published_at = Arc::clone(&published);
+        let seen_at = Arc::clone(&seen);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            seen_at.store(true, Ordering::Release);
+            *published_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             let _ = hub.tip_tx.send(rbitcoin_net::TipEvent {
                 height,
                 hash,
@@ -2620,18 +2627,88 @@ fn published_tip_wakes_wait_for_tip() {
                 reorg_branch_len: 0,
             });
         });
-        let t0 = Instant::now();
         let got = rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 5_000, |_hash, _height| {
             seen.load(Ordering::Acquire)
         })
         .unwrap();
+        let woke = published
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("tip was published")
+            .elapsed();
         assert!(
-            t0.elapsed() < Duration::from_millis(40),
-            "wait_for_tip stayed in the 50 ms poll: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(40),
+            "wait_for_tip stayed in the 50 ms poll: {woke:?}"
         );
         assert_eq!(got["height"], height);
     });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Invalidating the tip changes the hash the wait is watching. With no
+/// mempool on the RPC context, that change has to arrive as a tip event.
+#[test]
+fn invalidate_wakes_a_tip_wait_without_a_mempool() {
+    use std::time::{Duration, Instant};
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let height = hub.tip_height().expect("height");
+    let tip = hub.tip_hash().expect("hash");
+    let bare = ctx_without_mempool(&ctx);
+    let parked = Arc::new(AtomicU64::new(0));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
+    std::thread::scope(|scope| {
+        let hub = Arc::clone(&hub);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            hub.invalidate_block(tip).expect("invalidate tip");
+        });
+        let t0 = Instant::now();
+        let got = rbitcoin_rpc::methods::chain::wait_for_tip(&bare, 2_000, |_hash, h| h < height)
+            .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {:?}",
+            t0.elapsed()
+        );
+        assert!(got["height"].as_u64().unwrap() < u64::from(height), "{got}");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn wait_until_parked(parked: &AtomicU64) {
+    let start = Instant::now();
+    while parked.load(Ordering::SeqCst) == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "rpc wait never parked"
+        );
+        std::thread::yield_now();
+    }
+}
+
+struct ClearParkNote;
+
+impl Drop for ClearParkNote {
+    fn drop(&mut self) {
+        rbitcoin_rpc::methods::set_rpc_wait_park_note(None);
+    }
+}
+
+/// A missing tip is an error on the poll that sees it. Treating the error
+/// as "not yet" holds the RPC until `timeout`.
+#[test]
+fn wait_for_tip_returns_a_missing_tip_without_the_timeout() {
+    let (ctx, dir) = ctx_empty();
+    let t0 = Instant::now();
+    let err = dispatch(&ctx, "waitforblockheight", vec![json!(1), json!(5_000)]).unwrap_err();
+    assert!(
+        t0.elapsed() < Duration::from_millis(200),
+        "waitforblockheight slept out a missing tip: {:?}",
+        t0.elapsed()
+    );
+    assert!(rpc_message(&err).contains("no tip"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2651,22 +2728,31 @@ fn template_update_wakes_gbt_longpoll() {
         .unwrap()
         .to_string();
     let mp = Arc::clone(ctx.mempool.as_ref().unwrap());
+    let parked = Arc::new(AtomicU64::new(0));
+    let published = Arc::new(std::sync::Mutex::new(None));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(15));
+        let published_at = Arc::clone(&published);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            *published_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             mp.note_template_update();
         });
-        let t0 = Instant::now();
         let got = dispatch(
             &ctx,
             "getblocktemplate",
             vec![json!({ "rules": ["segwit"], "longpollid": id })],
         )
         .unwrap();
+        let woke = published
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("template was published")
+            .elapsed();
         assert!(
-            t0.elapsed() < Duration::from_millis(40),
-            "gbt longpoll stayed in the 50 ms tick: {:?}",
-            t0.elapsed()
+            woke < Duration::from_millis(40),
+            "gbt longpoll stayed in the 50 ms tick: {woke:?}"
         );
         assert!(got["height"].is_number(), "{got}");
     });
@@ -6534,6 +6620,15 @@ fn submitblock_prev_header_read_fault_is_rpc_error() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Same store and chain as `src`, with no mempool. A tip wait then subscribes
+/// only to the hub, which is the shape that missed an invalidate.
+fn ctx_without_mempool(src: &RpcContext) -> RpcContext {
+    let mut ctx = ctx_without_chain(src);
+    ctx.chain = src.chain.clone();
+    ctx.mempool = None;
+    ctx
 }
 
 /// Same store and mempool as `src`, without a chain hub. `run_rpc` takes
