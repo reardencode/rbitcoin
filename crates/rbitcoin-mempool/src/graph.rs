@@ -1,4 +1,4 @@
-//! In-memory TxGraph: clusters, topo linearization, chunk bounds.
+//! In-memory TxGraph: clusters, linearization, chunk bounds.
 //!
 //! Cluster = maximal connected component via in-mempool parent/child edges
 //! (spend of another mempool output). Caps: 64 txs / 101 kvB (plan §3.2).
@@ -7,6 +7,8 @@ use bitcoin::{OutPoint, Transaction, Txid, Wtxid};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use std::sync::Mutex;
+
+use crate::linearize::{DepGraph, FeeFrac};
 
 /// Hard cap on txs in one cluster.
 pub const MAX_CLUSTER_COUNT: usize = 64;
@@ -185,7 +187,7 @@ pub struct Cluster {
     pub members: BTreeSet<Txid>,
     /// Sum of members' raw weight (cluster size limit basis).
     pub total_weight: u64,
-    /// Mining linearization (topo, high fee-rate first among ready).
+    /// Mining linearization ([`crate::linearize`]).
     pub linearization: Vec<Txid>,
     pub chunks: Vec<Chunk>,
 }
@@ -343,7 +345,7 @@ impl TxGraph {
 
     #[doc(hidden)]
     pub fn cluster_rep(&self, txid: &Txid) -> Option<Txid> {
-        self.cluster_of(txid)?.members.iter().next().copied()
+        self.component_members(txid)?.0.iter().next().copied()
     }
 
     #[doc(hidden)]
@@ -883,8 +885,6 @@ impl TxGraph {
         count > self.cluster_count_limit || vsize > self.cluster_vsize_limit
     }
 
-    /// Topo linearization: among ready txs (parents already emitted or outside
-    /// cluster), pick highest fee_rate, then higher fee, then txid.
     #[doc(hidden)]
     pub fn modified_fee(&self, t: &Txid, delta: &impl Fn(Txid) -> i64) -> i64 {
         self.entries
@@ -894,62 +894,48 @@ impl TxGraph {
             .saturating_add(delta(*t))
     }
 
+    /// `members` (txid order) as a [`DepGraph`] on `base + delta` and
+    /// sigop-adjusted weight.
+    fn dep_graph(&self, members: &[Txid], delta: &impl Fn(Txid) -> i64) -> DepGraph {
+        let pos: HashMap<Txid, usize> = members.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let feerate = members
+            .iter()
+            .map(|t| {
+                let w = self.adjusted_weight_of(t);
+                FeeFrac::new(self.modified_fee(t, delta), w)
+            })
+            .collect();
+        let parents: Vec<Vec<usize>> = members
+            .iter()
+            .map(|t| {
+                self.entries
+                    .get(t)
+                    .map(|e| {
+                        e.parents
+                            .iter()
+                            .filter_map(|p| pos.get(p).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        DepGraph::new(feerate, &parents)
+    }
+
+    /// Mining linearization of `members` on `base + delta`
+    /// ([`crate::linearize`]).
     #[doc(hidden)]
     pub fn linearize_delta(
         &self,
         members: &BTreeSet<Txid>,
         delta: &impl Fn(Txid) -> i64,
     ) -> Vec<Txid> {
-        let mut remaining: BTreeSet<Txid> = members.clone();
-        let mut done: HashSet<Txid> = HashSet::new();
-        let mut out = Vec::with_capacity(members.len());
-        while !remaining.is_empty() {
-            let mut best_rate_fee_txid: Option<(u64, i64, Txid)> = None;
-            for t in &remaining {
-                let e = match self.entries.get(t) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                let ready = e
-                    .parents
-                    .iter()
-                    .all(|p| !members.contains(p) || done.contains(p));
-                if !ready {
-                    continue;
-                }
-                let mf = self.modified_fee(t, delta);
-                let rate = if mf <= 0 {
-                    0
-                } else {
-                    rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
-                        mf as u64,
-                        e.adjusted_weight(self.bytes_per_sigop),
-                    )
-                };
-                let key = (rate, mf, *t);
-                // Maximize rate, then fee. The walk is txid order, so an equal
-                // rate and fee keeps the lesser txid without a third compare.
-                let better = match &best_rate_fee_txid {
-                    None => true,
-                    Some((br, bf, _)) => rate > *br || (rate == *br && mf > *bf),
-                };
-                if better {
-                    best_rate_fee_txid = Some(key);
-                }
-            }
-            let pick = match best_rate_fee_txid {
-                Some((_, _, t)) => t,
-                None => {
-                    // Cycle or bug — emit remaining in txid order.
-                    let t = *remaining.iter().next().unwrap();
-                    t
-                }
-            };
-            remaining.remove(&pick);
-            done.insert(pick);
-            out.push(pick);
-        }
-        out
+        let ids: Vec<Txid> = members.iter().copied().collect();
+        self.dep_graph(&ids, delta)
+            .linearize()
+            .into_iter()
+            .map(|i| ids[i])
+            .collect()
     }
 
     /// Split a linearization into prefix-maximal-feerate chunks (Core diagram).

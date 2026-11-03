@@ -765,6 +765,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_prioritise(&ctx, &mut cbs);
     chain_ops_template_orders_rate_then_fee(&ctx, &mut cbs);
     chain_ops_deprioritised_child_keeps_parent(&ctx, &mut cbs);
+    chain_ops_deprioritised_parent_rides_child(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
@@ -2828,6 +2829,74 @@ fn chain_ops_deprioritised_child_keeps_parent(ctx: &RpcContext, cbs: &mut TrueCo
         vec![json!(cid), json!(0), json!(-delta)],
     )
     .unwrap();
+    chain_ops_mine_pool_empty(ctx);
+}
+
+/// A parent whose modified fee is negative chunks with the child that pays
+/// for it, ahead of a cheap sibling (Core ancestor-set candidate). With
+/// `-blockmintxfee` between the two, the template and `generate` take the
+/// parent and child and leave the sibling.
+fn chain_ops_deprioritised_parent_rides_child(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let each = (cb - 100_000) / 2;
+    let root = parent_paying(ctx, h, each, true_spk(), true_spk());
+    let root_id = send_tx(ctx, &root);
+    let parent_fee = 1_000u64;
+    let child_fee = 50_000u64;
+    let parent = op_true_child(&root, 0, parent_fee, 1);
+    let pid = send_tx(ctx, &parent);
+    let delta = -((parent_fee + 9_000) as i64);
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(pid.clone()), json!(0), json!(delta)],
+    )
+    .unwrap();
+    let cid = send_tx(ctx, &op_true_child(&parent, 0, child_fee, 2));
+    let sibling_fee = 400u64;
+    let mut sibling = op_true_child(&root, 1, sibling_fee, 3);
+    let outs = 200u64;
+    let share = sibling.output[0].value.to_sat() / outs;
+    sibling.output = (0..outs)
+        .map(|_| bitcoin::TxOut {
+            value: Amount::from_sat(share),
+            script_pubkey: true_spk(),
+        })
+        .collect();
+    let rest = each - sibling_fee - share * outs;
+    sibling.output[0].value += Amount::from_sat(rest);
+    let sid = send_tx(ctx, &sibling);
+
+    let chunk_sat = (parent_fee + child_fee) as i64 + delta;
+    let cluster = dispatch(ctx, "getmempoolcluster", vec![json!(pid.clone())]).unwrap();
+    let chunks = cluster["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 3, "{cluster}");
+    assert_eq!(chunks[0]["txs"], json!([root_id.clone()]));
+    assert_eq!(chunks[1]["txs"], json!([pid.clone(), cid.clone()]));
+    assert_eq!(chunks[2]["txs"], json!([sid.clone()]));
+    let entry = dispatch(ctx, "getmempoolentry", vec![json!(pid.clone())]).unwrap();
+    assert_eq!(
+        entry["fees"]["chunk"].as_f64().unwrap(),
+        Amount::from_sat(chunk_sat as u64).to_btc(),
+        "{entry}"
+    );
+
+    ctx.chain
+        .as_ref()
+        .unwrap()
+        .set_block_min_tx_fee_sat_kvb(100_000);
+    let ids = gbt_txids(ctx);
+    assert_template_before(&ids, &root_id, &pid);
+    assert_template_before(&ids, &pid, &cid);
+    assert!(!ids.contains(&sid), "the cheap sibling stays out: {ids:?}");
+    dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+    assert_eq!(
+        dispatch(ctx, "getrawmempool", vec![]).unwrap(),
+        json!([sid]),
+        "the deprioritised parent is mined with the child that pays for it"
+    );
+    chain_ops_restore_sigop_mining_knobs(ctx);
     chain_ops_mine_pool_empty(ctx);
 }
 

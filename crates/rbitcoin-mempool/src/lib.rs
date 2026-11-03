@@ -52,6 +52,8 @@ pub mod fee_flow;
 #[doc(hidden)]
 pub mod graph;
 #[doc(hidden)]
+pub mod linearize;
+#[doc(hidden)]
 pub mod orphanage;
 #[doc(hidden)]
 pub mod packed;
