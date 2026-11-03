@@ -141,18 +141,7 @@ fn xor_from(buf: &mut [u8], start: usize, key: &[u8; KEY_SIZE]) {
 }
 
 fn push_compact_size(out: &mut Vec<u8>, n: u64) {
-    if n < 253 {
-        out.push(n as u8);
-    } else if let Ok(v) = u16::try_from(n) {
-        out.push(253);
-        out.extend_from_slice(&v.to_le_bytes());
-    } else if let Ok(v) = u32::try_from(n) {
-        out.push(254);
-        out.extend_from_slice(&v.to_le_bytes());
-    } else {
-        out.push(255);
-        out.extend_from_slice(&n.to_le_bytes());
-    }
+    out.extend(encode::serialize(&encode::VarInt(n)));
 }
 
 struct Reader<'a> {
@@ -192,20 +181,10 @@ impl Reader<'_> {
 
     /// Core `ReadCompactSize`: canonical encodings only.
     fn compact_size(&mut self) -> Result<u64, String> {
-        let first = self.array::<1>()?[0];
-        let (n, min) = match first {
-            253 => (u64::from(u16::from_le_bytes(self.array()?)), 253),
-            254 => (
-                u64::from(u32::from_le_bytes(self.array()?)),
-                u64::from(u16::MAX) + 1,
-            ),
-            255 => (u64::from_le_bytes(self.array()?), u64::from(u32::MAX) + 1),
-            small => return Ok(u64::from(small)),
-        };
-        if n < min {
-            return Err("non-canonical ReadCompactSize()".to_string());
-        }
-        Ok(n)
+        let (n, used) = encode::deserialize_partial::<encode::VarInt>(&self.buf[self.pos..])
+            .map_err(|e| format!("ReadCompactSize(): {e}"))?;
+        self.pos += used;
+        Ok(n.0)
     }
 
     fn tx(&mut self) -> Result<Transaction, String> {
