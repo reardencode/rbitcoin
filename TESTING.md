@@ -224,8 +224,6 @@ availability are opt-in, including the 1,100-block full-confirmation case:
 ```bash
 cargo test -p rbitcoin-ibd --test suite frontier_replay -- --ignored --test-threads=1
 cargo test -p rbitcoin-ibd --test suite frontier_competing -- --ignored --test-threads=1
-# two real 2,000-header windows (about 14 s): a lighter fork continued from its tip
-cargo test -p rbitcoin-ibd --test suite a_heavier_fork_that_needs_a_second_window -- --ignored
 ```
 
 The default six-block P2P cases still cover out-of-order body delivery and
