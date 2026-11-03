@@ -59,6 +59,17 @@ pub struct ScriptHashOutpoint {
     pub unspendable: bool,
 }
 
+impl ScriptHashOutpoint {
+    /// Sats this output funds as a coin: `0` when unspendable.
+    pub fn coin_value(&self) -> i64 {
+        if self.unspendable {
+            0
+        } else {
+            self.value
+        }
+    }
+}
+
 /// Electrum `blockchain.scripthash.get_history` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptHashHistoryItem {
@@ -307,9 +318,10 @@ pub fn summaries_from_joined(
     } = history_items_from_joined(joined, filter);
     let mut net: HashMap<Fk, i64> = HashMap::new();
     for rec in joined {
+        let funded = rec.out.coin_value();
         net.entry(rec.out.create_tx_fk)
-            .and_modify(|v| *v = v.saturating_add(rec.out.value))
-            .or_insert(rec.out.value);
+            .and_modify(|v| *v = v.saturating_add(funded))
+            .or_insert(funded);
         for sp in &rec.spender_fks {
             net.entry(*sp)
                 .and_modify(|v| *v = v.saturating_sub(rec.out.value))
@@ -1276,7 +1288,7 @@ impl Query {
             }
         }
         for fk in self.pending_sh_create_fks(scripthash) {
-            if !self.confirmed_strong_in(fk, view)? {
+            if Some(fk) == genesis || !self.confirmed_strong_in(fk, view)? {
                 continue;
             }
             if let Err(at) = fks.binary_search_by_key(&fk.0, |f| f.0) {
@@ -1476,7 +1488,14 @@ impl Query {
                 if script_hash(&o.script) != *scripthash {
                     continue;
                 }
-                rows.push((vout as u32, o.value as i64));
+                // An unspendable output keeps its row (the tx stays on the
+                // page) but funds no coin.
+                let value = if rbitcoin_consensus::policy::is_unspendable(&o.script) {
+                    0
+                } else {
+                    o.value as i64
+                };
+                rows.push((vout as u32, value));
             }
             matched.insert(create.fk, rows);
         }

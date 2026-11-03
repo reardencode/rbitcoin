@@ -1703,6 +1703,20 @@ fn sh_views_skip_unspendable_outputs() {
             .map(|row| row.txid)
             .collect();
         assert_eq!(hist, vec![txid1]);
+        let view = q.pin_sh_chain_view().unwrap().expect("SH view");
+        for filter in [
+            HistoryFilter::open(),
+            HistoryFilter::esplora_chain_page(None),
+        ] {
+            let rows: Vec<_> = q
+                .scripthash_history_summary_filtered_in(&sh, &filter, &view)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| (row.txid, row.value))
+                .collect();
+            assert_eq!(rows, vec![(txid1, 0)], "summary value is funded coins");
+        }
     }
     let sh = script_hash(&[0x51]);
     assert_eq!(q.scripthash_listunspent(&sh).unwrap().len(), 2);
@@ -1712,46 +1726,62 @@ fn sh_views_skip_unspendable_outputs() {
 
 /// The genesis coinbase is not a coin and not an ordinary transaction.
 /// Every scripthash view leaves it out, so Electrum never reports a
-/// confirmed height-0 row (height 0 there means mempool).
+/// confirmed height-0 row (height 0 there means mempool). That holds while
+/// its create is pending write-behind and after apply.
 #[test]
 fn sh_views_skip_the_genesis_coinbase() {
     let (dir, q) = temp_query("sh-genesis-coinbase");
     let (h0, t0) = coinbase_block(0, Fk::NULL, None);
     let genesis_txid = t0.tx.txid;
     let hash0 = h0.hash;
-    let hfk0 = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    q.commit_class_a_only(&h0, &[t0]).unwrap();
+    let hfk0 = q.confirm_block(Height(0), &hash0).unwrap();
     let (h1, t1) = coinbase_block(1, hfk0, Some(hash0));
     let txid1 = t1.tx.txid;
-    q.connect_block(Height(1), &h1, &[t1]).unwrap();
+    q.commit_class_a_only(&h1, &[t1]).unwrap();
+    q.confirm_block(Height(1), &h1.hash).unwrap();
     let sh = script_hash(&[0x51]);
+    assert!(!q.pending_sh_create_fks(&sh).is_empty(), "creates pending");
     assert_eq!(q.scripthash_history(&sh).unwrap().len(), 2, "unset: listed");
 
     q.set_genesis_coinbase_txid(genesis_txid);
-    let rows = |filter: &HistoryFilter| -> Vec<([u8; 32], i64)> {
-        q.scripthash_history_filtered(&sh, filter)
-            .unwrap()
-            .rows
-            .iter()
-            .map(|row| (row.txid, row.height))
-            .collect()
+    let check = |state: &str| {
+        let rows = |filter: &HistoryFilter| -> Vec<([u8; 32], i64)> {
+            q.scripthash_history_filtered(&sh, filter)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| (row.txid, row.height))
+                .collect()
+        };
+        let want = vec![(txid1, 1)];
+        assert_eq!(rows(&HistoryFilter::open()), want, "{state}");
+        assert_eq!(
+            rows(&HistoryFilter::esplora_chain_page(None)),
+            want,
+            "{state}"
+        );
+        assert_eq!(
+            rows(&HistoryFilter::height_window(0, Some(2))),
+            want,
+            "{state}"
+        );
+        let utxos = q.scripthash_listunspent(&sh).unwrap();
+        assert_eq!(utxos.len(), 1, "{state}");
+        assert_eq!((utxos[0].tx_hash, utxos[0].height), (txid1, 1), "{state}");
+        assert_eq!(q.scripthash_balance(&sh).unwrap().confirmed, 50_0000_0000);
+        let stats = q.scripthash_chain_stats(&sh).unwrap();
+        assert_eq!(
+            (stats.tx_count, stats.funded_txo_count, stats.funded_txo_sum),
+            (1, 1, 50_0000_0000),
+            "{state}"
+        );
     };
-    assert_eq!(rows(&HistoryFilter::open()), vec![(txid1, 1)]);
-    assert_eq!(
-        rows(&HistoryFilter::esplora_chain_page(None)),
-        vec![(txid1, 1)]
-    );
-    assert_eq!(
-        rows(&HistoryFilter::height_window(0, Some(2))),
-        vec![(txid1, 1)]
-    );
-    let utxos = q.scripthash_listunspent(&sh).unwrap();
-    assert_eq!(utxos.len(), 1);
-    assert_eq!((utxos[0].tx_hash, utxos[0].height), (txid1, 1));
-    assert_eq!(q.scripthash_balance(&sh).unwrap().confirmed, 50_0000_0000);
-    let stats = q.scripthash_chain_stats(&sh).unwrap();
-    assert_eq!(
-        (stats.tx_count, stats.funded_txo_count, stats.funded_txo_sum),
-        (1, 1, 50_0000_0000)
-    );
+    check("pending");
+    q.release_index_writebehind(Height(1));
+    q.apply_sh_pending().unwrap();
+    assert_eq!(q.sh_indexed_through_height(), Some(1));
+    assert!(q.pending_sh_create_fks(&sh).is_empty(), "creates durable");
+    check("durable");
     let _ = std::fs::remove_dir_all(&dir);
 }
