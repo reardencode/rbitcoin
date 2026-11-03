@@ -141,12 +141,10 @@ async fn lane_permit_wait_does_not_block_the_async_worker() {
     let permit = LanePermit::take();
     let (tx, rx) = std::sync::mpsc::channel();
     let task = tokio::spawn(async move {
-        let timed_out = tokio::time::timeout(
-            Duration::from_millis(200),
-            run_on_tip_accept_async(|| ()),
-        )
-        .await
-        .is_err();
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(200), run_on_tip_accept_async(|| ()))
+                .await
+                .is_err();
         tx.send(timed_out).ok();
     });
     let reported = rx.recv_timeout(Duration::from_millis(800));
@@ -387,7 +385,7 @@ impl Drop for ReleaseFillers {
 /// `Full` stops the filler. A blocking `send` waits for a slot while the
 /// holder is the tip-accept thread, so that slot never frees.
 fn enqueue_or_full(job: Job) -> bool {
-    match sender().try_send(job) {
+    match try_enqueue(job) {
         Ok(()) => true,
         Err(std::sync::mpsc::TrySendError::Full(_)) => false,
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => panic!("tip-accept thread"),

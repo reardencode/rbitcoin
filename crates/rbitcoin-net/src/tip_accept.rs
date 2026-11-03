@@ -77,38 +77,39 @@ impl Drop for InflightEnd {
 }
 
 /// Block until no tip-accept job is running. No-op on the lane itself
-/// (nested generate/RPC must not deadlock).
+/// (nested generate/RPC must not deadlock). A job still sitting in the
+/// queue has not called [`begin_job`]; this wait does not see it.
+/// [`quiet_drain_for_tests`] does.
 pub fn wait_idle() {
-    park_until_idle(true);
-}
-
-/// `announce` publishes [`note_wait_seen`] for the waiter tests. The permit
-/// drain passes `false`: that wait is not one of those waiters.
-fn park_until_idle(announce: bool) {
     if on_tip_accept_thread() {
         return;
     }
     let i = inflight();
     let mut g = i.mu.lock().unwrap_or_else(|e| e.into_inner());
     while i.n.load(Ordering::SeqCst) > 0 {
-        if announce {
-            note_wait_seen();
-        } else {
-            // Before the condvar wait, so a subscriber unblocks only once
-            // this thread has observed `n > 0`. This arm does not call
-            // `note_wait_seen`.
-            note_quiet_drain();
-        }
+        note_wait_seen();
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
 }
 
-/// Drain a running tip-accept job without publishing [`note_wait_seen`].
-/// [`LanePermit::take`] uses this. The permit is already held by the caller
-/// when a test uses it directly, so the drain does not enqueue.
+/// Drain every job that has been handed to the lane, including ones that
+/// have not called [`begin_job`]. Does not publish [`note_wait_seen`].
 #[doc(hidden)]
 pub fn quiet_drain_for_tests() {
-    park_until_idle(false);
+    if on_tip_accept_thread() {
+        return;
+    }
+    #[cfg(debug_assertions)]
+    {
+        let q = lane_queued();
+        let mut g = q.mu.lock().unwrap_or_else(|e| e.into_inner());
+        while q.n.load(Ordering::SeqCst) > 0 {
+            // Before the condvar wait, so a subscriber unblocks only once
+            // this thread has observed a queued job. Not `note_wait_seen`.
+            note_quiet_drain();
+            g = q.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 /// Wait until the tip-accept job that was running when this call started
@@ -140,6 +141,9 @@ pub fn sender() -> SyncSender<Job> {
                     // for the next `Notified::enable`.
                     slot_freed().notify_one();
                     let _ = panic::catch_unwind(AssertUnwindSafe(job));
+                    // After the job returns, including fillers that never
+                    // call `begin_job`. `quiet_drain_for_tests` waits on this.
+                    note_dequeued();
                 }
             })
             .expect("spawn tip-accept");
@@ -245,6 +249,146 @@ fn lane_send_guard(_exempt: bool) -> Option<std::sync::MutexGuard<'static, ()>> 
     None
 }
 
+#[cfg(debug_assertions)]
+enum LaneGate {
+    /// `Some` holds the exclusive mutex across the send. `None` is exempt
+    /// or the suite gate is off, so the send does not lock.
+    Clear(Option<std::sync::MutexGuard<'static, ()>>),
+    Busy,
+}
+
+#[cfg(debug_assertions)]
+fn lane_poll_gate(exempt: bool) -> LaneGate {
+    if exempt || !LANE_GATE_ON.load(Ordering::Acquire) {
+        return LaneGate::Clear(None);
+    }
+    let g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+    if LANE_EXCLUSIVE.load(Ordering::Acquire) {
+        LaneGate::Busy
+    } else {
+        LaneGate::Clear(Some(g))
+    }
+}
+
+#[cfg(debug_assertions)]
+fn lane_exclusive_notify() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+/// The permit flag is set. Yield so a tokio timeout can fire. The sleep
+/// covers `notify_waiters`, which does not leave a permit for a later waiter.
+#[cfg(debug_assertions)]
+async fn wait_lane_permit() {
+    let notified = lane_exclusive_notify().notified();
+    tokio::pin!(notified);
+    {
+        let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
+        if !LANE_EXCLUSIVE.load(Ordering::Acquire) {
+            return;
+        }
+    }
+    tokio::select! {
+        _ = notified => {}
+        _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn wait_lane_permit() {}
+
+/// Jobs accepted onto the lane and not yet finished. Includes fillers that
+/// never call [`begin_job`], and jobs still sitting in the sync channel.
+#[cfg(debug_assertions)]
+struct LaneQueued {
+    n: AtomicUsize,
+    mu: Mutex<()>,
+    cv: Condvar,
+}
+
+#[cfg(debug_assertions)]
+fn lane_queued() -> &'static LaneQueued {
+    static Q: OnceLock<LaneQueued> = OnceLock::new();
+    Q.get_or_init(|| LaneQueued {
+        n: AtomicUsize::new(0),
+        mu: Mutex::new(()),
+        cv: Condvar::new(),
+    })
+}
+
+fn note_queued() {
+    #[cfg(debug_assertions)]
+    lane_queued().n.fetch_add(1, Ordering::SeqCst);
+}
+
+fn note_dequeued() {
+    #[cfg(debug_assertions)]
+    {
+        let q = lane_queued();
+        let prev = q.n.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            let _g = q.mu.lock().unwrap_or_else(|e| e.into_inner());
+            q.cv.notify_all();
+        }
+    }
+}
+
+enum PollEnqueue {
+    Sent,
+    Full(Job),
+    Busy(Job),
+}
+
+/// Count the job, then `try_send`. A failed send drops the count. Callers
+/// that must not race [`LanePermit::take`] hold the exclusive mutex across
+/// this call. Fillers do not: they run while a permit is already held.
+#[doc(hidden)]
+pub fn try_enqueue(job: Job) -> Result<(), TrySendError<Job>> {
+    note_queued();
+    match sender().try_send(job) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            note_dequeued();
+            Err(e)
+        }
+    }
+}
+
+fn enqueue_blocking(job: Job) {
+    note_queued();
+    if sender().send(job).is_err() {
+        note_dequeued();
+        panic!("tip-accept thread");
+    }
+}
+
+fn poll_try_enqueue(exempt: bool, job: Job) -> PollEnqueue {
+    #[cfg(debug_assertions)]
+    {
+        match lane_poll_gate(exempt) {
+            LaneGate::Busy => PollEnqueue::Busy(job),
+            LaneGate::Clear(gate) => {
+                let out = match try_enqueue(job) {
+                    Ok(()) => PollEnqueue::Sent,
+                    Err(TrySendError::Full(j)) => PollEnqueue::Full(j),
+                    Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+                };
+                drop(gate);
+                out
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = exempt;
+        match try_enqueue(job) {
+            Ok(()) => PollEnqueue::Sent,
+            Err(TrySendError::Full(j)) => PollEnqueue::Full(j),
+            Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+        }
+    }
+}
+
 /// Hold for a test that uses the process-wide tip-accept lane. Other lane
 /// entries in this process wait until the guard drops.
 #[doc(hidden)]
@@ -292,6 +436,10 @@ impl Drop for LanePermit {
             let _g = LANE_EXCLUSIVE_MU.lock().unwrap_or_else(|p| p.into_inner());
             LANE_EXCLUSIVE.store(false, Ordering::Release);
             LANE_EXCLUSIVE_CV.notify_all();
+            // While the flag is still held, so a waiter that checks after
+            // this unlock sees it clear. `notify_waiters` does not store a
+            // permit; the async wait also sleeps.
+            lane_exclusive_notify().notify_waiters();
         }
     }
 }
@@ -494,7 +642,7 @@ pub fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     }));
     {
         let _gate = lane_send_guard(exempt);
-        sender().send(job).expect("tip-accept thread");
+        enqueue_blocking(job);
     }
     match rx.recv().expect("tip-accept job") {
         Ok(v) => v,
@@ -556,21 +704,18 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
     });
     let mut job = job;
     loop {
-        let blocked = {
-            let _gate = lane_send_guard(exempt);
-            match sender().try_send(job) {
-                Ok(()) => {
-                    note_async_enqueued();
-                    None
-                }
-                Err(TrySendError::Full(j)) => Some(j),
-                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+        match poll_try_enqueue(exempt, job) {
+            PollEnqueue::Sent => {
+                note_async_enqueued();
+                break;
             }
-        };
-        let Some(j) = blocked else {
-            break;
-        };
-        job = j;
+            PollEnqueue::Busy(j) => {
+                job = j;
+                wait_lane_permit().await;
+                continue;
+            }
+            PollEnqueue::Full(j) => job = j,
+        }
         FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
         #[cfg(debug_assertions)]
         wait_park_gate().await;
@@ -583,21 +728,18 @@ pub async fn run_on_tip_accept_async<R: Send + 'static>(
         if notified.as_mut().enable() {
             continue;
         }
-        let blocked = {
-            let _gate = lane_send_guard(exempt);
-            match sender().try_send(job) {
-                Ok(()) => {
-                    note_async_enqueued();
-                    None
-                }
-                Err(TrySendError::Full(j)) => Some(j),
-                Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+        match poll_try_enqueue(exempt, job) {
+            PollEnqueue::Sent => {
+                note_async_enqueued();
+                break;
             }
-        };
-        let Some(j) = blocked else {
-            break;
-        };
-        job = j;
+            PollEnqueue::Busy(j) => {
+                job = j;
+                wait_lane_permit().await;
+                continue;
+            }
+            PollEnqueue::Full(j) => job = j,
+        }
         FULL_QUEUE_SPINS.fetch_add(1, Ordering::Relaxed);
         note_send_parked();
         notified.await;
