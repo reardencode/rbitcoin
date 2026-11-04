@@ -4480,9 +4480,10 @@ pub fn compact_serve_outcome(
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(CompactServe::Missing);
     };
-    // Missing is not genesis. A staged body has no confirmed height, and
-    // height 0 is a real block.
-    let block_h = confirmed_height(query, hash);
+    if !within_relay_window(query, &block) {
+        return Ok(CompactServe::Missing);
+    }
+    let block_h = served_block_height(query, &block);
     if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_CMPCTBLOCK_DEPTH) {
         return Ok(CompactServe::Full(block));
     }
@@ -4600,6 +4601,36 @@ fn confirmed_height(query: &Query, hash: &BlockHash) -> Option<u32> {
         .map(|h| h.0)
 }
 
+/// Best-chain height, or one past a confirmed parent when this body is not
+/// on the best chain yet. A tip child is `tip + 1`, so it stays inside the
+/// compact window. A loser ages out once the tip moves past that height.
+fn served_block_height(query: &Query, block: &Block) -> Option<u32> {
+    if let Some(h) = confirmed_height(query, &block.block_hash()) {
+        return Some(h);
+    }
+    let prev = block.header.prev_blockhash;
+    if prev.to_byte_array() == [0u8; 32] {
+        return Some(0);
+    }
+    confirmed_height(query, &prev).map(|h| h.saturating_add(1))
+}
+
+/// Active-chain blocks are always served. A side body is silent once the
+/// best header is a month ahead of it, same as full-block `getdata`.
+fn within_relay_window(query: &Query, block: &Block) -> bool {
+    if confirmed_height(query, &block.block_hash()).is_some() {
+        return true;
+    }
+    let Some(tip_h) = query.tip_height() else {
+        return false;
+    };
+    let Ok(best) = query.wire_header_at_height(tip_h) else {
+        return false;
+    };
+    u64::from(best.time).saturating_sub(u64::from(block.header.time))
+        < crate::chain::STALE_RELAY_AGE_LIMIT_SECS
+}
+
 #[doc(hidden)]
 pub enum GetBlockTxnServe {
     BadIndex,
@@ -4705,6 +4736,9 @@ pub fn getblocktxn_reply(
     let Some(block) = block else {
         return Ok(None);
     };
+    if !within_relay_window(query, &block) {
+        return Ok(None);
+    }
     let mut transactions = Vec::with_capacity(txs_request.indexes.len());
     for idx in &txs_request.indexes {
         match block.txdata.get(*idx as usize) {
@@ -4712,7 +4746,7 @@ pub fn getblocktxn_reply(
             None => return Ok(Some(GetBlockTxnServe::BadIndex)),
         }
     }
-    let block_h = confirmed_height(query, &hash);
+    let block_h = served_block_height(query, &block);
     if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_GETBLOCKTXN_DEPTH) {
         return Ok(Some(GetBlockTxnServe::Block(block)));
     }
