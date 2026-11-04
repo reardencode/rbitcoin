@@ -3,6 +3,88 @@ use bitcoin::Network;
 use rbitcoin_electrum::silent_scan::*;
 use serde_json::json;
 
+// Official cryptographic outputs cannot be mined into a fresh test chain:
+// their tweak commits to the fixture's input outpoints and keys.
+#[test]
+fn official_vectors_labeled_receiving() {
+    use bitcoin::secp256k1::{PublicKey, SecretKey};
+    use rbitcoin_consensus::{TaprootOut, TxTweak};
+    use rbitcoin_primitives::{hex_decode, hex_encode};
+
+    let cases: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rbitcoin-consensus/tests/fixtures/bip352_send_and_receive_test_vectors.json"
+    )))
+    .unwrap();
+    let secp = Secp256k1::new();
+    let mut checked = 0;
+    let mut misses = Vec::new();
+    for case in cases.as_array().unwrap() {
+        for rec in case["receiving"].as_array().unwrap() {
+            let given = &rec["given"];
+            let labels = given["labels"].as_array().unwrap();
+            // The K_max vector specifies a count, not individual expected keys.
+            let Some(expected) = rec["expected"]["outputs"].as_array() else {
+                continue;
+            };
+            if labels.is_empty() {
+                continue;
+            }
+            let spend = SecretKey::from_slice(
+                &hex_decode(given["key_material"]["spend_priv_key"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let spend = hex_encode(PublicKey::from_secret_key(&secp, &spend).serialize());
+            let default_sub = parse_sub(
+                &json!([given["key_material"]["scan_priv_key"], spend]),
+                Network::Regtest,
+                Some(0),
+            )
+            .unwrap();
+            let sub = parse_sub(
+                &json!([given["key_material"]["scan_priv_key"], spend, 0, labels]),
+                Network::Regtest,
+                Some(0),
+            )
+            .unwrap();
+            let tweak = hex_decode(rec["expected"]["tweak"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            for output in given["outputs"].as_array().unwrap() {
+                let wanted = expected.iter().any(|o| o["pub_key"] == *output);
+                let tw = TxTweak {
+                    tweak,
+                    output_pubkeys: vec![TaprootOut {
+                        vout: 0,
+                        xonly: hex_decode(output.as_str().unwrap())
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                        value: 1,
+                    }],
+                };
+                if tx_matches(&sub, &tw) != wanted {
+                    misses.push(format!("{}: {output} expected {wanted}", case["comment"]));
+                }
+                if case["comment"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Receiving with labels:")
+                {
+                    assert!(!tx_matches(&default_sub, &tw), "unrequested label matched");
+                }
+                if labels.as_slice() == [json!(0)] && tx_matches(&default_sub, &tw) != wanted {
+                    misses.push(format!("implicit change label: {output} expected {wanted}"));
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 13);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
 #[test]
 fn parse_sub_indexes_a_non_string_param() {
     match parse_sub(&json!([1, "02"]), Network::Regtest, Some(0)) {

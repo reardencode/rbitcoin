@@ -2,6 +2,7 @@
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::Network;
+use rbitcoin_consensus::silent_payments::labeled_spend_key;
 use rbitcoin_consensus::{taproot_matches_scan, ChainParams};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::tweaks_for_height;
@@ -26,6 +27,7 @@ pub struct SpSub {
     pub spend: PublicKey,
     pub start: u32,
     pub labels: Vec<u32>,
+    label_spends: Vec<PublicKey>,
     pub address: String,
 }
 
@@ -71,6 +73,11 @@ pub fn parse_sub(params: &Value, network: Network, tip: Option<u32>) -> Result<S
     if labels.len() > 10 {
         return Err("too many silent payment labels".into());
     }
+    let label_spends = labels
+        .iter()
+        .map(|&label| labeled_spend_key(&scan, &spend, label))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid silent payment label key: {e}"))?;
     let start = start.min(tip.unwrap_or(start));
     // Any start, including a nonzero one, stays inside the recent window.
     let start = match tip {
@@ -83,6 +90,7 @@ pub fn parse_sub(params: &Value, network: Network, tip: Option<u32>) -> Result<S
         spend,
         start,
         labels,
+        label_spends,
         address,
     })
 }
@@ -122,13 +130,10 @@ pub fn scan_hits(
 pub fn tx_matches(sub: &SpSub, tw: &rbitcoin_consensus::TxTweak) -> bool {
     for o in &tw.output_pubkeys {
         for k in 0u32..8 {
-            if taproot_matches_scan(&tw.tweak, &o.xonly, &sub.scan, &sub.spend, k) {
-                return true;
-            }
-        }
-        for &lab in &sub.labels {
-            if lab > 0 && taproot_matches_scan(&tw.tweak, &o.xonly, &sub.scan, &sub.spend, lab) {
-                return true;
+            for spend in std::iter::once(&sub.spend).chain(&sub.label_spends) {
+                if taproot_matches_scan(&tw.tweak, &o.xonly, &sub.scan, spend, k) {
+                    return true;
+                }
             }
         }
     }

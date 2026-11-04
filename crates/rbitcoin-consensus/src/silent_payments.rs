@@ -102,6 +102,19 @@ pub fn input_hash_mul_a(tx: &Transaction, a: &PublicKey) -> Option<[u8; 33]> {
     Some(tweaked.serialize())
 }
 
+/// BIP-352 `B_m = B_spend + hash_Label(b_scan || m)·G`, including change label 0.
+pub fn labeled_spend_key(
+    scan_sk: &SecretKey,
+    spend_pk: &PublicKey,
+    label: u32,
+) -> Result<PublicKey, bitcoin::secp256k1::Error> {
+    let mut payload = [0u8; 36];
+    payload[..32].copy_from_slice(&scan_sk.secret_bytes());
+    payload[32..].copy_from_slice(&label.to_be_bytes());
+    let tweak = SecretKey::from_slice(&tagged_hash(b"BIP0352/Label", &payload))?;
+    spend_pk.add_exp_tweak(secp(), &Scalar::from(tweak))
+}
+
 /// BIP-352 `P_k = B_spend + t_k·G` for tweak `A` and integer `k`.
 pub fn taproot_matches_scan(
     tweak_compressed: &[u8; 33],
