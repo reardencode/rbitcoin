@@ -602,6 +602,9 @@ impl LivePeer {
     pub fn take_local_addr_due(&self, now: u64) -> Option<SocketAddr> {
         const DAY: u64 = 24 * 60 * 60;
         let hub = self.owner.upgrade()?;
+        if self.self_announce_link(&hub) != SelfAnnounceLink::Clearnet {
+            return None;
+        }
         let sock = hub.advertise_local_socket()?;
         let prev = self.next_local_addr_send.load(Ordering::Relaxed);
         if prev != 0 && now < prev {
@@ -1859,7 +1862,7 @@ pub fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
 /// addrman; a `getaddr` reply leaves them out so it never carries them over
 /// a link of another network.
 struct OwnAddrs {
-    onion: Option<crate::NetAddr>,
+    onions: Vec<[u8; 32]>,
     i2p: Option<crate::NetAddr>,
     ips: Vec<IpAddr>,
 }
@@ -1867,9 +1870,7 @@ struct OwnAddrs {
 impl OwnAddrs {
     fn contains(&self, addr: crate::NetAddr) -> bool {
         match addr {
-            crate::NetAddr::Onion { pk, .. } => {
-                matches!(self.onion, Some(crate::NetAddr::Onion { pk: own, .. }) if own == pk)
-            }
+            crate::NetAddr::Onion { pk, .. } => self.onions.contains(&pk),
             crate::NetAddr::I2p { dest, .. } => {
                 matches!(self.i2p, Some(crate::NetAddr::I2p { dest: own, .. }) if own == dest)
             }
@@ -2226,8 +2227,22 @@ impl PeerHub {
     }
 
     fn own_addrs(&self) -> OwnAddrs {
+        let wallet = self
+            .wallet_onions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let onions = wallet
+            .iter()
+            .filter_map(|(host, port)| format!("{host}:{port}").parse().ok())
+            .chain(self.p2p_onion())
+            .filter_map(|addr| match addr {
+                crate::NetAddr::Onion { pk, .. } => Some(pk),
+                _ => None,
+            })
+            .collect();
         OwnAddrs {
-            onion: self.p2p_onion(),
+            onions,
             i2p: self.p2p_i2p(),
             ips: self
                 .external_ips

@@ -1483,6 +1483,12 @@ fn self_announce_stays_on_the_link_network() {
         ["onion"],
         "an onion peer gets the onion and not the clearnet IP"
     );
+    assert!(
+        overlay_peer(&peers, other_onion, out)
+            .take_local_addr_due(1_000)
+            .is_none(),
+        "the clearnet-only announce timer skips an onion peer"
+    );
     let other_i2p = rbitcoin_net::NetAddr::I2p {
         dest: [0x44; 32],
         port: 0,
@@ -1543,6 +1549,10 @@ fn getaddr_reply_omits_own_addresses() {
         dest: [0x11; 32],
         port: 0,
     };
+    let wallet_onion: rbitcoin_net::NetAddr =
+        "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion:8333"
+            .parse()
+            .unwrap();
     let external = SocketAddr::from(([42, 42, 42, 42], 8333));
     let other = SocketAddr::from(([93, 184, 216, 34], 8333));
     let peers = rbitcoin_net::peers::PeerHub::new();
@@ -1560,8 +1570,12 @@ fn getaddr_reply_omits_own_addresses() {
     let rbitcoin_net::NetAddr::Onion { pk, .. } = onion else {
         unreachable!()
     };
+    let rbitcoin_net::NetAddr::Onion { pk: wallet_pk, .. } = wallet_onion else {
+        unreachable!()
+    };
     peers.learn_addrv2(&[
         gossip(AddrV2::TorV3(pk), 8333),
+        gossip(AddrV2::TorV3(wallet_pk), 8333),
         gossip(AddrV2::I2p([0x11; 32]), 0),
         gossip(AddrV2::Ipv4(Ipv4Addr::new(42, 42, 42, 42)), 8333),
         gossip(AddrV2::Ipv4(Ipv4Addr::new(93, 184, 216, 34)), 8333),
@@ -1569,14 +1583,19 @@ fn getaddr_reply_omits_own_addresses() {
     let early_bind = SocketAddr::from(([127, 0, 0, 1], 8333));
     let cached = peers.addr_response_net(early_bind, true);
     assert_eq!(cached.len(), 1, "{cached:?}");
-    assert_eq!(cached[0].1, onion, "this seed samples the onion");
+    assert_ne!(
+        cached[0].1,
+        rbitcoin_net::NetAddr::Ip(other),
+        "this seed samples one of the node's own rows"
+    );
 
     peers.set_p2p_onion(onion.host_str(), onion.port());
     peers.set_p2p_i2p(i2p);
     peers.set_external_ips(vec![external.ip()]);
+    peers.set_wallet_onion(wallet_onion.host_str(), 50001);
     assert!(
         peers.addr_response_net(early_bind, true).is_empty(),
-        "a reply cached before the onion was set still leaves it out"
+        "a reply cached before the own addresses were set still leaves them out"
     );
     let got: Vec<_> = peers
         .addr_response_net(SocketAddr::from(([127, 0, 0, 1], 8335)), true)

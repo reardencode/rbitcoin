@@ -205,7 +205,7 @@ destination goes to I2P peers, and to loopback inbound when
 `--i2p-accept-incoming` is the only one. `--external-ip` goes to direct
 clearnet and CJDNS peers. Tor and I2P inbound both arrive on loopback, so
 with both listeners a loopback inbound peer gets no self-announce. A
-`getaddr` reply leaves out the node's own onion, I2P and `--external-ip`
+`getaddr` reply leaves out the node's own onions (P2P and wallet), I2P and `--external-ip`
 addresses even when a peer has gossiped them back.
 
 `--tor-control [HOST:PORT]` talks to **system tor** (SAFECOOKIE/COOKIE or password). Omit
