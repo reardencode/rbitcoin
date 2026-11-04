@@ -5,10 +5,11 @@
 //! - `ordered` + `ordered_set` track headers after the local tip for getdata.
 //! - Middle completions leave **ghost** deque entries (see [`super::assign_plan::remove_from_ordered`]);
 //!   `Self::hygiene` compacts when the deque bloats.
-//! - `hash_height` / `header_fks` / `path_prev` / `known_headers` hold the
-//!   header chain (a re-getheaders must re-resolve height without a store
-//!   walk). `Self::deep_hygiene` drops side-branch rows; `Self::hygiene` is
-//!   O(live) and runs every second.
+//! - `hash_height` / `header_fks` / `path_prev` / `known_headers` hold header
+//!   rows for the work path. `Self::deep_hygiene` drops rows that are not
+//!   live, in flight, or the occupant of their height, and only when a map
+//!   is past that keep set. `Self::hygiene` runs every second and does not
+//!   visit the indexed header walk above the queue tail.
 
 use super::assign_plan::compact_ordered;
 use super::body::{BodyPresence, BodyPresenceSizes};
@@ -156,7 +157,11 @@ pub struct IbdWorkState {
     pub ordered_set: HashSet<BlockHash>,
     pub hash_height: HashMap<BlockHash, u32>,
     /// Inverse of [`Self::hash_height`] for O(1) tip+1‥ confirm offers.
-    pub height_to_hash: HashMap<u32, BlockHash>,
+    ///
+    /// Dense from the lowest occupant to the highest. Per-second hygiene
+    /// drops slots at or below the queue tail without visiting the indexed
+    /// header walk above that tail.
+    pub height_to_hash: HeightIndex,
     /// Parent hash recorded when the header was admitted. The orchestration
     /// loop uses this instead of reading the header store.
     pub path_prev: HashMap<BlockHash, BlockHash>,
@@ -274,7 +279,7 @@ impl IbdWorkState {
             hash_height,
             path_prev: HashMap::new(),
             height_to_hash: {
-                let mut m = HashMap::new();
+                let mut m = HeightIndex::default();
                 if let (Some(h), Some(th)) = (tip_hash, tip_height) {
                     m.insert(th, h);
                 }
@@ -389,7 +394,7 @@ impl IbdWorkState {
         let drop: Vec<BlockHash> = self
             .height_to_hash
             .iter()
-            .filter(|(h, _)| **h > ht)
+            .filter(|(h, _)| *h > ht)
             .map(|(_, hash)| *hash)
             .collect();
         self.height_to_hash.retain(|h, _| *h <= ht);
@@ -427,18 +432,18 @@ impl IbdWorkState {
         self.ordered.len() > self.ordered_set.len().saturating_mul(4).max(128)
     }
 
-    /// Per-second work-path hygiene: **O(live)**.
+    /// Per-second work-path hygiene.
     ///
-    /// Compacts `ordered` ghosts, drops `height_to_hash` rows that no longer
-    /// name the occupant of their height, and bounds the body cache to live
-    /// work. Chain-sized maps are [`Self::deep_hygiene`]; sweeping them here
-    /// cost ~0.8 s of every second at a mainnet tip.
+    /// Compacts `ordered` ghosts, drops `height_to_hash` slots at or below
+    /// the queue tail that are no longer live or in flight, and bounds the
+    /// body cache to live work. The indexed header walk above the queue tail
+    /// stays without a visit. Chain-sized follower maps are
+    /// [`Self::deep_hygiene`]; sweeping them here cost ~0.8 s of every second
+    /// at a mainnet tip.
     pub fn hygiene(&mut self) {
         compact_ordered(&mut self.ordered, &self.ordered_set);
         let live = &self.ordered_set;
         let inflight = &self.inflight;
-        // Retain chained occupants. Do not clear+rebuild (HashMap order is
-        // last-write and would remix two hashes at one height).
         let queue_tail = self
             .ordered
             .iter()
@@ -446,49 +451,284 @@ impl IbdWorkState {
             .find(|hash| live.contains(*hash))
             .and_then(|hash| self.hash_height.get(hash).copied())
             .unwrap_or(0);
-        self.height_to_hash.retain(|ht, hash| {
-            self.hash_height.get(hash) == Some(ht)
-                && (live.contains(hash)
-                    || inflight.contains_key(hash)
-                    || (*ht > queue_tail && self.header_walk.indexes_through(*ht)))
-        });
+        let indexed = self.header_walk.indexed_band_end();
+        // Slot writers set `hash_height` in the same call, so the indexed
+        // band does not need that check on this pass.
+        self.height_to_hash
+            .retain_outside(queue_tail, indexed, |ht, hash| {
+                self.hash_height.get(hash) == Some(&ht)
+                    && (live.contains(hash) || inflight.contains_key(hash))
+            });
         // Bound body presence cache to live work (rejected
         // never hygiene-pruned — see BodyPresence::hygiene_retain).
         self.body
             .hygiene_retain(|h| live.contains(h) || inflight.contains_key(h));
     }
 
-    /// Chain-sized prune of the work-path maps: **O(known headers)**.
+    /// Chain-sized prune of the work-path maps.
     ///
-    /// `known_headers` keeps the whole header chain by design: when tip drains
-    /// `ordered`, re-getheaders must re-resolve height and re-admit without a
-    /// full store walk. Wiping them left known_hdr=N with hash_h=0 and freeze.
-    /// This drops only headers that are not the occupant of their height (side
-    /// branches), plus the `header_fks` / `hash_height` / `path_prev` rows that
-    /// followed them. Caller owns cadence: main loop every
-    /// `cadence::DEEP_HYGIENE_PERIOD`, never per turn.
+    /// Keeps live headers, in-flight headers, and the current occupant of
+    /// each height. `header_fks` / `hash_height` / `path_prev` keep those
+    /// plus any row still in `known_headers`. A map is walked only when it
+    /// is more than [`DEEP_HYGIENE_SLACK`] past that ceiling: during a header
+    /// walk `known_headers` is chain-sized because the heights are occupied,
+    /// and a sweep that cannot drop rows still holds the coordination lock.
+    /// Caller owns cadence: main loop every `cadence::DEEP_HYGIENE_PERIOD`,
+    /// never per turn.
     pub fn deep_hygiene(&mut self) {
-        let live = &self.ordered_set;
-        let inflight = &self.inflight;
-        if self.known_headers.len() <= live.len().saturating_add(4096) {
+        let live_n = self.ordered_set.len();
+        let inflight_n = self.inflight.len();
+        let occupant_ceiling = live_n
+            .saturating_add(inflight_n)
+            .saturating_add(self.height_to_hash.len())
+            .saturating_add(DEEP_HYGIENE_SLACK);
+        if self.known_headers.len() > occupant_ceiling {
+            let live = &self.ordered_set;
+            let inflight = &self.inflight;
+            self.known_headers.retain(|h| {
+                live.contains(h)
+                    || inflight.contains_key(h)
+                    || self
+                        .hash_height
+                        .get(h)
+                        .is_some_and(|ht| self.height_to_hash.get(ht) == Some(h))
+            });
+        }
+        // `forget_queue_hashes` removes known and height rows and leaves the
+        // fk and parent rows, so those maps can exceed `known_headers`.
+        let follower_ceiling = self
+            .known_headers
+            .len()
+            .saturating_add(live_n)
+            .saturating_add(inflight_n)
+            .saturating_add(DEEP_HYGIENE_SLACK);
+        let followers = self
+            .header_fks
+            .len()
+            .max(self.path_prev.len())
+            .max(self.hash_height.len());
+        if followers > follower_ceiling {
+            let live = &self.ordered_set;
+            let inflight = &self.inflight;
+            let known = &self.known_headers;
+            // Body-queue rehydrate records an occupant without `known_headers`.
+            // Per-second hygiene does not revisit that band, so this pass must
+            // leave the occupant's `hash_height` in place.
+            self.hash_height.retain(|h, ht| {
+                live.contains(h)
+                    || inflight.contains_key(h)
+                    || known.contains(h)
+                    || self.height_to_hash.get(ht) == Some(h)
+            });
+            let keep = |h: &BlockHash| {
+                live.contains(h)
+                    || inflight.contains_key(h)
+                    || known.contains(h)
+                    || self.hash_height.contains_key(h)
+            };
+            self.header_fks.retain(|h, _| keep(h));
+            self.path_prev.retain(|h, _| keep(h));
+        }
+    }
+}
+
+/// Extra rows tolerated before [`IbdWorkState::deep_hygiene`] walks a map.
+pub const DEEP_HYGIENE_SLACK: usize = 4096;
+
+/// One block hash per height, from the lowest occupant through the highest.
+///
+/// A hole is an empty slot. Per-second hygiene uses [`Self::retain_outside`]
+/// so the indexed header walk above the download queue is not visited.
+#[derive(Clone, Debug, Default)]
+pub struct HeightIndex {
+    base: u32,
+    slots: Vec<Option<BlockHash>>,
+    occupied: usize,
+}
+
+/// Read one height's occupant. [`HeightIndex`] is the work path; tests still
+/// build a [`HashMap`].
+pub trait HeightOccupants {
+    fn occupant(&self, height: u32) -> Option<BlockHash>;
+}
+
+impl HeightOccupants for HeightIndex {
+    fn occupant(&self, height: u32) -> Option<BlockHash> {
+        self.get(&height).copied()
+    }
+}
+
+impl HeightOccupants for HashMap<u32, BlockHash> {
+    fn occupant(&self, height: u32) -> Option<BlockHash> {
+        self.get(&height).copied()
+    }
+}
+
+impl HeightIndex {
+    pub fn len(&self) -> usize {
+        self.occupied
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.occupied == 0
+    }
+
+    pub fn get(&self, ht: &u32) -> Option<&BlockHash> {
+        let i = ht.checked_sub(self.base)? as usize;
+        self.slots.get(i)?.as_ref()
+    }
+
+    pub fn contains_key(&self, ht: &u32) -> bool {
+        self.get(ht).is_some()
+    }
+
+    pub fn insert(&mut self, ht: u32, hash: BlockHash) -> Option<BlockHash> {
+        if self.occupied == 0 {
+            self.base = ht;
+            self.slots.clear();
+            self.slots.push(Some(hash));
+            self.occupied = 1;
+            return None;
+        }
+        if ht < self.base {
+            let gap = (self.base - ht) as usize;
+            self.slots.splice(0..0, std::iter::repeat_n(None, gap));
+            self.base = ht;
+            self.slots[0] = Some(hash);
+            self.occupied += 1;
+            return None;
+        }
+        let i = (ht - self.base) as usize;
+        if i >= self.slots.len() {
+            self.slots.resize(i + 1, None);
+        }
+        let prev = self.slots[i].replace(hash);
+        if prev.is_none() {
+            self.occupied += 1;
+        }
+        prev
+    }
+
+    pub fn remove(&mut self, ht: &u32) -> Option<BlockHash> {
+        let i = ht.checked_sub(self.base)? as usize;
+        let prev = self.slots.get_mut(i)?.take()?;
+        self.occupied -= 1;
+        self.shrink_ends();
+        Some(prev)
+    }
+
+    pub fn clear(&mut self) {
+        self.base = 0;
+        self.slots.clear();
+        self.occupied = 0;
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &BlockHash)> {
+        let base = self.base;
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, slot)| slot.as_ref().map(|hash| (base + i as u32, hash)))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &BlockHash> {
+        self.slots.iter().filter_map(|slot| slot.as_ref())
+    }
+
+    /// Highest occupied height.
+    pub fn highest(&self) -> Option<u32> {
+        if self.occupied == 0 {
+            None
+        } else {
+            Some(self.base + self.slots.len() as u32 - 1)
+        }
+    }
+
+    pub fn any_above(&self, tip: u32) -> bool {
+        self.highest().is_some_and(|h| h > tip)
+    }
+
+    pub fn retain(&mut self, mut f: impl FnMut(&u32, &mut BlockHash) -> bool) {
+        for i in 0..self.slots.len() {
+            let ht = self.base.saturating_add(i as u32);
+            let drop = match self.slots[i].as_mut() {
+                Some(hash) => !f(&ht, hash),
+                None => false,
+            };
+            if drop {
+                self.slots[i] = None;
+                self.occupied -= 1;
+            }
+        }
+        self.shrink_ends();
+    }
+
+    /// Keep or drop slots outside `(queue_tail, indexed_through]`.
+    ///
+    /// `indexed_through` is the header-walk tip when that walk indexes every
+    /// height up to it. Those slots are not visited. Every other occupied
+    /// slot is dropped unless `keep` returns true.
+    pub fn retain_outside(
+        &mut self,
+        queue_tail: u32,
+        indexed_through: Option<u32>,
+        mut keep: impl FnMut(u32, &BlockHash) -> bool,
+    ) {
+        if self.slots.is_empty() {
             return;
         }
-        self.known_headers.retain(|h| {
-            live.contains(h)
-                || inflight.contains_key(h)
-                || self
-                    .hash_height
-                    .get(h)
-                    .is_some_and(|ht| self.height_to_hash.get(ht) == Some(h))
-        });
-        self.header_fks.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
-        self.hash_height.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
-        self.path_prev.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
+        let skip_hi = indexed_through.filter(|tip| *tip > queue_tail);
+        if self.base <= queue_tail {
+            let last = ((queue_tail - self.base) as usize).min(self.slots.len() - 1);
+            for i in 0..=last {
+                self.consider(i, &mut keep);
+            }
+        }
+        let suffix_from = if let Some(tip) = skip_hi {
+            if self.base > tip {
+                0
+            } else {
+                ((tip - self.base) as usize).saturating_add(1)
+            }
+        } else if self.base > queue_tail {
+            0
+        } else {
+            ((queue_tail - self.base) as usize).saturating_add(1)
+        };
+        if suffix_from < self.slots.len() {
+            for i in suffix_from..self.slots.len() {
+                self.consider(i, &mut keep);
+            }
+        }
+        self.shrink_ends();
+    }
+
+    fn consider(&mut self, i: usize, keep: &mut impl FnMut(u32, &BlockHash) -> bool) {
+        let ht = self.base.saturating_add(i as u32);
+        let drop = match self.slots[i].as_ref() {
+            Some(hash) => !keep(ht, hash),
+            None => false,
+        };
+        if drop {
+            self.slots[i] = None;
+            self.occupied -= 1;
+        }
+    }
+
+    fn shrink_ends(&mut self) {
+        if self.occupied == 0 {
+            self.slots.clear();
+            self.base = 0;
+            return;
+        }
+        if let Some(skip) = self.slots.iter().position(|slot| slot.is_some()) {
+            if skip > 0 {
+                self.slots.drain(0..skip);
+                self.base = self.base.saturating_add(skip as u32);
+            }
+        }
+        while self.slots.last().is_some_and(|slot| slot.is_none()) {
+            self.slots.pop();
+        }
     }
 }

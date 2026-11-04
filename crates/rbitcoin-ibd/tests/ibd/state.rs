@@ -1,11 +1,21 @@
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
+use rbitcoin_ibd::ibd::cadence::{IbdLoopCadence, DEEP_HYGIENE_PERIOD, HYGIENE_PERIOD};
+use rbitcoin_ibd::ibd::header_walk::forget_queue_hashes;
+use rbitcoin_ibd::ibd::run_due_hygiene;
 use rbitcoin_ibd::ibd::state::*;
 use rbitcoin_primitives::Fk;
+use std::time::Instant;
 
 fn h(n: u8) -> BlockHash {
     let mut b = [0u8; 32];
     b[0] = n;
+    BlockHash::from_byte_array(b)
+}
+
+fn hash_at(n: u32) -> BlockHash {
+    let mut b = [0u8; 32];
+    b[0..4].copy_from_slice(&n.to_le_bytes());
     BlockHash::from_byte_array(b)
 }
 
@@ -241,4 +251,243 @@ fn hygiene_does_not_sweep_chain_sized_maps() {
     assert_eq!(st.hash_height.len(), 1);
     assert!(st.header_fks.is_empty());
     assert!(st.path_prev.is_empty());
+}
+
+/// A short side set under the occupant slack is not a chain-sized sweep.
+/// `known_headers` can keep at most the ordered set, inflight, and one
+/// occupant per `height_to_hash` row.
+#[test]
+fn deep_hygiene_keeps_a_short_side_branch() {
+    let mut st = IbdWorkState::new(Vec::new(), None, None);
+    for i in 1..=100u32 {
+        let hash = hash_at(i);
+        st.record_height(hash, i);
+        st.known_headers.insert(hash);
+    }
+    for i in 101..=4100u32 {
+        st.known_headers.insert(hash_at(i));
+    }
+    assert_eq!(st.known_headers.len(), 4100);
+    assert!(st.known_headers.len() > st.ordered_set.len().saturating_add(4096));
+    st.deep_hygiene();
+    assert_eq!(
+        st.known_headers.len(),
+        4100,
+        "side headers within 4096 of the occupant ceiling stay"
+    );
+    assert!(st.known_headers.contains(&hash_at(4100)));
+}
+
+/// Past that slack the same retain drops headers that do not occupy a height.
+#[test]
+fn deep_hygiene_drops_side_headers_past_the_slack() {
+    let mut st = IbdWorkState::new(Vec::new(), None, None);
+    for i in 1..=100u32 {
+        let hash = hash_at(i);
+        st.record_height(hash, i);
+        st.known_headers.insert(hash);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, hash_at(i.saturating_sub(1)));
+    }
+    for i in 101..=4300u32 {
+        let hash = hash_at(i);
+        st.known_headers.insert(hash);
+        st.hash_height.insert(hash, i);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, hash_at(1));
+    }
+    st.deep_hygiene();
+    assert_eq!(st.known_headers.len(), 100);
+    assert!(st.known_headers.contains(&hash_at(1)));
+    assert!(!st.known_headers.contains(&hash_at(4300)));
+    assert_eq!(st.hash_height.len(), 100);
+    assert_eq!(st.header_fks.len(), 100);
+    assert_eq!(st.path_prev.len(), 100);
+}
+
+/// `forget_queue_hashes` drops known/height rows and leaves parent and fk
+/// rows. The per-second path must not walk those maps. The deep path drops
+/// them once they exceed the keep set, which `known_headers` no longer shows.
+#[test]
+fn deep_hygiene_drops_fork_rows_forget_left_behind() {
+    let tip = h(1);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(1));
+    let mut drop = Vec::new();
+    for i in 10..5010u32 {
+        let hash = hash_at(i);
+        st.known_headers.insert(hash);
+        st.hash_height.insert(hash, i);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, tip);
+        drop.push(hash);
+    }
+    forget_queue_hashes(&mut st, &drop);
+    assert!(
+        st.known_headers.len() <= 2,
+        "forget removes the known rows: {}",
+        st.known_headers.len()
+    );
+    assert_eq!(st.header_fks.len(), 5000);
+    assert_eq!(st.path_prev.len(), 5000);
+    st.hygiene();
+    assert_eq!(
+        st.header_fks.len(),
+        5000,
+        "the 1 Hz path does not sweep follower maps"
+    );
+    assert_eq!(st.path_prev.len(), 5000);
+    st.deep_hygiene();
+    assert!(
+        st.header_fks.is_empty(),
+        "fork fks left outside known_headers are dropped: {}",
+        st.header_fks.len()
+    );
+    assert!(st.path_prev.is_empty());
+}
+
+/// An occupant planted without `known_headers` (body-queue rehydrate) keeps
+/// its height row when a retired fork opens the follower sweep. Per-second
+/// hygiene does not revisit that slot.
+#[test]
+fn deep_hygiene_keeps_occupant_metadata_outside_known() {
+    let mut st = IbdWorkState::new(Vec::new(), None, None);
+    let occ = hash_at(1);
+    st.record_height(occ, 1);
+    st.header_fks.insert(occ, Fk(1));
+    st.path_prev.insert(occ, hash_at(0));
+    let mut drop = Vec::new();
+    for i in 10..5010u32 {
+        let hash = hash_at(i);
+        st.known_headers.insert(hash);
+        st.hash_height.insert(hash, i);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, occ);
+        drop.push(hash);
+    }
+    forget_queue_hashes(&mut st, &drop);
+    st.deep_hygiene();
+    assert_eq!(st.hash_height.get(&occ), Some(&1));
+    assert_eq!(st.header_fks.get(&occ), Some(&Fk(1)));
+    assert_eq!(st.path_prev.get(&occ), Some(&hash_at(0)));
+    assert_eq!(st.height_to_hash.get(&1), Some(&occ));
+    assert_eq!(st.header_fks.len(), 1);
+    assert_eq!(st.path_prev.len(), 1);
+    assert_eq!(st.hash_height.len(), 1);
+}
+
+/// A handful of those leftover rows stays. The sweep is for a real excess.
+#[test]
+fn deep_hygiene_keeps_a_few_follower_rows_outside_known() {
+    let tip = h(1);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(1));
+    let mut drop = Vec::new();
+    for i in 10..110u32 {
+        let hash = hash_at(i);
+        st.known_headers.insert(hash);
+        st.hash_height.insert(hash, i);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, tip);
+        drop.push(hash);
+    }
+    forget_queue_hashes(&mut st, &drop);
+    st.hygiene();
+    st.deep_hygiene();
+    assert_eq!(st.header_fks.len(), 100);
+    assert_eq!(st.path_prev.len(), 100);
+}
+
+/// The main loop's hygiene pairing: the deep prune runs on its cadence, not
+/// on the per-second turn.
+#[test]
+fn due_hygiene_prunes_on_the_deep_cadence_only() {
+    let mut st = IbdWorkState::new(Vec::new(), None, None);
+    for i in 1..=100u32 {
+        let hash = hash_at(i);
+        st.record_height(hash, i);
+        st.known_headers.insert(hash);
+        st.ordered.push_back(hash);
+        st.ordered_set.insert(hash);
+    }
+    for i in 101..=4300u32 {
+        st.known_headers.insert(hash_at(i));
+    }
+    let mut cadence = IbdLoopCadence::new();
+    let t0 = Instant::now();
+    run_due_hygiene(&mut st, &mut cadence, t0);
+    assert_eq!(st.known_headers.len(), 100, "the first turn is deep-due");
+    for i in 101..=4300u32 {
+        st.known_headers.insert(hash_at(i));
+    }
+    run_due_hygiene(&mut st, &mut cadence, t0 + HYGIENE_PERIOD);
+    assert_eq!(
+        st.known_headers.len(),
+        4300,
+        "a 1 s hygiene turn must not sweep known_headers"
+    );
+    run_due_hygiene(&mut st, &mut cadence, t0 + DEEP_HYGIENE_PERIOD);
+    assert_eq!(st.known_headers.len(), 100);
+}
+
+/// The indexed band above the queue tail is not visited. Slots at or below
+/// the tail, and slots above the walk tip, still are.
+#[test]
+fn retain_outside_skips_the_indexed_band() {
+    let mut idx = HeightIndex::default();
+    for ht in 0..30u32 {
+        idx.insert(ht, hash_at(ht));
+    }
+    let visits = std::cell::Cell::new(0u32);
+    idx.retain_outside(10, Some(25), |ht, hash| {
+        visits.set(visits.get() + 1);
+        assert!(ht <= 10 || ht > 25, "visited indexed height {ht}");
+        *hash == hash_at(ht)
+    });
+    assert_eq!(visits.get(), 15, "0..=10 and 26..=29");
+    assert_eq!(idx.get(&20), Some(&hash_at(20)));
+    assert_eq!(idx.len(), 30);
+
+    idx.retain_outside(10, Some(25), |ht, _| (11..=25).contains(&ht));
+    assert!(idx.get(&5).is_none());
+    assert!(idx.get(&10).is_none());
+    assert_eq!(idx.get(&11), Some(&hash_at(11)));
+    assert_eq!(idx.get(&25), Some(&hash_at(25)));
+    assert!(
+        idx.get(&26).is_none(),
+        "a slot above the walk tip is visited and dropped"
+    );
+}
+
+#[test]
+fn hygiene_drops_below_the_queue_and_keeps_the_indexed_walk() {
+    let mut st = IbdWorkState::new(Vec::new(), None, None);
+    for i in 1..=40u32 {
+        let hash = hash_at(i);
+        st.record_height(hash, i);
+        if (10..=20).contains(&i) {
+            st.ordered.push_back(hash);
+            st.ordered_set.insert(hash);
+        }
+    }
+    st.record_height(hash_at(41), 41);
+    st.header_walk.origin = true;
+    st.header_walk.tip.hash = Some(hash_at(40));
+    st.header_walk.tip.height = 40;
+    st.hygiene();
+    for i in 1..10u32 {
+        assert!(
+            !st.height_to_hash.contains_key(&i),
+            "height {i} is at or below the queue tail and not live"
+        );
+    }
+    for i in 10..=40u32 {
+        assert_eq!(
+            st.height_to_hash.get(&i),
+            Some(&hash_at(i)),
+            "height {i} stays"
+        );
+    }
+    assert!(
+        !st.height_to_hash.contains_key(&41),
+        "a slot above the walk tip is not indexed"
+    );
 }

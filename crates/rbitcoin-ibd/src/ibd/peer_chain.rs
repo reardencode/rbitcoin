@@ -5,6 +5,7 @@
 //! download path is not asked for blocks above that point, and a peer that
 //! answered `notfound` for a block is not asked for it again for a while.
 
+use super::state::HeightOccupants;
 use bitcoin::block::Header;
 use bitcoin::BlockHash;
 use std::collections::{HashMap, VecDeque};
@@ -112,7 +113,7 @@ impl PeerChain {
 
     /// The record no longer says whether the peer holds the path block at
     /// `height`, and no probe was sent within one refresh.
-    pub fn needs_refresh(&self, path: &HashMap<u32, BlockHash>, height: u32, now: Instant) -> bool {
+    pub fn needs_refresh(&self, path: &impl HeightOccupants, height: u32, now: Instant) -> bool {
         self.probed
             && self
                 .probed_at
@@ -146,7 +147,7 @@ impl PeerChain {
     /// short reply is where the peer's chain ends, also at or below the tip.
     pub fn note_headers(
         &mut self,
-        path: &HashMap<u32, BlockHash>,
+        path: &impl HeightOccupants,
         confirmed: impl Fn(u32) -> Option<BlockHash>,
         tip: u32,
         height: u32,
@@ -156,8 +157,7 @@ impl PeerChain {
         let hashes: Vec<BlockHash> = headers.iter().map(|h| h.block_hash()).collect();
         let mut split_moved = false;
         let ours = |ht: u32| {
-            path.get(&ht)
-                .copied()
+            path.occupant(ht)
                 .or_else(|| (ht <= tip).then(|| confirmed(ht)).flatten())
         };
         // A reply on this node's block proves this chain below it, so a split
@@ -171,7 +171,7 @@ impl PeerChain {
             }
         }
         for (ht, hash) in (height..).zip(&hashes) {
-            let on_path = path.get(&ht).copied();
+            let on_path = path.occupant(ht);
             let Some(our) = ours(ht) else {
                 continue;
             };
@@ -242,14 +242,14 @@ impl PeerChain {
     /// up until the peer answers again, and the peer is probed. A split the
     /// peer showed at or below the fork already says where it left, and an
     /// announced hash on the new path says it is on the new chain.
-    pub fn note_rewind(&mut self, path: &HashMap<u32, BlockHash>, lca: u32) {
+    pub fn note_rewind(&mut self, path: &impl HeightOccupants, lca: u32) {
         let at = lca.saturating_add(1);
         if self.from <= at || self.split.is_some_and(|(h, _)| h <= at) {
             return;
         }
         if (self.from..)
             .zip(&self.announced)
-            .any(|(h, hash)| path.get(&h) == Some(hash))
+            .any(|(h, hash)| path.occupant(h).as_ref() == Some(hash))
         {
             return;
         }
@@ -258,9 +258,9 @@ impl PeerChain {
     }
 
     /// Split height that is no longer on `path`, if this peer has one.
-    pub fn off_path_split_height(&self, path: &HashMap<u32, BlockHash>) -> Option<u32> {
+    pub fn off_path_split_height(&self, path: &impl HeightOccupants) -> Option<u32> {
         let (at, _) = self.split?;
-        if path.contains_key(&at) {
+        if path.occupant(at).is_some() {
             return None;
         }
         Some(at)
@@ -271,13 +271,13 @@ impl PeerChain {
     /// the peer's chain, so the split is gone.
     pub fn settle_split(
         &mut self,
-        path: &HashMap<u32, BlockHash>,
+        path: &impl HeightOccupants,
         confirmed: impl Fn(u32) -> Option<BlockHash>,
     ) {
         let Some((at, hash)) = self.split else {
             return;
         };
-        if path.contains_key(&at) {
+        if path.occupant(at).is_some() {
             return;
         }
         match confirmed(at) {
@@ -289,14 +289,14 @@ impl PeerChain {
     /// This peer's announced chain holds the path block at `height`: it
     /// announced that block, or a path block above it, and has not left the
     /// path at or below it.
-    pub fn shows(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+    pub fn shows(&self, path: &impl HeightOccupants, height: u32) -> bool {
         if self.left_path_by(path, height) {
             return false;
         }
         // A path block the peer holds, from a probe or from where its chain
         // left this one before this node took its chain.
         let holds = |at: Option<(u32, BlockHash)>| {
-            at.is_some_and(|(h, hash)| height <= h && path.get(&h) == Some(&hash))
+            at.is_some_and(|(h, hash)| height <= h && path.occupant(h) == Some(hash))
         };
         if holds(self.reaches) || holds(self.split) {
             return true;
@@ -308,21 +308,21 @@ impl PeerChain {
             return false;
         }
         let at = height.max(self.from);
-        path.get(&at)
-            .is_some_and(|p| *p == self.announced[(at - self.from) as usize])
+        path.occupant(at)
+            .is_some_and(|p| p == self.announced[(at - self.from) as usize])
     }
 
     /// The peer does not have the path block at `height`: its chain left this
     /// node's chain at or below it, it holds a different block there, its
     /// whole chain ends below it, or a rewind left its record stale there. Two
     /// chains that differ at one height differ above it.
-    pub fn left_path_by(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+    pub fn left_path_by(&self, path: &impl HeightOccupants, height: u32) -> bool {
         if self.stale_from.is_some_and(|from| height >= from) {
             return true;
         }
         if let Some((at, hash)) = self.split {
-            let differs = match path.get(&at) {
-                Some(p) => *p != hash,
+            let differs = match path.occupant(at) {
+                Some(p) => p != hash,
                 None => self.split_confirmed,
             };
             if at <= height && differs {
@@ -341,7 +341,7 @@ impl PeerChain {
         let top = self.from.saturating_add(len);
         let at = height.min(top);
         let peer = self.announced[(at - self.from) as usize];
-        path.get(&at).is_some_and(|p| *p != peer)
+        path.occupant(at).is_some_and(|p| p != peer)
     }
 }
 

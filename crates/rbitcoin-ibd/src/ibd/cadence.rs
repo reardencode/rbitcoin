@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 pub const ASSIGN_PERIOD: Duration = Duration::from_millis(50);
 /// Stall + relative-slow disconnect + addr-cooldown expire.
 pub const PEER_SLOW_PERIOD: Duration = Duration::from_secs(1);
-/// Compact `ordered` ghosts and retain work-path maps.
+/// Compact `ordered` ghosts and drop `height_to_hash` occupants at or below
+/// the queue tail. The indexed header walk above the tail is not visited.
 pub const HYGIENE_PERIOD: Duration = Duration::from_secs(1);
-/// Chain-sized work-path prune (`IbdWorkState::deep_hygiene`). O(known
-/// headers); a minute apart bounds side-branch accumulation without sweeping
-/// the whole chain every second.
+/// Chain-sized work-path prune (`IbdWorkState::deep_hygiene`). A minute apart.
+/// The sweep itself runs only when a map is past its keep set.
 pub const DEEP_HYGIENE_PERIOD: Duration = Duration::from_secs(60);
 /// Main-loop `getheaders` poll (`locator_hashes` store walk).
 /// Empty work path bypasses this (header sync must not wait).
@@ -72,7 +72,8 @@ impl IbdLoopCadence {
         self.last_hygiene = Some(now);
     }
 
-    /// Chain-sized prune every [`DEEP_HYGIENE_PERIOD`]. Never per turn.
+    /// Due every [`DEEP_HYGIENE_PERIOD`]. The sweep walks a map only when
+    /// that map is past its keep set. Never per turn.
     pub fn deep_hygiene_due(&self, now: Instant) -> bool {
         Self::due(self.last_deep_hygiene, now, DEEP_HYGIENE_PERIOD)
     }

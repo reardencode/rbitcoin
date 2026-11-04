@@ -241,15 +241,15 @@ impl HeaderWalk {
         Some(self.tip.height.saturating_add(1))
     }
 
-    /// `height` is on the candidate and past the queue, so hygiene keeps it.
+    /// Walk tip when every height up to it is on the candidate.
     ///
-    /// The origin and the tip hash are installed together. Hygiene then only
-    /// needs the height to sit on that tip, above the genesis parent.
-    pub fn indexes_through(&self, height: u32) -> bool {
-        if self.tip.hash.is_none() || !self.origin || height == 0 {
-            return false;
+    /// Per-second hygiene keeps that band and does not visit it.
+    pub fn indexed_band_end(&self) -> Option<u32> {
+        if self.tip.hash.is_none() || !self.origin {
+            None
+        } else {
+            Some(self.tip.height)
         }
-        height <= self.tip.height
     }
 
     /// Test stand-in for a walk that already proved the confirmed tip.
@@ -1442,8 +1442,8 @@ pub fn drop_queue_above(st: &mut IbdWorkState, height: u32, keep: &HashSet<Block
             !matches!(st.hash_height.get(h), Some(ht) if *ht <= height)
         })
         .collect();
-    for (ht, hash) in &st.height_to_hash {
-        if *ht > height && !keep.contains(hash) {
+    for (ht, hash) in st.height_to_hash.iter() {
+        if ht > height && !keep.contains(hash) {
             drop.insert(*hash);
         }
     }

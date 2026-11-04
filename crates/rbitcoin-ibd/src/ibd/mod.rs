@@ -114,6 +114,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// Per-second [`IbdWorkState::hygiene`], and [`IbdWorkState::deep_hygiene`]
+/// on its own cadence.
+#[doc(hidden)]
+pub fn run_due_hygiene(st: &mut IbdWorkState, cadence: &mut IbdLoopCadence, now: Instant) {
+    if cadence.hygiene_due(now, st.ordered_bloated()) {
+        st.hygiene();
+        cadence.mark_hygiene(now);
+    }
+    if cadence.deep_hygiene_due(now) {
+        st.deep_hygiene();
+        cadence.mark_deep_hygiene(now);
+    }
+}
+
 /// Coordinator hold of `shared`. The flag drops with the guard.
 struct HeldShared<'a> {
     guard: MutexGuard<'a, state::IbdWorkState>,
@@ -830,14 +844,7 @@ pub async fn ibd_cancellable(
                         break;
                     }
                 }
-                if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
-                    st.hygiene();
-                    cadence.mark_hygiene(now_cadence);
-                }
-                if cadence.deep_hygiene_due(now_cadence) {
-                    st.deep_hygiene();
-                    cadence.mark_deep_hygiene(now_cadence);
-                }
+                run_due_hygiene(st, &mut cadence, now_cadence);
             }
 
             if cadence.assign_due(now_cadence, st_guard.inflight.is_empty()) {
