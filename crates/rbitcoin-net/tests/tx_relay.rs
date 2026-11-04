@@ -5730,14 +5730,38 @@ fn cpfp_package_meters_the_chunk_once() {
     let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
     hub.set_relay_enabled(true);
     hub.accept_tx(&parent).expect("parent");
-    let after_parent = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    let (after_parent, admitted_before_child) = {
+        let flow = hub.fee_flow.lock().unwrap();
+        (flow.admit_wu_s.clone(), flow.admitted_wu)
+    };
     assert_eq!(
         positive_buckets(&after_parent),
         vec![parent_i],
         "a lone parent is its own chunk"
     );
     hub.accept_tx(&child).expect("child");
-    let after_child = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    let (after_child, admitted_after_child) = {
+        let flow = hub.fee_flow.lock().unwrap();
+        (flow.admit_wu_s.clone(), flow.admitted_wu)
+    };
+    let (chunk_weight, child_weight) = {
+        let g = hub.lock_read();
+        let chunk_weight = g
+            .graph
+            .cluster_of(&parent_id)
+            .expect("cluster")
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&parent_id) && ch.txids.contains(&child_id))
+            .expect("chunk")
+            .weight;
+        (chunk_weight, g.graph.adjusted_weight_of(&child_id))
+    };
+    let added = admitted_after_child - admitted_before_child;
+    assert!(
+        (added - child_weight as f64).abs() < (added - chunk_weight as f64).abs(),
+        "the child sample must be its own weight {child_weight}, not the chunk {chunk_weight}, added={added}"
+    );
     let moved = positive_buckets(&after_child);
     assert!(
         moved.contains(&chunk_i),
