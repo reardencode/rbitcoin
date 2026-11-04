@@ -7193,8 +7193,10 @@ fn hb_announce_ages_out_of_the_compact_window() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A one-block reorg disconnects the announced block's parent. The body
-/// still ages out once the new tip is more than ten above that height.
+/// A one-block reorg disconnects the announced block's parent. The served
+/// height is still two (confirmed genesis plus two steps). That stays a
+/// transaction reply at tip 11 and tip 12, where height 0 and height 1
+/// would already be the full block, and becomes the full block at tip 13.
 #[test]
 fn hb_announce_ages_after_its_parent_is_disconnected() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-reorg-age");
@@ -7241,22 +7243,37 @@ fn hb_announce_ages_after_its_parent_is_disconnected() {
         .expect("heavier branch connects");
     assert!(!hub.is_connected(&parent), "the parent left the best chain");
     assert!(!hub.has_block(&hash));
-    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+    assert_eq!(hub.tip_height().unwrap(), 2);
+    let req = |tip: u32| {
+        getblocktxn_reply(
+            &hub.cache,
+            &hub.query,
+            BlockTransactionsRequest {
+                block_hash: hash,
+                indexes: vec![0],
+            },
+            tip,
+        )
+        .unwrap()
+    };
+    while hub.tip_height().unwrap() < MAX_GETBLOCKTXN_DEPTH + 1 {
         hub.accept_block(hb_tip_child(&hub)).unwrap();
     }
-    assert!(hub.tip_height().unwrap() > MAX_GETBLOCKTXN_DEPTH + 1);
-    let aged = getblocktxn_reply(
-        &hub.cache,
-        &hub.query,
-        BlockTransactionsRequest {
-            block_hash: hash,
-            indexes: vec![0],
-        },
-        hub.tip_height().unwrap(),
-    )
-    .unwrap();
+    assert_eq!(hub.tip_height().unwrap(), 11);
     assert!(
-        matches!(aged, Some(GetBlockTxnServe::Block(_))),
+        matches!(req(11), Some(GetBlockTxnServe::Txns(_))),
+        "height 2 is still the transactions at tip 11; height 0 would be the full block"
+    );
+    hub.accept_block(hb_tip_child(&hub)).unwrap();
+    assert_eq!(hub.tip_height().unwrap(), 12);
+    assert!(
+        matches!(req(12), Some(GetBlockTxnServe::Txns(_))),
+        "depth 10 is not yet the full block"
+    );
+    hub.accept_block(hb_tip_child(&hub)).unwrap();
+    assert_eq!(hub.tip_height().unwrap(), 13);
+    assert!(
+        matches!(req(13), Some(GetBlockTxnServe::Block(_))),
         "a disconnected parent does not keep the loser in the transaction reply"
     );
     let _ = std::fs::remove_dir_all(&dir);
