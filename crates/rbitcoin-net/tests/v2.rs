@@ -286,6 +286,11 @@ async fn ibd_reader_reuses_one_ciphertext_buffer() {
             let buf = reader.ibd_ciphertext_buf().unwrap();
             assert_eq!(buf.len(), IBD_CIPHERTEXT_BUF_LEN);
             assert_eq!(buf.as_ptr(), ptr);
+            // Pong packet: 1 header, 1 short id, 8 nonce, 16 tag.
+            assert!(
+                buf[..26].iter().any(|&b| b != 0),
+                "scratch must hold this packet's ciphertext"
+            );
         }
         server_task.await.unwrap();
     };
