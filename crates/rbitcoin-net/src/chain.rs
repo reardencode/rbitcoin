@@ -2978,6 +2978,8 @@ impl ChainHub {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
             self.invalidated.set.write().unwrap().insert(hash);
+            // Reconsider still uses the hold. Peers must not get this body.
+            self.cache.drop_servable(&hash);
             self.revalidate_header_report();
             self.invalidated.paths.write().unwrap().push(InvalidPath {
                 hashes: vec![hash],
@@ -4089,6 +4091,9 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn drop_held(&self, hash: BlockHash) {
         self.held_bodies.write().unwrap().remove(&hash);
+        // The compact-serve stage is the same unconnected body. A connected
+        // block is already in the best-chain cache.
+        self.cache.drop_servable(&hash);
     }
 
     /// Park a disconnected body without running [`Self::try_apply_held`].

@@ -6695,6 +6695,19 @@ fn hb_announce_stays_servable_when_a_sibling_wins() {
         panic!("a weaker accept must not forget the announced body");
     };
     assert_eq!(bt.transactions[0].compute_txid(), coinbase);
+    hub.invalidate_block(hash)
+        .expect("the lost block can be invalidated");
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after invalidate");
+    assert!(reply.is_none(), "an invalidated block is not served");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
