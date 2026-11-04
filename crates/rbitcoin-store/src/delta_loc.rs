@@ -53,11 +53,10 @@ pub(crate) fn checkpoint_prefix(loc_count: u64, off_len: u64, off_slot: u64) -> 
     if off_slot == 0 || !off_len.is_multiple_of(off_slot) {
         return None;
     }
-    if off_len / off_slot > loc_count / LOC_WINDOW {
-        Some(loc_count)
-    } else {
-        None
-    }
+    // `checkpoint_fit` already returned Some whenever the checkpoint is not
+    // longer than the locator. A longer aligned file means the loc header
+    // is the prefix.
+    Some(loc_count)
 }
 
 /// Count to keep when the next overflow row was written and its header was not.
@@ -79,8 +78,9 @@ pub(crate) fn unresolved_ovf_cut(
 /// Creates covered while the overflow header lags the RAM end.
 ///
 /// `count` is the locator-header count. The first row at the durable end
-/// cuts before that create. A short header with no such row covers nothing
-/// past the last durable overflow fk.
+/// cuts before that create when the row is inside `count`. A row past
+/// `count`, or bytes that are not a row, leaves `count` in place: those
+/// creates are already named by the locator and the checkpoint header.
 pub(crate) fn withheld_ovf_limit(
     loc: &TableFile,
     ovf: &TableFile,
@@ -105,7 +105,7 @@ pub(crate) fn withheld_ovf_limit(
     };
     match ovf_row_cut(loc, ovf, count, last_ovf_fk, durable_end, pair)? {
         Some(cut) => Ok(cut.min(count)),
-        None => Ok(last_ovf_fk.min(count)),
+        None => Ok(count),
     }
 }
 
