@@ -202,6 +202,7 @@ pub async fn accept_received_from_peer(
     block: Block,
     session: Option<&crate::peers::LivePeer>,
 ) -> Result<AcceptOutcome, NetError> {
+    let announced = block.block_hash();
     let waive =
         session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.session_is_trusted_peer(s)));
     // Relay may flip inside this connect once the index is in tip mode.
@@ -232,10 +233,24 @@ pub async fn accept_received_from_peer(
             r
         })
     };
+    if !keep_servable_announce(&r) {
+        hub.cache.drop_servable(&announced);
+    }
     if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
         s.note_last_block_at(at);
     }
     r
+}
+
+/// The body stays servable when connect has not written it yet. A connected
+/// or rejected block is served from the store, or not at all.
+fn keep_servable_announce(r: &Result<AcceptOutcome, NetError>) -> bool {
+    match r {
+        Err(e) if net_error_needs_parent(e) => true,
+        Err(NetError::Store(_)) => true,
+        Err(e) if net_error_is_store_not_found(e) => true,
+        _ => false,
+    }
 }
 
 /// The hub and key a misbehavior exit may record. Noban and manual peers
@@ -6376,7 +6391,8 @@ fn hb_peer_offered_block(
 /// Send `cmpctblock` to peers who asked for high-bandwidth announcements
 /// (`hb_from`: they sent `sendcmpct` announce=1) as soon as a reconstructed
 /// or received body has a PoW-valid header that extends our tip, **before**
-/// `tip-accept` connect. Does not mark the block connected.
+/// `tip-accept` connect. The body is staged for `getblocktxn` before that
+/// message is queued. Does not mark the block connected.
 ///
 /// The compact message is built only when one of those peers would be
 /// offered the block. No such peer returns before the clone and the
@@ -6428,6 +6444,9 @@ pub async fn relay_new_pow_valid_block(
             return;
         }
     };
+    // The peer can ask for the missing transactions as soon as this message
+    // leaves. Connect has not written the body yet.
+    hub.cache.stage_servable(block.clone());
     for s in targets {
         let Some(out) = s.writer() else {
             continue;
@@ -7311,6 +7330,9 @@ pub fn block_for_peer(
 ) -> Result<Option<bitcoin::Block>, NetError> {
     crate::reactor::assert_not_reactor("block reconstruct");
     if let Some(block) = cache.get_block(hash) {
+        return Ok(Some(block));
+    }
+    if let Some(block) = cache.servable(hash) {
         return Ok(Some(block));
     }
     match query.reconstruct_block_by_hash(&hash.to_byte_array()) {
