@@ -7,6 +7,8 @@ mod core_sighash;
 mod core_tx_vectors;
 mod core_vectors;
 mod der_tests;
+#[cfg(feature = "equiv")]
+mod equiv;
 mod interpreter;
 mod interpreter_only;
 mod nested;

@@ -50,6 +50,36 @@ refreshing; do not check copies into `tests/fixtures/`.
 4. Call shipped **`verify_job_all_inputs(ScriptCheckJob)`** (or bare EvalScript+P2SH path when `WITNESS` flag is off — Core treats v0 programs as bare without that flag).
 5. Compare accept/reject to Core’s expected code. Named error codes only require **reject**, not exact code string.
 
+### Interpreter-only corpus
+
+`core_script_tests_all_rows_interpreter_only`, `script_corpus_rows_interpreter_only`,
+`core_tx_valid_all_rows_interpreter_only`, `core_tx_invalid_all_rows_interpreter_only`,
+and `core_bip341_wallet_vectors_interpreter_only` run those same rows again with
+`ScriptCheckJob::interpreter_only` set. They are ordinary `#[test]`s on the `test`
+job. Sighash rows stay digest checks. The 16-flag subset and superset walks stay
+on the fast path.
+
+### Consensus equivalence claim
+
+An external proof can build LLVM IR of `rbitcoin-primitives` and
+`rbitcoin-consensus` with `./scripts/equiv-ir.sh` (rustc 1.88.0,
+`--ignore-rust-version`, `-C panic=abort`, `-C lto=no`, `--emit=llvm-ir`,
+feature `equiv`). The workspace `rust-version` stays 1.95. The node build does
+not enable `equiv` and does not depend on Alive2, SAW, or Lean.
+
+The claim is the interpreter, forced on for that entry, under the consensus
+flag word `P2SH | DERSIG | NULLDUMMY | CLTV | CSV | WITNESS | TAPROOT`, using
+the same libsecp256k1 and SHA256 as this node (the bundled library, not
+Bitcoin Core's subtree). [`equiv_verify`](../crates/rbitcoin-consensus/src/script/equiv.rs)
+checks one already-decoded spend, takes every prevout, and returns the Core
+v32.1 `ScriptError` ordinal. Any other script-verify bit, including `LOW_S`
+and every `DISCOURAGE_*` bit, is rejected before the checker runs.
+
+Outside that claim: the typed P2PKH, P2WPKH, and nested fast paths, every
+policy flag, and the milestone script skip. The method is the one tracked in
+[btc-lean#29](https://github.com/Rob1Ham/btc-lean/pull/29). This is not a Lean
+kernel theorem and it is not whole-node consensus equivalence.
+
 ### No allowlist
 
 - Soft majority pass rates are **not** success criteria.

@@ -326,6 +326,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  # Not a required check. LLVM IR for the consensus proof entry. Does not run Alive2.
+  equiv-ir:
+    name: equiv-ir
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: rustc 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: emit llvm ir
+        run: ./scripts/equiv-ir.sh
+
   # Not a required check. Write token only on green master coverage.
   coverage-badge:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')

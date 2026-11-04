@@ -6,6 +6,8 @@
 
 #[doc(hidden)]
 pub mod classify;
+#[cfg(feature = "equiv")]
+pub mod equiv;
 #[doc(hidden)]
 pub mod interpreter;
 #[doc(hidden)]
