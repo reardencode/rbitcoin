@@ -72,7 +72,11 @@ pub(crate) fn unresolved_ovf_cut(
     last_ovf_fk: u64,
     pair: bool,
 ) -> Result<Option<u64>, StoreError> {
-    ovf_row_cut(loc, ovf, count, last_ovf_fk, ovf.logical_len(), pair)
+    // A short read at the published end means that row was not written.
+    match ovf_row_cut(loc, ovf, count, last_ovf_fk, ovf.logical_len(), pair) {
+        Err(StoreError::Io { .. }) => Ok(None),
+        other => other,
+    }
 }
 
 /// Creates covered while the overflow header lags the RAM end.
@@ -81,6 +85,7 @@ pub(crate) fn unresolved_ovf_cut(
 /// cuts before that create when the row is inside `count`. A row past
 /// `count`, or bytes that are not a row, leaves `count` in place: those
 /// creates are already named by the locator and the checkpoint header.
+/// A failed read of that row is an error, so the tip does not seal.
 pub(crate) fn withheld_ovf_limit(
     loc: &TableFile,
     ovf: &TableFile,
@@ -122,9 +127,7 @@ fn ovf_row_cut(
     }
     let width = if pair { 16 } else { 12 };
     let mut row = [0u8; 16];
-    if ovf.pread_all(row_at, &mut row[..width]).is_err() {
-        return Ok(None);
-    }
+    ovf.pread_all(row_at, &mut row[..width])?;
     let fk = u64::from_le_bytes(row[0..8].try_into().unwrap());
     if fk == 0 || fk <= last_ovf_fk || fk > count {
         return Ok(None);

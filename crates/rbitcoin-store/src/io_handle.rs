@@ -55,6 +55,10 @@ impl IoHandle {
         if buf.is_empty() {
             return 0;
         }
+        #[cfg(debug_assertions)]
+        if take_fail_pread(self) {
+            return -disk_full_errno();
+        }
         #[cfg(unix)]
         {
             // SAFETY: `buf` is the caller's mutable slice. `self.fd` is open.
@@ -140,6 +144,10 @@ static FAIL_HWM: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(
 #[cfg(debug_assertions)]
 static FAIL_SYNC: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(Vec::new());
 
+/// Next N preads on these fds fail before any byte is returned.
+#[cfg(debug_assertions)]
+static FAIL_PREAD: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(Vec::new());
+
 #[cfg(debug_assertions)]
 fn disk_full_errno() -> i32 {
     #[cfg(unix)]
@@ -172,6 +180,7 @@ pub fn disarm_short_pwrite() {
         .clear();
     FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner()).clear();
     FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    FAIL_PREAD.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Drop one fd's arms. A process-wide clear races another test in this binary.
@@ -190,6 +199,10 @@ pub fn disarm_pwrite(handle: IoHandle) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|(h, _)| *h != handle);
+    FAIL_PREAD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| *h != handle);
 }
 
 /// Fail the next `n` `sync_data` calls on `handle` before the syscall.
@@ -200,6 +213,18 @@ pub fn disarm_pwrite(handle: IoHandle) {
 #[doc(hidden)]
 pub fn arm_fail_sync(handle: IoHandle, n: u32) {
     let mut slots = FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = slots.iter_mut().find(|(h, _)| *h == handle) {
+        slot.1 = n;
+    } else {
+        slots.push((handle, n));
+    }
+}
+
+/// Fail the next `n` preads on `handle` before any byte is returned.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_fail_preads(handle: IoHandle, n: u32) {
+    let mut slots = FAIL_PREAD.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(slot) = slots.iter_mut().find(|(h, _)| *h == handle) {
         slot.1 = n;
     } else {
@@ -221,6 +246,23 @@ pub fn disarm_sync(handle: IoHandle) {
 #[cfg(debug_assertions)]
 pub(crate) fn take_fail_sync(handle: IoHandle) -> bool {
     let mut slots = FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(i) = slots.iter().position(|(h, _)| *h == handle) else {
+        return false;
+    };
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+        return false;
+    }
+    slots[i].1 -= 1;
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+    }
+    true
+}
+
+#[cfg(debug_assertions)]
+fn take_fail_pread(handle: IoHandle) -> bool {
+    let mut slots = FAIL_PREAD.lock().unwrap_or_else(|e| e.into_inner());
     let Some(i) = slots.iter().position(|(h, _)| *h == handle) else {
         return false;
     };

@@ -701,6 +701,44 @@ fn withheld_overflow_header_does_not_seal_the_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The overflow row was written and its header did not land. A failed read
+/// of that row does not seal the tip. Reopen drops that create.
+#[test]
+fn unreadable_withheld_overflow_row_does_not_seal_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+    let sealed = on_disk_hwm(&dir.join("confirmed.body"));
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+
+    let ovf = s.txs.seqsigwit_loc.ovf.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf, 8);
+    let disarm = Disarm(ovf);
+    let (withheld, _) = connect_fat_witness(&s, &write, 1, prev, parent_hash);
+    drop(disarm);
+    rbitcoin_store::io_handle::arm_fail_preads(ovf, 1);
+    let err = s
+        .flush_class_c_tip()
+        .expect_err("an unreadable overflow row does not seal");
+    rbitcoin_store::io_handle::disarm_pwrite(ovf);
+    assert!(
+        matches!(err, rbitcoin_store::error::StoreError::Io { .. }),
+        "{err}"
+    );
+    assert_eq!(
+        on_disk_hwm(&dir.join("confirmed.body")),
+        sealed,
+        "a failed overflow read sealed the tip"
+    );
+    drop(s);
+    assert_withheld_overflow_stays_unsealed(&dir, genesis, withheld);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--prune-seqsigwit` does not publish a witness locator. A withheld
 /// `create.loc.ovf` header is then the only short file. The tip stays at
 /// the sealed prefix.
