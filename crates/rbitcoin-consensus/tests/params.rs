@@ -272,10 +272,10 @@ fn testnet4_defaults_full_scripts_with_core_min_chain_work() {
     assert_eq!(default_milestone_height(t4), 0);
     assert!(default_milestone_anchor(t4).is_none());
     let mut want = [0u8; 32];
-    want[22..].copy_from_slice(&[0x09, 0xa0, 0xfe, 0x15, 0xd0, 0x17, 0x7d, 0x08, 0x63, 0x04]);
+    want[22..].copy_from_slice(&[0x0e, 0x34, 0x6a, 0x55, 0x84, 0x55, 0xad, 0xe8, 0xec, 0xa9]);
     assert_eq!(default_min_chain_work_be(t4), Some(want));
     assert_eq!(
         TESTNET4_MIN_CHAIN_WORK,
-        "0000000000000000000000000000000000000000000009a0fe15d0177d086304"
+        "000000000000000000000000000000000000000000000e346a558455ade8eca9"
     );
 }

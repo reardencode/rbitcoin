@@ -475,9 +475,10 @@ pub const TESTNET_MILESTONE_HASH: &str =
 pub const TESTNET_MIN_CHAIN_WORK: &str =
     "0000000000000000000000000000000000000000000017f49f702147f10c0eb6";
 
-/// Core testnet4 `nMinimumChainWork` (display hex, big-endian).
+/// Core testnet4 `nMinimumChainWork` (display hex, big-endian), from the
+/// same `chainparams.cpp` as the mainnet and testnet3 floors.
 pub const TESTNET4_MIN_CHAIN_WORK: &str =
-    "0000000000000000000000000000000000000000000009a0fe15d0177d086304";
+    "000000000000000000000000000000000000000000000e346a558455ade8eca9";
 
 /// Default IBD milestone height. `0` means full script validation.
 ///
