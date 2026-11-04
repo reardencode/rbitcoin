@@ -152,6 +152,9 @@ impl Input {
         } else {
             let need = FILE_HEADER_LEN as u64 + n_win * OFF_SLOT;
             if opened.off.logical_len() > need {
+                // Same body rule as truncate: do not publish past the bytes
+                // already durable, and do not leave a tail past the prefix.
+                opened.fit_body_to_count(count)?;
                 opened.off.set_logical_len(need)?;
             }
         }
@@ -318,23 +321,37 @@ impl Input {
         if new_count == cur {
             return Ok(());
         }
-        // Absolute end of `new_count`. Subtracting the dropped tail from the
-        // current body end is wrong once that end is already the prefix: the
-        // next open still sees the long locator and would subtract again.
-        let new_body = self.body_end_for_count(new_count)?;
+        // Absolute end of `new_count`. A body already at that prefix must not
+        // be shortened again, and a body short of it is not this prefix.
+        self.fit_body_to_count(new_count)?;
         let n_win = new_count / LOC_WINDOW;
         // Checkpoint before the loc header, same crash window as create.loc.
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
-        self.body.set_logical_len(new_body)?;
         self.loc
             .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
         {
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             cps.truncate(n_win as usize);
         }
-        self.body_end.store(new_body, Ordering::Release);
         self.count.store(new_count, Ordering::Release);
+        Ok(())
+    }
+
+    /// Publish `new_count`'s body end, or refuse when that end is not durable.
+    ///
+    /// Extending the header would treat spare bytes as inputs. A longer body
+    /// is the tail past this prefix.
+    fn fit_body_to_count(&self, new_count: u64) -> Result<(), StoreError> {
+        let new_body = self.body_end_for_count(new_count)?;
+        let durable = self.body.logical_len();
+        if new_body > durable {
+            return Err(StoreError::Corrupt("invariant: input.body truncate"));
+        }
+        if new_body < durable {
+            self.body.set_logical_len(new_body)?;
+        }
+        self.body_end.store(new_body, Ordering::Release);
         Ok(())
     }
 

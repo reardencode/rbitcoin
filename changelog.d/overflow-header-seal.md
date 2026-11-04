@@ -5,4 +5,5 @@ Fixed
   name. A withheld overflow row cuts only the create it belongs to. A
   disconnect that dies while shortening those files reopens at that prefix
   instead of refusing the datadir. Input edges for the kept creates stay
-  put when that shorten is replayed.
+  put when that shorten is replayed. A body shorter than the prefix still
+  does not open. A body longer than it is cut back to the prefix.
