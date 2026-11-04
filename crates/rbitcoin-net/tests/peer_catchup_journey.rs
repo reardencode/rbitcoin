@@ -602,13 +602,17 @@ async fn peer_catchup_compact_reorg() {
     let mut since = Some(t1);
     let mut fill_req = HashSet::new();
     fill_req.insert(pending_hash);
-    assert!(maybe_expire_block_requests(
-        &hub,
-        &mut fill_req,
-        &mut since,
-        t1 + BLOCK_GETDATA_TIMEOUT + Duration::from_millis(1),
-        Some(live.as_ref()),
-    ));
+    assert!(
+        !maybe_expire_block_requests(
+            &hub,
+            &mut fill_req,
+            &mut since,
+            t1 + BLOCK_GETDATA_TIMEOUT + Duration::from_millis(1),
+            Some(live.as_ref()),
+        ),
+        "the stall clock must not forget a hash the download timer still owns"
+    );
+    assert!(fill_req.contains(&pending_hash));
     follow.requested_blocks.remove(&pending_hash);
     assert!(peers.try_cmpct_fill_slot(pending_hash, true));
     assert!(peers.try_cmpct_fill_slot(pending_hash, true));

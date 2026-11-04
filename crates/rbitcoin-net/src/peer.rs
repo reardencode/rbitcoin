@@ -2905,7 +2905,8 @@ pub fn getdata_use_compact(hub: &ChainHub, peer_cmpct_version: u32) -> bool {
 
 /// Drop inflight body asks the peer never answered so `asked_blocks` cannot
 /// permanently skip the same hashes (`rpc_createmultisig` generate-149
-/// `sync_blocks` 60s).
+/// `sync_blocks` 60s). A hash the download window still lists stays, so the
+/// ping suspend holds until that window times the peer out.
 pub fn maybe_expire_block_requests(
     hub: &ChainHub,
     requested: &mut HashSet<BlockHash>,
@@ -2921,13 +2922,24 @@ pub fn maybe_expire_block_requests(
     if now.saturating_duration_since(start) < BLOCK_GETDATA_TIMEOUT {
         return false;
     }
-    for h in requested.drain() {
+    let stale: Vec<BlockHash> = requested
+        .iter()
+        .copied()
+        .filter(|h| session.is_none_or(|s| !s.block_download_owns(h)))
+        .collect();
+    if stale.is_empty() {
+        return false;
+    }
+    for h in stale {
+        requested.remove(&h);
         hub.forget_asked_block(&h);
         if let Some(s) = session {
             s.release_cmpct_taken(h);
         }
     }
-    *since = None;
+    if requested.is_empty() {
+        *since = None;
+    }
     true
 }
 
