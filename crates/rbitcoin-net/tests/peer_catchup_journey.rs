@@ -596,23 +596,25 @@ async fn peer_catchup_compact_reorg() {
         "expired compact fallback must be a requested body so weaker-than-tip is not dropped"
     );
 
-    // Expiring that getdata releases the compact fill slot.
+    // This set is not the download window. A stall with no session still
+    // drops it and releases the compact fill this peer took.
     assert!(live.try_cmpct_fill(pending_hash));
     let t1 = Instant::now();
     let mut since = Some(t1);
     let mut fill_req = HashSet::new();
     fill_req.insert(pending_hash);
     assert!(
-        !maybe_expire_block_requests(
+        maybe_expire_block_requests(
             &hub,
             &mut fill_req,
             &mut since,
             t1 + BLOCK_GETDATA_TIMEOUT + Duration::from_millis(1),
-            Some(live.as_ref()),
+            None,
         ),
-        "the stall clock must not forget a hash the download timer still owns"
+        "a getdata the download window does not own still expires"
     );
-    assert!(fill_req.contains(&pending_hash));
+    assert!(fill_req.is_empty());
+    live.release_cmpct_taken(pending_hash);
     follow.requested_blocks.remove(&pending_hash);
     assert!(peers.try_cmpct_fill_slot(pending_hash, true));
     assert!(peers.try_cmpct_fill_slot(pending_hash, true));
