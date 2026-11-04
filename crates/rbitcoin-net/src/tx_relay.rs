@@ -4300,17 +4300,24 @@ impl MempoolHub {
     #[doc(hidden)]
     pub fn note_fee_flow_admit(&self, weight: u64, fee_sat: u64) {
         let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee_sat, weight);
+        self.note_fee_flow_rate(weight, rate);
+    }
+
+    fn note_fee_flow_rate(&self, weight: u64, rate_sat_per_kvb: u64) {
+        if weight == 0 {
+            return;
+        }
         if let Ok(mut m) = self.fee_flow.lock() {
-            m.note_admit(weight, rate, Instant::now());
+            m.note_admit(weight, rate_sat_per_kvb, Instant::now());
         }
         self.mark_fee_dirty();
     }
 
     /// One fee-flow sample per mining chunk that contains a tx in `txids`.
     ///
-    /// The rate is the chunk fee and sigop-adjusted weight the template
-    /// uses, not each member's own fee/weight. A chunk is sampled once
-    /// even when several of its members are in `txids`.
+    /// The rate is the chunk the template mines. The weight is only the
+    /// members in `txids`, so a child that joins a parent already metered
+    /// does not sample that parent again.
     fn note_published_chunk_fees(&self, txids: &[Txid]) {
         let admits = {
             let g = self.lock_read();
@@ -4322,21 +4329,28 @@ impl MempoolHub {
                     continue;
                 };
                 for ch in cluster.chunks {
-                    if !ch.txids.iter().any(|t| want.contains(t)) {
-                        continue;
-                    }
                     let Some(key) = ch.txids.first().copied() else {
                         continue;
                     };
-                    if seen.insert(key) {
-                        out.push((ch.weight, ch.fee_sat));
+                    if !seen.insert(key) {
+                        continue;
                     }
+                    let weight: u64 = ch
+                        .txids
+                        .iter()
+                        .filter(|t| want.contains(*t))
+                        .map(|t| g.graph.adjusted_weight_of(t))
+                        .sum();
+                    if weight == 0 {
+                        continue;
+                    }
+                    out.push((weight, ch.fee_rate_sat_per_kvb()));
                 }
             }
             out
         };
-        for (weight, fee_sat) in admits {
-            self.note_fee_flow_admit(weight, fee_sat);
+        for (weight, rate) in admits {
+            self.note_fee_flow_rate(weight, rate);
         }
     }
 
