@@ -5,9 +5,9 @@
 //! "archive lead" (`arch_hwm` / `lead=`).
 
 use super::body::BodyPresence;
+use super::state::HeightOccupants;
 use bitcoin::BlockHash;
 use rbitcoin_net::chain::ChainHub;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -110,7 +110,7 @@ pub fn claim_ready(hub: &ChainHub, body: &mut BodyPresence, height: u32, hash: &
 #[cfg(debug_assertions)]
 pub fn tip_fetch_hole(
     hub: &ChainHub,
-    height_to_hash: &HashMap<u32, BlockHash>,
+    height_to_hash: &impl HeightOccupants,
     body: &mut BodyPresence,
 ) -> usize {
     tip_fetch_hole_at(hub, hub.tip_height(), height_to_hash, body)
@@ -119,7 +119,7 @@ pub fn tip_fetch_hole(
 pub fn tip_fetch_hole_at(
     hub: &ChainHub,
     tip: Option<u32>,
-    height_to_hash: &HashMap<u32, BlockHash>,
+    height_to_hash: &impl HeightOccupants,
     body: &mut BodyPresence,
 ) -> usize {
     let path_lo = match tip {
@@ -129,7 +129,7 @@ pub fn tip_fetch_hole_at(
     let limit = path_lo.saturating_add(TIP_HOLE_SCAN_MAX);
     let mut flags = Vec::new();
     for ht in path_lo..=limit {
-        let Some(&hash) = height_to_hash.get(&ht) else {
+        let Some(hash) = height_to_hash.occupant(ht) else {
             break;
         };
         if body.is_rejected(&hash) {
@@ -144,7 +144,7 @@ pub fn tip_fetch_hole_at(
 #[cfg(debug_assertions)]
 pub fn work_chain_progress(
     hub: &ChainHub,
-    height_to_hash: &HashMap<u32, BlockHash>,
+    height_to_hash: &impl HeightOccupants,
     body: &mut BodyPresence,
     horizon: u32,
     max_ready_height: u32,
@@ -162,7 +162,7 @@ pub fn work_chain_progress(
 pub fn work_chain_progress_at(
     hub: &ChainHub,
     tip: Option<u32>,
-    height_to_hash: &HashMap<u32, BlockHash>,
+    height_to_hash: &impl HeightOccupants,
     body: &mut BodyPresence,
     horizon: u32,
     max_ready_height: u32,

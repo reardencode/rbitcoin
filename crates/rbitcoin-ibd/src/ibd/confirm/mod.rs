@@ -1,6 +1,7 @@
 //! Dedicated confirm engine (Class C tip walk) for IBD.
 
 use super::body::BodyPresence;
+use super::state::HeightOccupants;
 use super::status::LoopStats;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
@@ -3185,7 +3186,7 @@ pub fn spawn_confirm_engine(
 /// ordered path (that pegged a core at ~130k headers with tip frozen).
 pub fn offer_confirm_ready(
     feed: &ConfirmFeed,
-    height_to_hash: &HashMap<u32, BlockHash>,
+    height_to_hash: &impl HeightOccupants,
     prev_of: &HashMap<BlockHash, BlockHash>,
     body: &mut BodyPresence,
     hub: &ChainHub,
@@ -3199,7 +3200,7 @@ pub fn offer_confirm_ready(
     let limit = expect.saturating_add(OFFER_AHEAD);
     let mut noted = 0u32;
     for ht in expect..=limit {
-        let Some(&hash) = height_to_hash.get(&ht) else {
+        let Some(hash) = height_to_hash.occupant(ht) else {
             break;
         };
         if hub.has_block(&hash) {

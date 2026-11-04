@@ -1512,8 +1512,8 @@ fn evict_off_path_suffix(
     let keep = height.saturating_sub(1);
     let mut dropped = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (ht, hash) in &st.height_to_hash {
-        if *ht > keep && seen.insert(*hash) {
+    for (ht, hash) in st.height_to_hash.iter() {
+        if ht > keep && seen.insert(*hash) {
             dropped.push(*hash);
         }
     }

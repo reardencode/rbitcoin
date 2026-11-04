@@ -4248,6 +4248,7 @@ fn drained_queue_refills_stored_headers_after_known_header_pruning() {
     }
     assert_eq!(st.ordered.back(), Some(&tail.block_hash()));
     st.hygiene();
+    st.deep_hygiene();
     assert_eq!(
         rbitcoin_ibd::ibd::path::append_stored_headers(&mut st, &hub),
         2,

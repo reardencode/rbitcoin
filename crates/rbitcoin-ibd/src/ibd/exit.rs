@@ -43,7 +43,7 @@ impl Peerless {
 
 /// Highest connected best-chain height we already occupy (not competing `hash_height`).
 pub fn path_high_water(st: &IbdWorkState, tip_h: u32) -> u32 {
-    let h2h_hi = st.height_to_hash.keys().copied().max().unwrap_or(0);
+    let h2h_hi = st.height_to_hash.highest().unwrap_or(0);
     st.max_ready_height.max(h2h_hi).max(tip_h)
 }
 
@@ -74,7 +74,7 @@ pub fn on_path_inflight(st: &IbdWorkState) -> bool {
 /// Work still owed to the confirmed best chain (not explore/orphan getdata).
 pub fn best_chain_remainder(st: &IbdWorkState, tip_h: u32) -> bool {
     !st.ordered.is_empty()
-        || st.height_to_hash.keys().any(|&h| h > tip_h)
+        || st.height_to_hash.any_above(tip_h)
         || st.max_ready_height > tip_h
         || on_path_inflight(st)
 }
