@@ -2240,6 +2240,30 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         closed_msg.contains("scripthash index disabled"),
         "flag off does not serve the frozen index: {closed}"
     );
+    let closed_ahead = rpc(
+        &mut stream,
+        31,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone(), format!("asof:{asof_lag}")]),
+    )
+    .await;
+    let closed_ahead_msg = closed_ahead["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        closed_ahead_msg.contains("scripthash index disabled"),
+        "flag off asof ahead of the watermark: {closed_ahead}"
+    );
+    let closed_at = rpc(
+        &mut stream,
+        32,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone(), tag_spend.clone()]),
+    )
+    .await;
+    let closed_at_msg = closed_at["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        closed_at_msg.contains("scripthash index disabled"),
+        "flag off asof at the watermark: {closed_at}"
+    );
     q.set_sh_index_enabled(true);
     let at_wm = rpc(
         &mut stream,
