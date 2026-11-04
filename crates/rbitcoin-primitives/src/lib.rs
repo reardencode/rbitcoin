@@ -203,6 +203,7 @@ pub enum Network {
     Mainnet,
     Testnet,
     Signet,
+    Testnet4,
     Regtest,
 }
 
@@ -212,6 +213,7 @@ impl Network {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
             Network::Signet => "signet",
+            Network::Testnet4 => "testnet4",
             Network::Regtest => "regtest",
         }
     }
@@ -221,6 +223,7 @@ impl Network {
             "main" | "mainnet" => Ok(Network::Mainnet),
             "test" | "testnet" | "testnet3" => Ok(Network::Testnet),
             "signet" => Ok(Network::Signet),
+            "testnet4" => Ok(Network::Testnet4),
             "regtest" => Ok(Network::Regtest),
             other => Err(ParseNetworkError {
                 input: other.to_string(),
@@ -234,6 +237,7 @@ impl Network {
             Network::Mainnet => 8333,
             Network::Testnet => 18333,
             Network::Signet => 38333,
+            Network::Testnet4 => 48333,
             Network::Regtest => 18444,
         }
     }
@@ -244,6 +248,7 @@ impl Network {
             Network::Mainnet => 8332,
             Network::Testnet => 18332,
             Network::Signet => 38332,
+            Network::Testnet4 => 48332,
             Network::Regtest => 18443,
         }
     }

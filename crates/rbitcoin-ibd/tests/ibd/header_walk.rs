@@ -4089,9 +4089,11 @@ fn bits_for(
     let period_first = if interval > 0 && height.is_multiple_of(interval) {
         let start = height - interval;
         if start == 0 {
-            Some(genesis.time)
+            Some(rbitcoin_consensus::PeriodFirst::of(genesis))
         } else {
-            prior.get((start as usize) - 1).map(|h| h.time)
+            prior
+                .get((start as usize) - 1)
+                .map(rbitcoin_consensus::PeriodFirst::of)
         }
     } else {
         None
@@ -6143,4 +6145,50 @@ fn an_unproved_anchor_does_not_preempt_a_peer_on_a_heavier_fork() {
         "the heavier fork replaces the candidate on the first reply"
     );
     assert!(!f.st.header_walk.walk_quiet.contains(&0));
+}
+
+/// BIP94 on the IBD header walk: with a 4-block period, a height-4 header
+/// more than 600 s before its parent fails the batch, and 600 s passes.
+/// Heights 1..=3 are 2000 s apart, so the median never decides it.
+#[test]
+fn bip94_lookahead_rejects_a_timewarped_period_start() {
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("header-walk-bip94");
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.enforce_bip94 = true;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    let hub = ChainHub::new(q, params, rbitcoin_consensus::Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let child = |parent: &Header, time: u32, salt: u8| {
+        let mut h = *parent;
+        h.version = bitcoin::block::Version::from_consensus(4);
+        h.prev_blockhash = parent.block_hash();
+        h.time = time;
+        h.merkle_root = TxMerkleNode::from_byte_array([salt; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
+    };
+    let mut chain = vec![hub.header_of(&gen).unwrap()];
+    for salt in 1..=3u8 {
+        let parent = *chain.last().unwrap();
+        chain.push(child(&parent, parent.time + 2000, salt));
+    }
+    let h3 = chain[3];
+    let (s0, _rx) = slot(0);
+    let st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    let batch = |last: Header| [chain[1], chain[2], h3, last];
+    let warped = child(&h3, h3.time - 601, 0x41);
+    assert!(!batch_context_ok(
+        &st,
+        &hub,
+        &batch(warped),
+        &DiffSnap::default()
+    ));
+    let floor = child(&h3, h3.time - 600, 0x42);
+    assert!(batch_context_ok(
+        &st,
+        &hub,
+        &batch(floor),
+        &DiffSnap::default()
+    ));
 }

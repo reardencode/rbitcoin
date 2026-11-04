@@ -15,10 +15,27 @@ pub struct ParentHeader {
     pub bits: CompactTarget,
 }
 
+/// The header that opens a difficulty period: `interval` blocks before a
+/// retarget height. A retarget reads its time, and with BIP94 its `nBits`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeriodFirst {
+    pub time: u32,
+    pub bits: CompactTarget,
+}
+
+impl PeriodFirst {
+    pub fn of(header: &Header) -> Self {
+        Self {
+            time: header.time,
+            bits: header.bits,
+        }
+    }
+}
+
 /// Header rules from the header bytes plus caller facts. No datadir.
 ///
-/// `mtp_times` ends at the parent (up to 11 timestamps). `period_first_time`
-/// is the header `interval` blocks before a retarget height. `bits_at` supplies
+/// `mtp_times` ends at the parent (up to 11 timestamps). `period_first` is the
+/// header `interval` blocks before a retarget height. `bits_at` supplies
 /// earlier `nBits` for the testnet min-difficulty walk.
 ///
 /// On success the value is that parent median, sorted once. Genesis has no
@@ -31,7 +48,7 @@ pub fn check_header(
     hash: [u8; 32],
     parent: Option<ParentHeader>,
     mtp_times: &[u32],
-    period_first_time: Option<u32>,
+    period_first: Option<PeriodFirst>,
     mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
 ) -> Result<u32, ConsensusError> {
     let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
@@ -68,6 +85,7 @@ pub fn check_header(
             ConsensusError::BadHeader("timestamp <= median-time-past"),
         )?;
     }
+    check_timewarp(params, height, parent.time, header)?;
     if let Err(e) = check_header_version_and_future_time(params, height, header) {
         crate::trust::soften_at(Some(height.0), e)?;
     }
@@ -76,7 +94,7 @@ pub fn check_header(
     if interval > 0
         && height.0.is_multiple_of(interval)
         && !params.no_pow_retargeting()
-        && period_first_time.is_none()
+        && period_first.is_none()
     {
         return Err(ConsensusError::BadHeader("missing retarget first header"));
     }
@@ -86,7 +104,7 @@ pub fn check_header(
         parent.bits,
         parent.time,
         header.time,
-        period_first_time,
+        period_first,
         &mut bits_at,
     )
     .ok_or(ConsensusError::BadPrev)?;
@@ -105,6 +123,7 @@ pub fn validate_header_on_parent(
     height: Height,
     header: &Header,
     parent_mtp: u32,
+    parent_time: u32,
     expected_bits: CompactTarget,
     hash: [u8; 32],
 ) -> Result<(), ConsensusError> {
@@ -114,6 +133,7 @@ pub fn validate_header_on_parent(
             ConsensusError::BadHeader("timestamp <= median-time-past"),
         )?;
     }
+    check_timewarp(params, height, parent_time, header)?;
     if let Err(e) = check_header_version_and_future_time(params, height, header) {
         crate::trust::soften_at(Some(height.0), e)?;
     }
@@ -121,6 +141,30 @@ pub fn validate_header_on_parent(
         return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
     }
     pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
+    Ok(())
+}
+
+/// Core `MAX_TIMEWARP`: how far before its parent a period's first header may be.
+pub const MAX_TIMEWARP: u32 = 600;
+
+/// BIP94: with `enforce_bip94`, the first header of a difficulty period is at
+/// most [`MAX_TIMEWARP`] seconds before its parent (`time-timewarp-attack`).
+pub fn check_timewarp(
+    params: &ChainParams,
+    height: Height,
+    parent_time: u32,
+    header: &Header,
+) -> Result<(), ConsensusError> {
+    let interval = params.difficulty_adjustment_interval();
+    if !params.enforce_bip94 || interval == 0 || !height.0.is_multiple_of(interval) {
+        return Ok(());
+    }
+    if header.time < parent_time.saturating_sub(MAX_TIMEWARP) {
+        crate::trust::soften_at(
+            Some(height.0),
+            ConsensusError::BadHeader("time-timewarp-attack"),
+        )?;
+    }
     Ok(())
 }
 
@@ -166,8 +210,8 @@ pub fn check_header_version_and_future_time(
 
 /// Expected `nBits` for the header at `height`, from the parent and the period start.
 ///
-/// `period_first_time` is the timestamp `interval` blocks earlier when `height`
-/// is a retarget boundary. `bits_at` supplies earlier `nBits` for the testnet
+/// `period_first` is the header `interval` blocks earlier when `height` is a
+/// retarget boundary. `bits_at` supplies earlier `nBits` for the testnet
 /// min-difficulty walk. `None` means an ancestor is missing. Median time is
 /// [`median_time_past_times`], not this function.
 pub fn next_work_bits(
@@ -176,7 +220,7 @@ pub fn next_work_bits(
     prev_bits: CompactTarget,
     prev_time: u32,
     header_time: u32,
-    period_first_time: Option<u32>,
+    period_first: Option<PeriodFirst>,
     bits_at: impl FnMut(u32) -> Option<CompactTarget>,
 ) -> Option<CompactTarget> {
     let bits = next_work_bits_base(
@@ -185,7 +229,7 @@ pub fn next_work_bits(
         prev_bits,
         prev_time,
         header_time,
-        period_first_time,
+        period_first,
         bits_at,
     )?;
     Some(apply_regtest_pow_overlay(
@@ -203,7 +247,7 @@ fn next_work_bits_base(
     prev_bits: CompactTarget,
     prev_time: u32,
     header_time: u32,
-    period_first_time: Option<u32>,
+    period_first: Option<PeriodFirst>,
     mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
 ) -> Option<CompactTarget> {
     if height == 0 {
@@ -223,13 +267,25 @@ fn next_work_bits_base(
     if params.no_pow_retargeting() {
         return Some(prev_bits);
     }
-    let first_time = period_first_time?;
-    let timespan = u64::from(prev_time.saturating_sub(first_time));
-    Some(CompactTarget::from_next_work_required(
-        prev_bits,
-        timespan,
-        &params.btc,
-    ))
+    Some(retarget_bits(params, prev_bits, prev_time, period_first?))
+}
+
+/// Core `CalculateNextWorkRequired` at a retarget height, from the parent and
+/// the period's first header. With BIP94 the target scales the first header's
+/// `nBits`, so a min-difficulty parent cannot lower the next period.
+pub fn retarget_bits(
+    params: &ChainParams,
+    prev_bits: CompactTarget,
+    prev_time: u32,
+    first: PeriodFirst,
+) -> CompactTarget {
+    let base = if params.enforce_bip94 {
+        first.bits
+    } else {
+        prev_bits
+    };
+    let timespan = u64::from(prev_time.saturating_sub(first.time));
+    CompactTarget::from_next_work_required(base, timespan, &params.btc)
 }
 
 /// Core min-difficulty rule: a block more than 2 spacings after its parent may

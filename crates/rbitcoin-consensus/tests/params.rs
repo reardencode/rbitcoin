@@ -218,3 +218,64 @@ fn regtest_pow_bits_overlay_is_regtest_only_and_bounded() {
         assert!(ChainParams::parse_regtest_pow_bits(bad).is_err(), "{bad}");
     }
 }
+
+/// Core `CTestNet4Params`: genesis, buried heights at 1, BIP30 on at every
+/// height (null BIP34 hash), testdummy never active, and BIP94 enforced.
+#[test]
+fn testnet4_matches_core_chainparams() {
+    let p = ChainParams::for_network(rbitcoin_primitives::Network::Testnet4);
+    assert_eq!(p.network, bitcoin::Network::Testnet4);
+    assert_eq!(
+        p.genesis_hash,
+        block_hash_from_display_hex(
+            "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
+        )
+    );
+    let genesis = genesis_block(&p);
+    assert_eq!(genesis.header.time, 1_714_777_860);
+    assert_eq!(genesis.header.nonce, 393_743_547);
+    assert_eq!(genesis.header.bits.to_consensus(), 486_604_799);
+    assert_eq!(
+        genesis.header.merkle_root.to_string(),
+        "7aa0a7ae1e223414cb807e40cd57e667b718e42aaf9306db9102fe28912b7b4e"
+    );
+    assert_eq!(p.btc.bip34_height, 1);
+    assert_eq!(p.btc.bip65_height, 1);
+    assert_eq!(p.btc.bip66_height, 1);
+    assert_eq!(p.csv_height(), 1);
+    assert_eq!(p.segwit_height(), 1);
+    assert_eq!(p.taproot_height(), 1);
+    assert!(p.bip34_hash.is_none());
+    assert!(!p.bip30_skipped_for_bip34_ancestry(2, None));
+    assert!(p.testdummy.is_none());
+    assert!(p.signet_challenge.is_none());
+    assert!(p.allow_min_difficulty_blocks());
+    assert!(!p.no_pow_retargeting());
+    assert_eq!(p.difficulty_adjustment_interval(), 2016);
+    assert_eq!(p.subsidy_halving_interval(), 210_000);
+    assert!(p.enforce_bip94);
+    for other in [
+        ChainParams::mainnet(),
+        ChainParams::testnet(),
+        ChainParams::signet(),
+        ChainParams::regtest(),
+    ] {
+        assert!(!other.enforce_bip94, "{:?}", other.network);
+    }
+}
+
+/// Testnet4 runs every script by default (like signet) but ships Core's
+/// `nMinimumChainWork`.
+#[test]
+fn testnet4_defaults_full_scripts_with_core_min_chain_work() {
+    let t4 = rbitcoin_primitives::Network::Testnet4;
+    assert_eq!(default_milestone_height(t4), 0);
+    assert!(default_milestone_anchor(t4).is_none());
+    let mut want = [0u8; 32];
+    want[22..].copy_from_slice(&[0x0e, 0x34, 0x6a, 0x55, 0x84, 0x55, 0xad, 0xe8, 0xec, 0xa9]);
+    assert_eq!(default_min_chain_work_be(t4), Some(want));
+    assert_eq!(
+        TESTNET4_MIN_CHAIN_WORK,
+        "000000000000000000000000000000000000000000000e346a558455ade8eca9"
+    );
+}

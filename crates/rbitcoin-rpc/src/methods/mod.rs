@@ -1234,6 +1234,7 @@ pub fn chain_name(n: Network) -> &'static str {
         Network::Mainnet => "main",
         Network::Testnet => "test",
         Network::Signet => "signet",
+        Network::Testnet4 => "testnet4",
         Network::Regtest => "regtest",
     }
 }

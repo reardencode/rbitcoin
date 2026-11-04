@@ -251,8 +251,8 @@ pub fn reject_empty_confirm_batch(empty: bool) -> Result<(), ConsensusError> {
 pub fn require_retarget_first(
     on_boundary: bool,
     no_retarget: bool,
-    first: Option<u32>,
-) -> Result<Option<u32>, ConsensusError> {
+    first: Option<crate::header::PeriodFirst>,
+) -> Result<Option<crate::header::PeriodFirst>, ConsensusError> {
     if on_boundary && !no_retarget && first.is_none() {
         Err(ConsensusError::BadHeader("missing retarget first header"))
     } else {

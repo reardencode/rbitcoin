@@ -22,6 +22,7 @@ let
   p2pPorts = {
     mainnet = 8333;
     testnet = 18333;
+    testnet4 = 48333;
     signet = 38333;
     regtest = 18444;
   };
@@ -29,6 +30,7 @@ let
   rpcPorts = {
     mainnet = 8332;
     testnet = 18332;
+    testnet4 = 48332;
     signet = 38332;
     regtest = 18443;
   };
@@ -184,8 +186,9 @@ in
       default = null;
       example = 840000;
       description = ''
-        Pass `--milestone HEIGHT`. Null omits the flag: mainnet keeps the
-        anchored script-skip default, and testnet checks every script.
+        Pass `--milestone HEIGHT`. Null omits the flag: mainnet and testnet
+        keep the anchored script-skip default, and signet and testnet4 check
+        every script.
         An explicit height is height-only.
       '';
     };
@@ -212,6 +215,7 @@ in
       type = types.enum [
         "mainnet"
         "testnet"
+        "testnet4"
         "signet"
         "regtest"
       ];

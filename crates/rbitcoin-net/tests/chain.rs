@@ -6275,3 +6275,147 @@ fn dropped_generate_still_commits_mined_txids() {
 fn arcs(blocks: &[bitcoin::Block]) -> Vec<std::sync::Arc<bitcoin::Block>> {
     blocks.iter().cloned().map(std::sync::Arc::new).collect()
 }
+
+/// Regtest with BIP94 on and a 4-block difficulty period. Heights 1..=3 are
+/// mined 2000 s apart, so the height-4 period start sits well above the
+/// median and only the timewarp floor decides it.
+fn bip94_pad(label: &str) -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled(label);
+    let mut params = ChainParams::regtest();
+    params.enforce_bip94 = true;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    let hub = ChainHub::new(q, params, Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    for i in 1..=3i64 {
+        hub.clock.set_mock(1_700_000_000 + 2000 * i);
+        hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+    }
+    (dir, hub)
+}
+
+fn bip94_child(parent: &Header, time: u32, salt: u8) -> Header {
+    let mut h = *parent;
+    h.prev_blockhash = parent.block_hash();
+    h.time = time;
+    h.merkle_root = bitcoin::TxMerkleNode::from_byte_array([salt; 32]);
+    rbitcoin_consensus::grind_regtest_pow(&mut h);
+    h
+}
+
+fn bip94_header_at(hub: &ChainHub, height: u32) -> Header {
+    let (_fk, rec) = hub.query.header_at_height(Height(height)).unwrap().unwrap();
+    hub.header_of(&BlockHash::from_byte_array(rec.hash))
+        .unwrap()
+}
+
+fn is_timewarp(err: &NetError) -> bool {
+    err.to_string().contains("time-timewarp-attack")
+}
+
+/// BIP94 on header sync: a period's first header more than 600 s before its
+/// in-batch parent fails, and 600 s passes.
+#[test]
+fn bip94_off_tip_period_start_rejects_a_timewarp() {
+    let (dir, hub) = bip94_pad("bip94-off-tip");
+    let h2 = bip94_header_at(&hub, 2);
+    let fork3 = bip94_child(&h2, h2.time + 2000, 0x31);
+    let warped = bip94_child(&fork3, fork3.time - 601, 0x41);
+    let err = hub.ensure_headers_batch(&[fork3, warped]).unwrap_err();
+    assert!(is_timewarp(&err), "{err}");
+    let floor = bip94_child(&fork3, fork3.time - 600, 0x42);
+    hub.ensure_headers_batch(&[fork3, floor])
+        .expect("600 s before the parent");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// BIP94 on a branch: the period start after the fork block is judged on
+/// the branch parent's time.
+#[test]
+fn bip94_branch_period_start_rejects_a_timewarp() {
+    let (dir, hub) = bip94_pad("bip94-branch");
+    let h2 = bip94_header_at(&hub, 2);
+    let fork3 = bip94_child(&h2, h2.time + 2000, 0x31);
+    let block = |header| Block {
+        header,
+        txdata: vec![],
+    };
+    let warped = bip94_child(&fork3, fork3.time - 601, 0x41);
+    let err = hub
+        .accept_branch_check_headers(&arcs(&[block(fork3), block(warped)]), Some(2))
+        .unwrap_err();
+    assert!(is_timewarp(&err), "{err}");
+    let floor = bip94_child(&fork3, fork3.time - 600, 0x42);
+    hub.accept_branch_check_headers(&arcs(&[block(fork3), block(floor)]), Some(2))
+        .expect("600 s before the parent");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// BIP94 on a block proposal (Core `TestBlockValidity`).
+#[test]
+fn bip94_proposal_rejects_a_timewarp() {
+    let (dir, hub) = bip94_pad("bip94-proposal");
+    let tip = hub.header_of(&hub.tip_hash().unwrap()).unwrap();
+    let template = hub
+        .assemble_block_to_script(ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let mut warped = template.clone();
+    warped.header.time = tip.time - 601;
+    assert_eq!(
+        hub.check_block_proposal(&warped).unwrap_err(),
+        "time-timewarp-attack"
+    );
+    let mut floor = template;
+    floor.header.time = tip.time - 600;
+    hub.check_block_proposal(&floor)
+        .expect("600 s before the parent");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// BIP94 on header sync: the off-tip retarget scales the period's first
+/// `nBits`, not a min-difficulty parent's. Testnet4 with a 4-block period;
+/// height 4 opens the period at `0x1c3fffc0`, height 7 is a pow-limit block
+/// 600 s later, so the span clamps to a quarter (`0x1c0ffff0`; a quarter of
+/// the parent's pow limit is `0x1c3fffc0`). Headers are unmined: this
+/// reads the expected bits only.
+#[test]
+fn bip94_off_tip_retarget_scales_the_period_first_bits() {
+    let expected = |enforce_bip94: bool| {
+        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("bip94-retarget");
+        let mut params = ChainParams::testnet4();
+        params.enforce_bip94 = enforce_bip94;
+        params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+        let limit = params.pow_limit.to_compact_lossy();
+        let hub = ChainHub::new(q, params, Milestone::NONE);
+        let mut parent = genesis_block(&hub.params).header;
+        let mut batch = HashMap::new();
+        for height in 1..=7u32 {
+            let mut h = parent;
+            h.prev_blockhash = parent.block_hash();
+            h.time = 1_714_800_000 + 200 * height;
+            h.bits = if height == 4 {
+                CompactTarget::from_consensus(0x1c3f_ffc0)
+            } else {
+                limit
+            };
+            batch.insert(
+                h.block_hash().to_byte_array(),
+                HeaderSyncNode {
+                    fk: Fk(0),
+                    header: h,
+                    height: Some(height),
+                    min_diff_walk: None,
+                },
+            );
+            parent = h;
+        }
+        let mut next = parent;
+        next.prev_blockhash = parent.block_hash();
+        next.time = parent.time + 1;
+        let bits = hub.expected_bits_off_tip(&next, &parent, 7, &batch);
+        let _ = std::fs::remove_dir_all(dir);
+        bits.unwrap().to_consensus()
+    };
+    assert_eq!(expected(true), 0x1c0f_fff0);
+    assert_eq!(expected(false), 0x1c3f_ffc0);
+}

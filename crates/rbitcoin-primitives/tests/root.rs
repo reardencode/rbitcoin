@@ -36,6 +36,10 @@ fn network_parse_display_and_error() {
     assert_eq!(Network::Signet.default_rpc_port(), 38332);
     assert_eq!(Network::Regtest.default_p2p_port(), 18444);
     assert_eq!(Network::Regtest.default_rpc_port(), 18443);
+    let t4 = Network::parse("testnet4").unwrap();
+    assert_eq!(t4.as_str(), "testnet4");
+    assert_eq!(t4.default_p2p_port(), 48333);
+    assert_eq!(t4.default_rpc_port(), 48332);
     assert_eq!(DEFAULT_ELECTRUM_PORT, 50001);
     assert_eq!(DEFAULT_ESPLORA_PORT, 3000);
 }

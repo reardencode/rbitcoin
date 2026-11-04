@@ -228,9 +228,11 @@ fn bits_for(
     let period_first = if interval > 0 && height.is_multiple_of(interval) {
         let start = height - interval;
         if start == 0 {
-            Some(genesis.time)
+            Some(rbitcoin_consensus::PeriodFirst::of(genesis))
         } else {
-            prior.get((start as usize) - 1).map(|h| h.time)
+            prior
+                .get((start as usize) - 1)
+                .map(rbitcoin_consensus::PeriodFirst::of)
         }
     } else {
         None

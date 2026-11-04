@@ -592,9 +592,8 @@ No live pool/JDC, no mainnet datadir, no plaintext mode.
   `bad-diffbits` unless the sent bits were already the limit. A re-push cannot fix it: a same-hash `SetNewPrevHash`
   is outside §7.4, and a `NewTemplate` has no field for the bits. Not
   planned; mainnet and signet bits depend only on the prev hash.
-- This binary has no testnet4 network. BIP94 is not implemented
-  ([`COMPAT.md`](../COMPAT.md)). Mainnet, testnet3, signet, and default
-  regtest do not use that rule. A future testnet4 template timestamp floor
-  has to include it when consensus gains it.
+- Testnet4 enforces BIP94 ([`COMPAT.md`](../COMPAT.md)). The template
+  timestamp floor is Core `GetMinimumTime`, which applies the BIP94 floor
+  on every network, so a testnet4 template already starts at or after it.
 - After ship: JD-server mode, weak blocks, extension negotiation, per-IP
   connection limits → quality.md rows, not this roadmap.

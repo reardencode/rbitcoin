@@ -86,6 +86,7 @@ fn apply_header(s: &str) -> bool {
             | "empty median time"
             | "time-too-old"
             | "time-too-new"
+            | "time-timewarp-attack"
     )
 }
 

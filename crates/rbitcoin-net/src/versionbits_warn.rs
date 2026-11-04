@@ -22,7 +22,7 @@ pub const VERSIONBITS_NUM_BITS: i32 = 5;
 pub fn warn_period_threshold(network: Network) -> (u32, u32) {
     match network {
         Network::Mainnet => (2016, 1815),
-        Network::Testnet | Network::Signet => (2016, 2016 * 3 / 4),
+        Network::Testnet | Network::Signet | Network::Testnet4 => (2016, 2016 * 3 / 4),
         Network::Regtest => (144, 144 * 3 / 4),
     }
 }
@@ -32,7 +32,7 @@ pub fn warn_min_height(network: Network) -> u32 {
     match network {
         Network::Mainnet => 711_648,
         Network::Testnet => 2_013_984,
-        Network::Signet | Network::Regtest => 0,
+        Network::Signet | Network::Testnet4 | Network::Regtest => 0,
     }
 }
 

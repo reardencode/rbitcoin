@@ -82,7 +82,7 @@ Clean smoke:
 | `--tor-control-password PASS` | `tor_control_password=` | unset — cookie AUTH unless set |
 | `--i2p-sam [HOST:PORT]` | `i2p_sam=` | unset — no SAM; omit ADDR → `127.0.0.1:7656` |
 | `--i2p-accept-incoming` | `i2p_accept_incoming=` | **off** — persist `{datadir}/i2p/p2p.priv` and STREAM FORWARD to the P2P bind |
-| `--milestone HEIGHT` | `milestone=` | mainnet anchor at 840000; testnet3 anchor at 2500000; signet 0; explicit height is height-only |
+| `--milestone HEIGHT` | `milestone=` | mainnet anchor at 840000; testnet3 anchor at 2500000; signet 0; testnet4 0; explicit height is height-only |
 | `--max-outbound N` | `max_outbound=` | 16 live download peers |
 | `--max-inbound N` | `max_inbound=` | 200 inbound sessions. Peers that relay transactions hold at most half; the rest are for block-relay-only peers. **0** = no inbound slots (outbound-only) |
 | `--mempool-size-mb N` | `mempool_size_mb=` | **300** → 300e6 WU (`N × 1_000_000` weight, not MiB) |
@@ -143,7 +143,7 @@ Clean smoke:
 | `--startup-notify CMD` | `startup_notify=` | unset |
 | `--test-activation-height name@HEIGHT` | `test_activation_height=` | empty — buried deployment overlay |
 | `--regtest-pow-bits BITS` | `regtest_pow_bits=` | unset — regtest only; compact bits in hex (`0x1f7fffff`, `0x` optional) a block at height >= 1 must carry, in place of `0x207fffff`, except a retarget height, which keeps the parent's bits (including the pow limit). A block more than 2 × spacing after its parent (block 1 on a real clock) may still use the pow-limit bits. `generatetoaddress` returns an error when the target does not fit one nonce span. Refused on other networks, and for zero, negative or overflowing bits and bits not harder than the limit. It sets the difficulty of a chain still at the pow limit: a chain already carrying harder bits keeps them, with or without the flag and whatever its value, so a new value needs a fresh chain |
-| `--min-chain-work HEX` | `min_chain_work=` | unset — densify/relay work floor |
+| `--min-chain-work HEX` | `min_chain_work=` | Core's `nMinimumChainWork` on mainnet, testnet3, and testnet4; unset on signet and regtest — densify/relay work floor |
 | `--check-blocks N` | `check_blocks=` | 6; `0` / negative = whole chain |
 | `--ua-comment STR` | `ua_comment=` | empty — BIP14 subversion |
 | `--max-run-secs N` | `max_run_secs=` | unset — process exit after N seconds |

@@ -103,7 +103,7 @@ pub fn retarget_first_time(
     query: &Query,
     params: &ChainParams,
     height: u32,
-) -> Result<Option<u32>, ConfirmError> {
+) -> Result<Option<rbitcoin_consensus::PeriodFirst>, ConfirmError> {
     let interval = params.difficulty_adjustment_interval();
     let on_boundary = interval > 0 && height.is_multiple_of(interval);
     if !on_boundary || params.no_pow_retargeting() {
@@ -111,13 +111,17 @@ pub fn retarget_first_time(
     }
     let first_height = Height(height - interval);
     let first = if let Some((_fk, rec)) = query.header_at_height(first_height)? {
-        Some(rec.timestamp)
+        Some((rec.timestamp, rec.bits))
     } else {
         query
             .confirm_parent_cache()
             .get_header_plan(first_height.0)
-            .map(|plan| plan.header_rec.timestamp)
-    };
+            .map(|plan| (plan.header_rec.timestamp, plan.header_rec.bits))
+    }
+    .map(|(time, bits)| rbitcoin_consensus::PeriodFirst {
+        time,
+        bits: bitcoin::CompactTarget::from_consensus(bits),
+    });
     // Missing period-start is the header rule, decided in consensus.
     Ok(rbitcoin_consensus::block::require_retarget_first(
         true, false, first,

@@ -56,6 +56,7 @@ pub fn rpc_btc_network(n: Network) -> BtcNetwork {
         Network::Mainnet => BtcNetwork::Bitcoin,
         Network::Testnet => BtcNetwork::Testnet,
         Network::Signet => BtcNetwork::Signet,
+        Network::Testnet4 => BtcNetwork::Testnet4,
         Network::Regtest => BtcNetwork::Regtest,
     }
 }

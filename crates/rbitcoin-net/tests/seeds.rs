@@ -538,7 +538,12 @@ fn seed_lookup_names_x_filter_before_unfiltered() {
     let names = seed_lookup_names(Network::Mainnet);
     assert_eq!(names[0][0], "x809.dnsseed.bluematt.me.");
     assert_eq!(names[0][1], "dnsseed.bluematt.me.");
-    for net in [Network::Mainnet, Network::Testnet, Network::Signet] {
+    for net in [
+        Network::Mainnet,
+        Network::Testnet,
+        Network::Signet,
+        Network::Testnet4,
+    ] {
         let names = seed_lookup_names(net);
         assert_eq!(names.len(), dns_seeds(net).len());
         for (pair, seed) in names.iter().zip(dns_seeds(net)) {
@@ -598,6 +603,7 @@ fn dns_seeds_not_resolved_locally_when_proxy() {
         Network::Mainnet,
         Network::Testnet,
         Network::Signet,
+        Network::Testnet4,
         Network::Regtest,
     ] {
         let dests = socks_dns_seed_dests(net);
@@ -993,6 +999,13 @@ fn dns_seeds_match_core_v32() {
             "seed.signet.achownodes.xyz.",
         ]
     );
+    assert_eq!(
+        dns_seeds(Network::Testnet4),
+        [
+            "seed.testnet4.bitcoin.sprovoost.nl.",
+            "seed.testnet4.wiz.biz.",
+        ]
+    );
     let removed = [
         "seed.bitcoin.sipa.be",
         "seed.testnet.bitcoin.sprovoost.nl",
@@ -1047,6 +1060,11 @@ fn fixed_seeds_are_core_v32_tables() {
             include_bytes!("../seeds/nodes_signet.txt").as_slice(),
             "1544288fcd05ebf48d7c1a8df2e39e3d20958ebac6b9a5b825b74fcd733ed075",
         ),
+        (
+            "nodes_testnet4.txt",
+            include_bytes!("../seeds/nodes_testnet4.txt").as_slice(),
+            "6def93c209a371b7e34ebdd66cf6bd38f8e3ec4938a9e0627dce8b362b91b462",
+        ),
     ] {
         assert_eq!(sha256::Hash::hash(bytes).to_string(), want, "{file}");
     }
@@ -1077,6 +1095,18 @@ fn fixed_seeds_are_core_v32_tables() {
     assert!(signet.contains(&net_addr(
         "2uqd5pbaxn26o7fl7nqtm2khetqocislppxtxrpqg55wtbcqdrf2y5qd.onion:38333"
     )));
+    let testnet4 = fixed_seeds(Network::Testnet4);
+    assert_eq!(per_net(testnet4.iter().copied()), [56, 55, 78, 14, 4]);
+    for want in [
+        "3.234.184.245:48333",
+        "2sltzrq7ts5t4il5nimp75og2jksbwdjmgbdykz5ljeoqrxemzlakeyd.onion:48333",
+        "[fc10:efa7:ca6:1548:f8c:6bb9:1cc4:63ae]:48333",
+    ] {
+        assert!(
+            testnet4.contains(&net_addr(want)),
+            "testnet4 fixed seeds lack {want}"
+        );
+    }
     assert!(fixed_seeds(Network::Regtest).is_empty());
 }
 

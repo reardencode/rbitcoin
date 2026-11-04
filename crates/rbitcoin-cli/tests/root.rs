@@ -141,6 +141,7 @@ fn usage_describes_every_option() {
     for needle in [
         "--datadir PATH",
         "--network NET",
+        "mainnet|testnet|testnet4|signet|regtest",
         "--rpc-url ADDR",
         "--rpc-token-file PATH",
         "-h, --help",

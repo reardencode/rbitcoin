@@ -33,15 +33,16 @@ fn validate_header_on_parent_uses_the_caller_digest() {
     rbitcoin_consensus::grind_regtest_pow(&mut header);
     let hash = header.block_hash().to_byte_array();
     rbitcoin_consensus::clock::with_now(1_700_000_000, || {
-        validate_header_on_parent(&params, Height(1), &header, 0, header.bits, hash).unwrap();
+        validate_header_on_parent(&params, Height(1), &header, 0, 0, header.bits, hash).unwrap();
         let err =
-            validate_header_on_parent(&params, Height(1), &header, 0, header.bits, [0xff; 32])
+            validate_header_on_parent(&params, Height(1), &header, 0, 0, header.bits, [0xff; 32])
                 .unwrap_err();
         assert!(matches!(err, ConsensusError::InvalidPow), "{err:?}");
         let err = validate_header_on_parent(
             &params,
             Height(1),
             &header,
+            0,
             0,
             CompactTarget::from_consensus(0x1d00_ffff),
             hash,
@@ -86,7 +87,10 @@ fn mainnet_retarget_32256_matches_core_compact() {
         CompactTarget::from_consensus(0x1d00_ffff),
         1_262_152_739,
         1_262_152_739,
-        Some(1_261_130_161),
+        Some(PeriodFirst {
+            time: 1_261_130_161,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+        }),
         |_| None,
     );
     assert_eq!(got, Some(CompactTarget::from_consensus(0x1d00_d86a)));
@@ -117,7 +121,10 @@ fn retarget_clamps_timespan_and_caps_at_pow_limit() {
             CompactTarget::from_consensus(prev),
             prev_time,
             prev_time,
-            Some(first),
+            Some(PeriodFirst {
+                time: first,
+                bits: CompactTarget::from_consensus(prev),
+            }),
             |_| None,
         )
     };
@@ -530,9 +537,13 @@ fn regtest_pow_overlay_follows_next_work() {
 
     // 2016 boundary: regtest does not retarget, so the parent bits stand.
     // A pow-limit parent stays the pow limit, gap or not.
-    assert_eq!(at(&params, 2016, overlay, 1, Some(t - 5)), overlay);
-    assert_eq!(at(&params, 2016, limit, 1, Some(t - 5)), limit);
-    assert_eq!(at(&params, 2016, limit, 10 * spacing, Some(t - 5)), limit);
+    let first = Some(PeriodFirst {
+        time: t - 5,
+        bits: limit,
+    });
+    assert_eq!(at(&params, 2016, overlay, 1, first), overlay);
+    assert_eq!(at(&params, 2016, limit, 1, first), limit);
+    assert_eq!(at(&params, 2016, limit, 10 * spacing, first), limit);
 
     // A hand-set field on mainnet does not replace the first period's bits.
     let mut main = ChainParams::mainnet();
