@@ -1206,8 +1206,12 @@ impl Query {
         };
         let hwm = self.store.scripthash.include_hwm();
         if hwm == 0 {
-            if self.store.scripthash.has_durable_index() {
-                return Ok(Some(tip.0));
+            if self.store.scripthash.has_durable_index() && tip.0 > 0 {
+                rbitcoin_log::warn!(
+                    "scripthash include mark is absent while the head exists; \
+                     the index lags height {} and recovery re-queues from the start",
+                    tip.0
+                );
             }
             return Ok(None);
         }
