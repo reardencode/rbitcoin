@@ -3039,8 +3039,11 @@ impl MempoolHub {
                     self.publish_fee_floor();
                     return None;
                 }
-                self.publish_admitted(&parent, &parent_res, &prevouts_p, utxo);
-                self.publish_admitted(child, &r, &child_commit.prevouts, utxo);
+                self.index_for_relay(&parent, &parent_res, &prevouts_p);
+                self.index_for_relay(child, &r, &child_commit.prevouts);
+                self.note_published_chunk_fees(&[parent_res.txid, r.txid]);
+                self.promote_orphans_staged(parent_res.txid, utxo);
+                self.promote_orphans_staged(r.txid, utxo);
                 let _ = self.expire_stale();
                 self.publish_fee_floor();
                 Some(r)
