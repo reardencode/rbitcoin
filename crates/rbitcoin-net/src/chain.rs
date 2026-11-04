@@ -1662,6 +1662,7 @@ impl ChainHub {
             self.invalidate_header_report();
         }
         self.drop_held(hash);
+        self.cache.drop_servable(&hash);
     }
 
     /// A block failed connect on a consensus rule. Unlike
@@ -2955,6 +2956,7 @@ impl ChainHub {
                     let bh = b.block_hash();
                     self.invalidated.set.write().unwrap().insert(bh);
                     self.drop_held(bh);
+                    self.cache.drop_servable(&bh);
                     path.push(bh);
                 }
             }
@@ -4091,9 +4093,6 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn drop_held(&self, hash: BlockHash) {
         self.held_bodies.write().unwrap().remove(&hash);
-        // The compact-serve stage is the same unconnected body. A connected
-        // block is already in the best-chain cache.
-        self.cache.drop_servable(&hash);
     }
 
     /// Park a disconnected body without running [`Self::try_apply_held`].

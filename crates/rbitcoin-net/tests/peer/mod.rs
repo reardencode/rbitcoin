@@ -6661,6 +6661,21 @@ fn hb_announce_stays_servable_when_a_sibling_wins() {
         ),
         "the high-bandwidth peer is announced the compact block"
     );
+    hub.drop_held(hash);
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after drop_held");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("dropping the hold must not forget the announced body");
+    };
+    assert_eq!(bt.transactions[0].compute_txid(), coinbase);
     let sibling = rbitcoin_consensus::mine_regtest_paying(
         tip,
         hub.tip_header().unwrap().time.saturating_add(1200),
