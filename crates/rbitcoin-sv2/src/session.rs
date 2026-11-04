@@ -870,7 +870,7 @@ impl Session {
         let bits = match r.job.bits {
             Bits::Sent(n_bits) => CompactTarget::from_consensus(n_bits),
             Bits::Consensus => {
-                let Some(bits) = self.child_bits(prev, stamp).await? else {
+                let Some(bits) = self.child_bits(prev, stamp).await else {
                     rbitcoin_log::info!(
                         "sv2: SubmitSolution template {}: no bits for parent {prev} (unknown or unreadable); dropping",
                         m.template_id
@@ -901,7 +901,7 @@ impl Session {
         if let Bits::Sent(_) = r.job.bits {
             let other_bits = self
                 .child_bits(prev, stamp)
-                .await?
+                .await
                 .is_some_and(|bits| bits != header.bits);
             if other_bits {
                 rbitcoin_log::info!(
@@ -940,15 +940,15 @@ impl Session {
     }
 
     /// The `nBits` consensus requires of `prev`'s child stamped `stamp`, read
-    /// on the blocking pool; `None`: unknown to the chain.
-    async fn child_bits(&self, prev: BlockHash, stamp: u32) -> io::Result<Option<CompactTarget>> {
+    /// on `rbtc-off-pool` like the connect it precedes, so a parked blocking
+    /// pool cannot hold a found block; `None`: unknown to the chain.
+    async fn child_bits(&self, prev: BlockHash, stamp: u32) -> Option<CompactTarget> {
         let chain = Arc::clone(&self.chain);
-        tokio::task::spawn_blocking(move || {
+        rbitcoin_net::off_pool(move || {
             let _g = BlockingRegion::enter();
             chain.expected_child_bits(&prev, stamp)
         })
         .await
-        .map_err(io::Error::other)
     }
 
     /// Admitted work waits for a permit in the semaphore's arrival order,

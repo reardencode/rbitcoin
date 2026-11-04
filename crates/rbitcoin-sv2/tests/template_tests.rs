@@ -678,6 +678,47 @@ async fn submit_solution_checks_pow_before_accept() {
     tp.shutdown().await;
 }
 
+/// A found block does not wait on the Tokio blocking pool: the bits read
+/// ahead of connect runs where connect does, so a pool with every thread
+/// parked still takes the solution.
+#[test]
+fn submit_solution_is_accepted_while_the_blocking_pool_is_parked() {
+    blocking_pool_runtime(1).block_on(async {
+        let tc = shared_regtest(0);
+        let FirstTemplate {
+            tp,
+            mut c,
+            template_id,
+            version,
+            mut header,
+            coinbase,
+        } = first_template(&tc, 0).await;
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let parked = tokio::task::spawn_blocking(move || {
+            let _ = gate.recv_timeout(Duration::from_secs(30));
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+            .await
+            .unwrap();
+        let solved = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
+        release.send(()).unwrap();
+        parked.await.unwrap();
+        let f = solved.expect("solution handled").expect("message");
+        assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+        assert_eq!(
+            tc.chain.tip_header().unwrap().block_hash(),
+            header.block_hash()
+        );
+
+        tp.shutdown().await;
+    });
+}
+
 /// A client that leaves the coinbase witness empty still solves the block:
 /// the TP fills the zero reserved value the witness commitment was built
 /// with. The txid, and so the merkle root, does not cover the witness.

@@ -183,7 +183,7 @@ Do not copy them here.
   are inside the hash and no proof of work can be checked without them: a
   header walk of at most one difficulty interval on a min-difficulty
   network, nothing on mainnet outside a retarget height, and one frame at a
-  time per session on the blocking pool.
+  time per session, read on `rbtc-off-pool`.
 - OPERATOR / COMPAT / NixOS options land in the plan that ships the flag
   (same PR).
 
@@ -1008,8 +1008,13 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   (`cli::proposal_validation_permits` over `blocking_pool_size`), so
   proposals use at most a quarter of the pool and a four-thread node runs one
   at a time. This reserves blocking threads from proposals; it does not stop
-  other users of the pool (template builds, `SubmitSolution`, Electrum, RPC)
-  from filling it. `Sv2TpStats::validations_running` counts closures between
+  other users of the pool (Electrum, Esplora, RPC, and block and header
+  decode) from filling it. Template builds, the `nBits` read ahead of a
+  `SubmitSolution`, and its connect run on `rbtc-off-pool` and `tip-accept`,
+  so a full pool does not hold a found block. A validation takes no
+  `--store-read-budget` permit: that budget bounds the API surfaces' disk
+  reads and holds its permit for the whole call, while a proposal check
+  interleaves its reads with script verify. `Sv2TpStats::validations_running` counts closures between
   permit and return; it is exported as `/metrics`
   `rbitcoin_sv2_validations_running` and `tip: perf` JSON `sv2_validating`.
 - **Red:** `propose_template_validations_are_bounded_across_sessions` on a
@@ -1142,8 +1147,8 @@ Three review findings on the hold and the retained ring, one rule each.
   this one before a min-difficulty gap, and a connection that only
   validates never got a `SetNewPrevHash`, so the validation-time header's
   bits are not what was hashed. For `Consensus` the session asks
-  `ChainHub::expected_child_bits(parent, header_timestamp)` in the blocking
-  region, builds the header with the answer, and checks proof of work against
+  `ChainHub::expected_child_bits(parent, header_timestamp)` on `rbtc-off-pool`
+  (not the Tokio blocking pool, which connect no longer uses), builds the header with the answer, and checks proof of work against
   that header before `accept_block`. The owner is `expected_bits_off_tip`
   through `ChainHub::expected_child_bits`, which walks the parent's own
   headers; `rbitcoin_query::expected_next_bits` reads active-chain heights
@@ -1181,7 +1186,14 @@ Three review findings on the hold and the retained ring, one rule each.
   chain cannot be reached end to end: `accept_block` finds a parent only on
   the best chain (`UnknownParent`), so no journey can show the branch-aware
   bits for it.
-- **Verify:** `cargo test -p rbitcoin-sv2 --test suite custom_job_solution`.
+  `submit_solution_is_accepted_while_the_blocking_pool_is_parked` runs a
+  one-thread blocking pool with that thread parked: a solution for a pushed
+  template still becomes the tip and pushes the next `NewTemplate`. The bits
+  read is a store read on every solution, and connect already runs on
+  `tip-accept`, so the read must not wait on the pool either; red was the
+  solution never connecting inside five seconds.
+- **Verify:** `cargo test -p rbitcoin-sv2 --test suite custom_job_solution`
+  and `submit_solution_is_accepted_while`.
 
 ### D17 — Validation-only sessions need no constraints
 
