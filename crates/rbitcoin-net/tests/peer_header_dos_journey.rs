@@ -1425,6 +1425,7 @@ fn self_announce_nets(peer: &rbitcoin_net::peers::LivePeer) -> Vec<&'static str>
             AddrV2::Ipv4(_) => "ipv4",
             AddrV2::TorV3(_) => "onion",
             AddrV2::I2p(_) => "i2p",
+            AddrV2::Cjdns(_) => "cjdns",
             ref other => panic!("unexpected self-announce {other:?}"),
         })
         .collect()
@@ -1534,6 +1535,40 @@ fn self_announce_stays_on_the_link_network() {
     assert_eq!(
         self_announce_nets(&overlay_peer(&i2p_only, clearnet_peer, out)),
         ["ipv4"]
+    );
+
+    let cjdns_bind = std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 7);
+    let cjdns_peer = rbitcoin_net::NetAddr::Cjdns {
+        ip: std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 9),
+        port: 8333,
+    };
+    let with_cjdns = hub_with(false, false);
+    with_cjdns.set_cjdns_reachable(true);
+    with_cjdns.set_external_ips(vec![external, IpAddr::V6(cjdns_bind)]);
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&with_cjdns, cjdns_peer, inbound)),
+        ["cjdns"],
+        "a CJDNS peer gets the fc00::/8 address and not the public IP"
+    );
+    assert_eq!(
+        overlay_peer(&with_cjdns, cjdns_peer, out).take_local_addr_due(1_000),
+        Some(SocketAddr::new(IpAddr::V6(cjdns_bind), 8333))
+    );
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&with_cjdns, clearnet_peer, out)),
+        ["ipv4"]
+    );
+    let cjdns_only = hub_with(false, false);
+    cjdns_only.set_cjdns_reachable(true);
+    cjdns_only.set_external_ips(vec![IpAddr::V6(cjdns_bind)]);
+    assert!(
+        self_announce_nets(&overlay_peer(&cjdns_only, clearnet_peer, out)).is_empty(),
+        "a clearnet peer is never sent the CJDNS address"
+    );
+    assert!(
+        overlay_peer(&cjdns_only, clearnet_peer, inbound)
+            .take_local_addr_due(1_000)
+            .is_none()
     );
 }
 

@@ -602,10 +602,7 @@ impl LivePeer {
     pub fn take_local_addr_due(&self, now: u64) -> Option<SocketAddr> {
         const DAY: u64 = 24 * 60 * 60;
         let hub = self.owner.upgrade()?;
-        if self.self_announce_link(&hub) != SelfAnnounceLink::Clearnet {
-            return None;
-        }
-        let sock = hub.advertise_local_socket()?;
+        let sock = self.self_announce_link(&hub).local_socket(&hub)?;
         let prev = self.next_local_addr_send.load(Ordering::Relaxed);
         if prev != 0 && now < prev {
             return None;
@@ -628,9 +625,7 @@ impl LivePeer {
         let link = self.self_announce_link(&hub);
         let onion = hub.p2p_onion().filter(|_| link == SelfAnnounceLink::Tor);
         let i2p = hub.p2p_i2p().filter(|_| link == SelfAnnounceLink::I2p);
-        let sock = hub
-            .advertise_local_socket()
-            .filter(|_| link == SelfAnnounceLink::Clearnet);
+        let sock = link.local_socket(&hub);
         if onion.is_none() && i2p.is_none() && sock.is_none() {
             return None;
         }
@@ -701,7 +696,7 @@ impl LivePeer {
         let sock = match self.net {
             crate::NetAddr::Onion { .. } => return SelfAnnounceLink::Tor,
             crate::NetAddr::I2p { .. } => return SelfAnnounceLink::I2p,
-            crate::NetAddr::Cjdns { .. } => return SelfAnnounceLink::Clearnet,
+            crate::NetAddr::Cjdns { .. } => return SelfAnnounceLink::Cjdns,
             crate::NetAddr::Ip(sock) => sock,
         };
         if !self.inbound {
@@ -1859,16 +1854,16 @@ pub fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
 }
 
 /// This node's own announced addresses. A peer can gossip one back into
-/// addrman; a `getaddr` reply leaves them out so it never carries them over
-/// a link of another network.
-struct OwnAddrs {
+/// addrman or relay it in `addrv2`; neither a `getaddr` reply nor the relay
+/// fan-out passes one on, so it never crosses to a link of another network.
+pub(crate) struct OwnAddrs {
     onions: Vec<[u8; 32]>,
     i2p: Option<crate::NetAddr>,
     ips: Vec<IpAddr>,
 }
 
 impl OwnAddrs {
-    fn contains(&self, addr: crate::NetAddr) -> bool {
+    pub(crate) fn contains(&self, addr: crate::NetAddr) -> bool {
         match addr {
             crate::NetAddr::Onion { pk, .. } => self.onions.contains(&pk),
             crate::NetAddr::I2p { dest, .. } => {
@@ -1889,9 +1884,22 @@ impl OwnAddrs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelfAnnounceLink {
     Clearnet,
+    Cjdns,
     Tor,
     I2p,
     Unknown,
+}
+
+impl SelfAnnounceLink {
+    /// The listen address this link may announce: a public IP on clearnet,
+    /// an `fc00::/8` address on CJDNS, none on an overlay.
+    fn local_socket(self, hub: &PeerHub) -> Option<SocketAddr> {
+        match self {
+            Self::Clearnet => hub.advertise_local_socket_on(false),
+            Self::Cjdns => hub.advertise_local_socket_on(true),
+            Self::Tor | Self::I2p | Self::Unknown => None,
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -2146,6 +2154,18 @@ impl PeerHub {
     }
 
     pub fn advertise_local_socket(&self) -> Option<SocketAddr> {
+        self.local_socket_where(|_| true)
+    }
+
+    /// [`Self::advertise_local_socket`] limited to CJDNS (`fc00::/8`) or to
+    /// clearnet addresses, so each link announces only its own network.
+    pub fn advertise_local_socket_on(&self, cjdns: bool) -> Option<SocketAddr> {
+        self.local_socket_where(|ip| {
+            matches!(ip, IpAddr::V6(v) if crate::netaddr::is_cjdns_ip(*v)) == cjdns
+        })
+    }
+
+    fn local_socket_where(&self, keep: impl Fn(&IpAddr) -> bool) -> Option<SocketAddr> {
         if !self.discover.load(Ordering::Relaxed) {
             return None;
         }
@@ -2158,7 +2178,10 @@ impl PeerHub {
         }
         let g = self.external_ips.lock().unwrap_or_else(|e| e.into_inner());
         let cjdns = self.cjdns_reachable.load(Ordering::Relaxed);
-        let ip = g.iter().copied().find(|ip| ip_is_advertisable(ip, cjdns))?;
+        let ip = g
+            .iter()
+            .copied()
+            .find(|ip| keep(ip) && ip_is_advertisable(ip, cjdns))?;
         Some(SocketAddr::new(ip, port))
     }
 
@@ -2226,7 +2249,7 @@ impl PeerHub {
         }
     }
 
-    fn own_addrs(&self) -> OwnAddrs {
+    pub(crate) fn own_addrs(&self) -> OwnAddrs {
         let wallet = self
             .wallet_onions
             .lock()

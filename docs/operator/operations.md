@@ -202,11 +202,13 @@ A self-announce carries only the address of the link's own network. The
 onion goes to `.onion` peers, to outbound dials through `--proxy`, and to
 loopback inbound when `--listen-onion` is the only overlay listener. The I2P
 destination goes to I2P peers, and to loopback inbound when
-`--i2p-accept-incoming` is the only one. `--external-ip` goes to direct
-clearnet and CJDNS peers. Tor and I2P inbound both arrive on loopback, so
-with both listeners a loopback inbound peer gets no self-announce. A
-`getaddr` reply leaves out the node's own onions (P2P and wallet), I2P and `--external-ip`
-addresses even when a peer has gossiped them back.
+`--i2p-accept-incoming` is the only one. A public `--external-ip` goes
+to direct clearnet peers, and an `fc00::/8` address (`--external-ip` or the
+CJDNS listen) only to CJDNS peers. Tor and I2P inbound both arrive on
+loopback, so with both listeners a loopback inbound peer gets no
+self-announce. Neither a `getaddr` reply nor `addrv2` relay passes on the
+node's own onions (P2P and wallet), I2P, CJDNS or `--external-ip`
+addresses when a peer gossips them back.
 
 `--tor-control [HOST:PORT]` talks to **system tor** (SAFECOOKIE/COOKIE or password). Omit
 ADDR for `127.0.0.1:9051`. Failed AUTH is a start error. Unset: no control

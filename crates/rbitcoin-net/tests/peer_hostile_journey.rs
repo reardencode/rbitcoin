@@ -137,6 +137,111 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     );
 }
 
+/// A peer gossips this node's own onion, I2P, CJDNS and external addresses
+/// back on a clearnet session. The relay fan-out passes none of them on, to
+/// a clearnet neighbor or to an onion one, and still relays a stranger's.
+#[tokio::test]
+async fn addrv2_relay_drops_own_addresses() {
+    use bitcoin::p2p::message::NetworkMessage;
+
+    let onion: rbitcoin_net::NetAddr =
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap();
+    let rbitcoin_net::NetAddr::Onion { pk, .. } = onion else {
+        unreachable!()
+    };
+    let cjdns_ip = Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 7);
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    peers.set_p2p_onion(onion.host_str(), onion.port());
+    peers.set_p2p_i2p(rbitcoin_net::NetAddr::I2p {
+        dest: [0x11; 32],
+        port: 0,
+    });
+    peers.set_external_ips(vec![
+        IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42)),
+        IpAddr::V6(cjdns_ip),
+    ]);
+    let src_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+    let ver = hostile_ver(src_addr);
+    let src = peers.register(
+        src_addr,
+        src_addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    src.set_wants_addrv2();
+    let clear_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)), 8333);
+    let clear = peers.register(
+        clear_addr,
+        clear_addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    clear.set_wants_addrv2();
+    let (clear_tx, mut clear_rx) = mpsc::unbounded_channel();
+    clear.attach_out(clear_tx);
+    let onion_net: rbitcoin_net::NetAddr =
+        "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion:8333"
+            .parse()
+            .unwrap();
+    let onion_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8333);
+    let onion_peer = peers.register_net(
+        onion_sock,
+        onion_net,
+        onion_sock,
+        &ver,
+        false,
+        rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+    );
+    onion_peer.set_wants_addrv2();
+    let (onion_tx, mut onion_rx) = mpsc::unbounded_channel();
+    onion_peer.attach_out(onion_tx);
+    peers.set_mock_now(src.connected_at_secs() + 10_000);
+
+    let row = |addr: AddrV2, port: u16| AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr,
+        port,
+    };
+    let stranger = row(AddrV2::Ipv4(Ipv4Addr::new(9, 9, 9, 9)), 8333);
+    // The onion neighbor's own self-announce (our onion, on an onion link)
+    // is not relay; drop it so only the fan-out is counted.
+    while clear_rx.try_recv().is_ok() {}
+    while onion_rx.try_recv().is_ok() {}
+    let mut follow = PeerFollowState::new();
+    on_addrv2(
+        &mut follow,
+        Some(src.as_ref()),
+        &[
+            row(AddrV2::TorV3(pk), 8333),
+            row(AddrV2::I2p([0x11; 32]), 0),
+            row(AddrV2::Ipv4(Ipv4Addr::new(42, 42, 42, 42)), 8333),
+            row(AddrV2::Cjdns(cjdns_ip), 8333),
+            stranger.clone(),
+        ],
+    )
+    .unwrap();
+
+    let mut relayed = Vec::new();
+    for rx in [&mut clear_rx, &mut onion_rx] {
+        while let Ok(out) = rx.try_recv() {
+            let NetworkMessage::AddrV2(rows) = out.expect_msg() else {
+                panic!("expected addrv2");
+            };
+            relayed.extend(rows);
+        }
+    }
+    assert!(!relayed.is_empty(), "the stranger's address is relayed");
+    assert!(
+        relayed.iter().all(|r| r == &stranger),
+        "no neighbor is sent this node's own address: {relayed:?}"
+    );
+}
+
 fn hostile_addr(port: u16) -> AddrV2Message {
     AddrV2Message {
         time: 1_700_000_000,

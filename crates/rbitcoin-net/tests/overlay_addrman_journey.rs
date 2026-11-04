@@ -97,12 +97,19 @@ fn advertise_then_self_announce(hub: &Arc<PeerHub>) {
         start_height: 0,
         relay: true,
     };
-    let v1_peer = hub.register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+    let clearnet = hub.register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+    clearnet.set_wants_addrv2();
+    assert!(
+        clearnet.take_self_announce_msg().is_none(),
+        "a clearnet peer is never sent the CJDNS address"
+    );
+    let cjdns_peer = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfc00, 9, 9, 9, 9, 9, 9, 9)), 8333);
+    let v1_peer = hub.register(cjdns_peer, cjdns_peer, &ver, false, PeerConnType::OutboundFullRelay);
     assert!(
         v1_peer.take_self_announce_msg().is_none(),
         "v1 ADDR must not re-encode CJDNS as IPv6"
     );
-    let v2_peer = hub.register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+    let v2_peer = hub.register(cjdns_peer, cjdns_peer, &ver, false, PeerConnType::OutboundFullRelay);
     v2_peer.set_wants_addrv2();
     match v2_peer.take_self_announce_msg().expect("cjdns addrv2") {
         NetworkMessage::AddrV2(v) => {

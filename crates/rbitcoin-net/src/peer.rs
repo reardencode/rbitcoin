@@ -4154,10 +4154,14 @@ pub fn on_addrv2(
                 })
                 .collect();
             neighbors.sort_by_key(|other| other.id);
+            let own = ph.own_addrs();
             let mut batches: Vec<Vec<bitcoin::p2p::address::AddrV2Message>> =
                 vec![Vec::new(); neighbors.len()];
             for addr in list.iter().take(allow) {
                 if crate::netaddr::addrv2_skip_relay(addr) {
+                    continue;
+                }
+                if crate::NetAddr::from_addrv2(addr).is_some_and(|a| own.contains(a)) {
                     continue;
                 }
                 let key = addr_relay_key(addr);
