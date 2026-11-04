@@ -221,9 +221,11 @@ pub fn verify_native_witness(
 
 /// LOW_S / STRICTENC / NULLFAIL are interpreter policy. The typed P2PKH and
 /// P2WPKH paths do not apply them, so those jobs use the interpreter.
+/// `interpreter_only` forces the same route for a proof or a cautious
+/// operator, including when those policy bits are off.
 #[doc(hidden)]
 pub fn needs_interpreted_ecdsa(job: &ScriptCheckJob) -> bool {
-    job.low_s || job.strictenc || job.nullfail
+    job.interpreter_only || job.low_s || job.strictenc || job.nullfail
 }
 
 /// True when the P2PKH fast path failed because scriptSig is not exactly two

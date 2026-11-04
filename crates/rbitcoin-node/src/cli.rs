@@ -350,7 +350,7 @@ pub fn operator_usage() -> String {
     [--mempool-size-mb N] [--mempool-expiry HOURS] \\\n\
     [--test-activation-height name@HEIGHT] [--regtest-pow-bits BITS] [--persist-mempool[=0|1]] [--trusted] [--always-relay] [--relay] \\\n\
     [--net-permission SPEC] [--net-permission-bind SPEC] [--net-permission-relay[=0|1]] [--net-permission-force-relay[=0|1]] \\\n\
-    [--blocks-only] [--prefill-compact[=0|1]] [--min-relay-tx-fee BTC] \\\n\
+    [--blocks-only] [--prefill-compact[=0|1]] [--script-interpreter-only[=0|1]] [--min-relay-tx-fee BTC] \\\n\
     [--limit-cluster-count N] [--limit-cluster-size KVB] [--peer-timeout SECS] \\\n\
     [--external-ip IP] [--ua-comment STR] \\\n\
     [--min-chain-work HEX] [--max-tip-age SECS] [--check-blocks N] [--mock-time UNIX] \\\n\
@@ -470,6 +470,7 @@ pub fn is_bool_key(key: &str) -> bool {
             | "esplora_onion"
             | "blocks_only"
             | "prefill_compact"
+            | "script_interpreter_only"
             | "persist_mempool"
             | "net_permission_relay"
             | "net_permission_force_relay"

@@ -471,11 +471,15 @@ pub fn first_missing_outpoint(
 }
 
 #[doc(hidden)]
-pub fn verify_tx_scripts(tx: &Transaction, prevouts: Vec<TxOut>) -> Result<(), AcceptError> {
+pub fn verify_tx_scripts(
+    tx: &Transaction,
+    prevouts: Vec<TxOut>,
+    interpreter_only: bool,
+) -> Result<(), AcceptError> {
     if prevouts.len() != tx.input.len() {
         return Err(AcceptError::Script("prevout count mismatch".into()));
     }
-    rbitcoin_consensus::verify_tx_scripts_detached(prevouts, tx.clone())
+    rbitcoin_consensus::verify_tx_scripts_mode(prevouts, tx.clone(), interpreter_only)
         .map_err(|e| AcceptError::Script(e.to_string()))
 }
 
@@ -603,6 +607,8 @@ pub struct ActiveMempool {
     /// A flag-off open removes those transactions and their descendants. A
     /// removal that does not finish leaves the mark.
     pub trust_kept: HashSet<Txid>,
+    /// `--script-interpreter-only`. Admit and re-accept copy this onto the job.
+    pub interpreter_only: bool,
 }
 
 /// A parked package member, taken out before admit.
@@ -762,7 +768,13 @@ impl ActiveMempool {
             node_clock: Arc::new(AtomicU64::new(0)),
             loaded_accept: ingested.accept_secs,
             trust_kept: ingested.trust_kept,
+            interpreter_only: false,
         })
+    }
+
+    /// `--script-interpreter-only`. Admit and re-accept both read this.
+    pub fn set_interpreter_only(&mut self, on: bool) {
+        self.interpreter_only = on;
     }
 
     /// Drop every LIVE trust slot and its descendants. A flag-off open uses
@@ -1037,7 +1049,7 @@ impl ActiveMempool {
         )?;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
-        let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
+        let script_res = verify_tx_scripts(tx, prep.prevouts.clone(), self.interpreter_only);
         self.last_accept_stages.script_us = self
             .last_accept_stages
             .script_us
@@ -2209,7 +2221,7 @@ impl ActiveMempool {
         )?;
         prep.keep_mark = waive;
         prep.keep_accept_secs = accept_secs;
-        if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone()) {
+        if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone(), self.interpreter_only) {
             match trust_script_reason(waive, &e) {
                 Some(reason) => push_trust_warn(&mut prep.trust_warn, reason),
                 None => return Err(e),

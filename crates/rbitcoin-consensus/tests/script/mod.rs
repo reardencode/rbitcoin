@@ -8,6 +8,7 @@ mod core_tx_vectors;
 mod core_vectors;
 mod der_tests;
 mod interpreter;
+mod interpreter_only;
 mod nested;
 mod opcode_bytes;
 mod p2pkh;

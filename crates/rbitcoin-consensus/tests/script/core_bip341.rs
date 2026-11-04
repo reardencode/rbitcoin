@@ -22,12 +22,14 @@ fn load_root() -> Value {
     serde_json::from_str(&s).expect("bip341_wallet_vectors.json")
 }
 
-fn taproot_job(tx: Transaction, prevouts: Vec<TxOut>) -> ScriptCheckJob {
-    ScriptCheckJob::new(
+fn taproot_job(tx: Transaction, prevouts: Vec<TxOut>, interpreter_only: bool) -> ScriptCheckJob {
+    let mut job = ScriptCheckJob::new(
         prevouts,
         tx,
         rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
-    )
+    );
+    job.interpreter_only = interpreter_only;
+    job
 }
 
 fn utxos_spent(v: &Value) -> Result<Vec<TxOut>, String> {
@@ -84,7 +86,12 @@ fn collect_leaves(node: &Value, out: &mut Vec<(usize, Vec<u8>, u8)>) -> Result<(
     Ok(())
 }
 
-fn unknown_leaf_spend(spk_hex: &str, script: &[u8], control_hex: &str) -> Result<(), String> {
+fn unknown_leaf_spend(
+    spk_hex: &str,
+    script: &[u8],
+    control_hex: &str,
+    interpreter_only: bool,
+) -> Result<(), String> {
     let spk = decode_hex(spk_hex)?;
     let control = decode_hex(control_hex)?;
     let prevout = TxOut {
@@ -105,12 +112,11 @@ fn unknown_leaf_spend(spk_hex: &str, script: &[u8], control_hex: &str) -> Result
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = taproot_job(tx, vec![prevout]);
+    let job = taproot_job(tx, vec![prevout], interpreter_only);
     script::verify_job_all_inputs(&job).map_err(|e| e.to_string())
 }
 
-#[test]
-fn core_bip341_wallet_vectors_all_rows() {
+fn core_bip341_wallet_vectors(interpreter_only: bool) {
     let root = load_root();
     let mut total = 0u32;
     let mut pass = 0u32;
@@ -139,7 +145,7 @@ fn core_bip341_wallet_vectors_all_rows() {
         {
             Ok(tx) => {
                 total += 1;
-                let job = taproot_job(tx, prevouts.clone());
+                let job = taproot_job(tx, prevouts.clone(), interpreter_only);
                 match script::verify_job_all_inputs(&job) {
                     Ok(()) => pass += 1,
                     Err(e) => {
@@ -188,7 +194,7 @@ fn core_bip341_wallet_vectors_all_rows() {
                         continue;
                     }
                     tx.input[idx].witness = wit;
-                    let job = taproot_job(tx, prevouts.clone());
+                    let job = taproot_job(tx, prevouts.clone(), interpreter_only);
                     let tx_ref: &Transaction = &job.tx;
                     let vin = job.inputs().nth(idx).expect("vin");
                     match script::verify_input(
@@ -243,7 +249,7 @@ fn core_bip341_wallet_vectors_all_rows() {
                 failures.push(format!("spk#{si} leaf {id}: missing control block"));
                 continue;
             };
-            match unknown_leaf_spend(spk, &script, cb) {
+            match unknown_leaf_spend(spk, &script, cb, interpreter_only) {
                 Ok(()) => pass += 1,
                 Err(e) => {
                     fail += 1;
@@ -269,6 +275,16 @@ fn core_bip341_wallet_vectors_all_rows() {
 }
 
 #[test]
+fn core_bip341_wallet_vectors_all_rows() {
+    core_bip341_wallet_vectors(false);
+}
+
+#[test]
+fn core_bip341_wallet_vectors_all_rows_interpreter_only() {
+    core_bip341_wallet_vectors(true);
+}
+
+#[test]
 fn core_bip341_fully_signed_tamper_rejects() {
     let root = load_root();
     let vec = &root["keyPathSpending"][0];
@@ -278,9 +294,15 @@ fn core_bip341_fully_signed_tamper_rejects() {
     let last = raw.len() - 1;
     raw[last] ^= 0x01;
     let tx: Transaction = deserialize(&raw).expect("still a tx");
-    let job = taproot_job(tx, prevouts);
+    let job = taproot_job(tx, prevouts, false);
     assert!(
         script::verify_job_all_inputs(&job).is_err(),
         "tampered fullySignedTx must reject"
+    );
+    let mut forced = job;
+    forced.interpreter_only = true;
+    assert!(
+        script::verify_job_all_inputs(&forced).is_err(),
+        "tampered fullySignedTx must reject on the interpreter"
     );
 }

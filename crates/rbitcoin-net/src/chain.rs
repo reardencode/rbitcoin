@@ -4851,7 +4851,12 @@ pub fn check_block_proposal_with(
         if sigops > rbitcoin_consensus::block::MAX_BLOCK_SIGOPS_COST {
             return Err("bad-blk-sigops".into());
         }
-        if let Err(e) = rbitcoin_consensus::verify_tx_scripts_with_flags(ins, tx.clone(), flags) {
+        if let Err(e) = rbitcoin_consensus::verify_tx_scripts_with_flags_mode(
+            ins,
+            tx.clone(),
+            flags,
+            query.script_interpreter_only(),
+        ) {
             return Err(rbitcoin_consensus::block_reject_reason(&e));
         }
     }

@@ -931,6 +931,8 @@ pub struct MempoolHub {
     pub query: Arc<Query>,
     /// When false, peers' tx inv/tx are ignored (IBD / catch-up).
     pub relay_enabled: AtomicBool,
+    /// `--script-interpreter-only`. Admit copies this onto each script job.
+    script_interpreter_only: AtomicBool,
     /// Set once the pool has been purged and later blocks strip it. Stays set
     /// when peer relay is paused. `-blocksonly` never sets it.
     pool_maintained: AtomicBool,
@@ -1233,6 +1235,12 @@ impl MempoolHub {
         self.inner.write().unwrap()
     }
 
+    /// `--script-interpreter-only`. Admit and the inner pool share one switch.
+    pub fn set_script_interpreter_only(&self, on: bool) {
+        self.script_interpreter_only.store(on, Ordering::Relaxed);
+        self.lock_write().set_interpreter_only(on);
+    }
+
     pub fn open(dir: impl AsRef<Path>, query: Arc<Query>) -> Result<Arc<Self>, String> {
         Self::open_with_weight(dir, query, rbitcoin_mempool::DEFAULT_MAX_MEMPOOL_WEIGHT)
     }
@@ -1287,6 +1295,7 @@ impl MempoolHub {
             inner: RwLock::new(mp),
             query,
             relay_enabled: AtomicBool::new(false),
+            script_interpreter_only: AtomicBool::new(false),
             pool_maintained: AtomicBool::new(false),
             fee_backfill_due: AtomicBool::new(false),
             trusted_session: AtomicU64::new(u64::MAX),
@@ -2612,8 +2621,12 @@ impl MempoolHub {
     ) -> Result<rbitcoin_mempool::PreparedAdmit, AcceptError> {
         let prep = self.prepare_admit_only(tx, utxo, spec, stages, lock_us)?;
         let t_script = Instant::now();
-        let verified =
-            rbitcoin_consensus::verify_tx_scripts_detached(prep.prevouts.clone(), tx.clone());
+        let interpreter_only = self.script_interpreter_only.load(Ordering::Relaxed);
+        let verified = rbitcoin_consensus::verify_tx_scripts_mode(
+            prep.prevouts.clone(),
+            tx.clone(),
+            interpreter_only,
+        );
         let script_us = t_script.elapsed().as_micros() as u64;
         Self::apply_script_admit(prep, verified, script_us, &spec, stages)
     }
@@ -3765,8 +3778,13 @@ impl MempoolHub {
         *lock_us = lock_out;
         let prep = prepared?;
         let t_script = Instant::now();
-        let verified =
-            rbitcoin_consensus::verify_tx_scripts_cpu(prep.prevouts.clone(), tx.clone()).await;
+        let interpreter_only = self.script_interpreter_only.load(Ordering::Relaxed);
+        let verified = rbitcoin_consensus::verify_tx_scripts_cpu_mode(
+            prep.prevouts.clone(),
+            tx.clone(),
+            interpreter_only,
+        )
+        .await;
         let script_us = t_script.elapsed().as_micros() as u64;
         Self::apply_script_admit(prep, verified, script_us, &spec, stages)
     }

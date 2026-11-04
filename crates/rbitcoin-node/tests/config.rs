@@ -77,6 +77,22 @@ fn prefillcompact_cli_conf_default_on() {
 }
 
 #[test]
+fn script_interpreter_only_conf_defaults_off() {
+    let mut c = NodeConfig::default();
+    assert!(!c.script_interpreter_only);
+    assert_eq!(
+        c.apply_kv("script_interpreter_only", "1").unwrap(),
+        ConfApply::Applied
+    );
+    assert!(c.script_interpreter_only);
+    assert_eq!(
+        c.apply_kv("script_interpreter_only", "0").unwrap(),
+        ConfApply::Applied
+    );
+    assert!(!c.script_interpreter_only);
+}
+
+#[test]
 fn tor_control_password_rejects_a_line_break() {
     let mut c = NodeConfig::default();
     let err = c

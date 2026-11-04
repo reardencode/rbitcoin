@@ -221,7 +221,12 @@ fn fill_implied(f: &mut TxFlags) {
     }
 }
 
-fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> ScriptCheckJob {
+fn flags_to_job(
+    tx: Transaction,
+    prevouts: Vec<TxOut>,
+    flags: &TxFlags,
+    interpreter_only: bool,
+) -> ScriptCheckJob {
     {
         let txid = tx.compute_txid().to_byte_array();
         let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
@@ -242,7 +247,9 @@ fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Scrip
             const_scriptcode: flags.const_scriptcode,
             cleanstack: flags.cleanstack,
         };
-        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
+        let mut job = ScriptCheckJob::with_txid(txid, prevouts, tx, flags);
+        job.interpreter_only = interpreter_only;
+        job
     }
 }
 
@@ -393,6 +400,7 @@ fn verify_tx_row(
     tx_hex: &str,
     flags_s: &str,
     expect_ok: bool,
+    interpreter_only: bool,
 ) -> Result<(), String> {
     let prev_arr = prevouts_json
         .as_array()
@@ -425,10 +433,15 @@ fn verify_tx_row(
     } else {
         parse_tx_invalid_flags(flags_s)
     };
-    verify_parsed_tx(&tx, prevouts, &flags)
+    verify_parsed_tx(&tx, prevouts, &flags, interpreter_only)
 }
 
-fn verify_parsed_tx(tx: &Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Result<(), String> {
+fn verify_parsed_tx(
+    tx: &Transaction,
+    prevouts: Vec<TxOut>,
+    flags: &TxFlags,
+    interpreter_only: bool,
+) -> Result<(), String> {
     if flags.sig_push_only {
         for vin in &tx.input {
             let mut tmp = Vec::new();
@@ -436,11 +449,15 @@ fn verify_parsed_tx(tx: &Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> 
                 .map_err(|_| "SIG_PUSHONLY".to_string())?;
         }
     }
-    let job = flags_to_job(tx.clone(), prevouts, flags);
+    let job = flags_to_job(tx.clone(), prevouts, flags, interpreter_only);
     script::verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
 }
 
-fn run_tx_corpus(name: &str, expect_ok: bool) -> (u32, u32, u32, Vec<String>) {
+fn run_tx_corpus(
+    name: &str,
+    expect_ok: bool,
+    interpreter_only: bool,
+) -> (u32, u32, u32, Vec<String>) {
     let rows = load_array(name);
     let mut total = 0u32;
     let mut pass = 0u32;
@@ -462,7 +479,7 @@ fn run_tx_corpus(name: &str, expect_ok: bool) -> (u32, u32, u32, Vec<String>) {
         };
         let flags_s = cells[2].as_str().unwrap_or("NONE");
         total += 1;
-        let got = verify_tx_row(&cells[0], tx_hex, flags_s, expect_ok);
+        let got = verify_tx_row(&cells[0], tx_hex, flags_s, expect_ok, interpreter_only);
         let ok = if expect_ok { got.is_ok() } else { got.is_err() };
         if ok {
             pass += 1;
@@ -481,7 +498,7 @@ fn run_tx_corpus(name: &str, expect_ok: bool) -> (u32, u32, u32, Vec<String>) {
 
 #[test]
 fn core_tx_valid_all_rows() {
-    let (total, pass, fail, failures) = run_tx_corpus("tx_valid.json", true);
+    let (total, pass, fail, failures) = run_tx_corpus("tx_valid.json", true, false);
     eprintln!("core tx_valid: total={total} pass={pass} fail={fail}");
     for f in &failures {
         eprintln!("  FAIL {f}");
@@ -492,14 +509,38 @@ fn core_tx_valid_all_rows() {
 }
 
 #[test]
+fn core_tx_valid_all_rows_interpreter_only() {
+    let (total, pass, fail, failures) = run_tx_corpus("tx_valid.json", true, true);
+    eprintln!("core tx_valid interpreter: total={total} pass={pass} fail={fail}");
+    for f in &failures {
+        eprintln!("  FAIL {f}");
+    }
+    assert!(total > 50, "expected many valid rows, total={total}");
+    assert_eq!(fail, 0, "tx_valid interpreter failures: {fail}");
+    assert_eq!(pass, total, "every valid row must pass");
+}
+
+#[test]
 fn core_tx_invalid_all_rows() {
-    let (total, pass, fail, failures) = run_tx_corpus("tx_invalid.json", false);
+    let (total, pass, fail, failures) = run_tx_corpus("tx_invalid.json", false, false);
     eprintln!("core tx_invalid: total={total} pass={pass} fail={fail}");
     for f in &failures {
         eprintln!("  FAIL {f}");
     }
     assert!(total > 50, "expected many invalid rows, total={total}");
     assert_eq!(fail, 0, "tx_invalid failures: {fail}");
+    assert_eq!(pass, total, "every invalid row must reject as expected");
+}
+
+#[test]
+fn core_tx_invalid_all_rows_interpreter_only() {
+    let (total, pass, fail, failures) = run_tx_corpus("tx_invalid.json", false, true);
+    eprintln!("core tx_invalid interpreter: total={total} pass={pass} fail={fail}");
+    for f in &failures {
+        eprintln!("  FAIL {f}");
+    }
+    assert!(total > 50, "expected many invalid rows, total={total}");
+    assert_eq!(fail, 0, "tx_invalid interpreter failures: {fail}");
     assert_eq!(pass, total, "every invalid row must reject as expected");
 }
 
@@ -552,7 +593,7 @@ fn core_tx_valid_flag_subsets() {
                 continue;
             }
             n += 1;
-            verify_parsed_tx(&tx, prevouts.clone(), &less).unwrap_or_else(|e| {
+            verify_parsed_tx(&tx, prevouts.clone(), &less, false).unwrap_or_else(|e| {
                 panic!("tx_valid subset i={i} flags={flags_s} still-on-row must accept: {e}")
             });
         }
@@ -606,7 +647,7 @@ fn core_tx_invalid_flag_supersets() {
                 continue;
             }
             n += 1;
-            verify_parsed_tx(&tx, prevouts.clone(), &more).expect_err(&format!(
+            verify_parsed_tx(&tx, prevouts.clone(), &more, false).expect_err(&format!(
                 "tx_invalid superset i={i} flags={flags_s} must still reject"
             ));
         }

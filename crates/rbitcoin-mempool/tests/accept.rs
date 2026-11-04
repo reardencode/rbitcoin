@@ -2195,7 +2195,7 @@ fn prepare_waived(
     tip: ChainTipCtx,
 ) -> Result<PreparedAdmit, AcceptError> {
     let mut prep = mp.prepare_admit(tx, utxos, tip, waive_opts())?;
-    if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone()) {
+    if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone(), mp.interpreter_only) {
         let reason = e.mempool_reject_reason();
         if !rbitcoin_consensus::reason_is_warn_and_apply(&reason) {
             return Err(e);

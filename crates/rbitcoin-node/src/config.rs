@@ -524,6 +524,9 @@ pub struct NodeConfig {
     pub block_min_tx_fee_btc: Option<String>,
     /// BIP152 extra compact-block prefill (default **on**; `--prefill-compact=0` disables).
     pub prefill_compact: bool,
+    /// `--script-interpreter-only` (default off). Standard P2PKH and P2WPKH
+    /// spends use the interpreter. The taproot key path stays specialized.
+    pub script_interpreter_only: bool,
     /// `--check-blocks` window. `None` = store default (6). `<= 0` means the whole chain.
     pub check_blocks: Option<i64>,
     /// How often a down `--connect` / `addnode` target is tried again.
@@ -628,6 +631,7 @@ impl Default for NodeConfig {
             block_version: None,
             block_min_tx_fee_btc: None,
             prefill_compact: true,
+            script_interpreter_only: false,
             check_blocks: None,
             connect_redial: rbitcoin_net::REDIAL_INTERVAL,
             stale_tip: Duration::from_secs(600),
@@ -1683,6 +1687,10 @@ impl NodeConfig {
             "prefill_compact" => {
                 self.prefill_compact = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf prefill_compact: {e}")))?;
+            }
+            "script_interpreter_only" => {
+                self.script_interpreter_only = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf script_interpreter_only: {e}")))?;
             }
             "min_relay_tx_fee" => {
                 if val.is_empty() {
