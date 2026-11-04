@@ -5,8 +5,10 @@
 //! - `ordered` + `ordered_set` track headers after the local tip for getdata.
 //! - Middle completions leave **ghost** deque entries (see [`super::assign_plan::remove_from_ordered`]);
 //!   `Self::hygiene` compacts when the deque bloats.
-//! - `hash_height` / `header_fks` are bounded to live ordered hashes (+ tip seed)
-//!   so they do not grow unbounded past `MAX_ORDERED_HEADERS`.
+//! - `hash_height` / `header_fks` / `path_prev` / `known_headers` hold the
+//!   header chain (a re-getheaders must re-resolve height without a store
+//!   walk). `Self::deep_hygiene` drops side-branch rows; `Self::hygiene` is
+//!   O(live) and runs every second.
 
 use super::assign_plan::compact_ordered;
 use super::body::{BodyPresence, BodyPresenceSizes};
@@ -425,24 +427,16 @@ impl IbdWorkState {
         self.ordered.len() > self.ordered_set.len().saturating_mul(4).max(128)
     }
 
-    /// Compact ghost entries in `ordered` and drop auxiliary map keys no longer
-    /// on the live work path. Caller owns cadence (main loop ~1 s, or bloat).
+    /// Per-second work-path hygiene: **O(live)**.
+    ///
+    /// Compacts `ordered` ghosts, drops `height_to_hash` rows that no longer
+    /// name the occupant of their height, and bounds the body cache to live
+    /// work. Chain-sized maps are [`Self::deep_hygiene`]; sweeping them here
+    /// cost ~0.8 s of every second at a mainnet tip.
     pub fn hygiene(&mut self) {
         compact_ordered(&mut self.ordered, &self.ordered_set);
         let live = &self.ordered_set;
         let inflight = &self.inflight;
-        // Keep header_fks / hash_height for known_headers too: when tip drains
-        // `ordered`, re-getheaders must re-resolve height and re-admit without a
-        // full store walk. Wiping them left known_hdr=N with hash_h=0 and freeze.
-        self.header_fks.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
-        self.hash_height.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
-        self.path_prev.retain(|h, _| {
-            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-        });
         // Retain chained occupants. Do not clear+rebuild (HashMap order is
         // last-write and would remix two hashes at one height).
         let queue_tail = self
@@ -458,28 +452,43 @@ impl IbdWorkState {
                     || inflight.contains_key(hash)
                     || (*ht > queue_tail && self.header_walk.indexes_through(*ht)))
         });
-        if self.known_headers.len() > live.len().saturating_add(4096) {
-            self.known_headers.retain(|h| {
-                live.contains(h)
-                    || inflight.contains_key(h)
-                    || self
-                        .hash_height
-                        .get(h)
-                        .is_some_and(|ht| self.height_to_hash.get(ht) == Some(h))
-            });
-            self.header_fks.retain(|h, _| {
-                live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-            });
-            self.hash_height.retain(|h, _| {
-                live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-            });
-            self.path_prev.retain(|h, _| {
-                live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
-            });
-        }
         // Bound body presence cache to live work (rejected
         // never hygiene-pruned — see BodyPresence::hygiene_retain).
         self.body
             .hygiene_retain(|h| live.contains(h) || inflight.contains_key(h));
+    }
+
+    /// Chain-sized prune of the work-path maps: **O(known headers)**.
+    ///
+    /// `known_headers` keeps the whole header chain by design: when tip drains
+    /// `ordered`, re-getheaders must re-resolve height and re-admit without a
+    /// full store walk. Wiping them left known_hdr=N with hash_h=0 and freeze.
+    /// This drops only headers that are not the occupant of their height (side
+    /// branches), plus the `header_fks` / `hash_height` / `path_prev` rows that
+    /// followed them. Caller owns cadence: main loop every
+    /// `cadence::DEEP_HYGIENE_PERIOD`, never per turn.
+    pub fn deep_hygiene(&mut self) {
+        let live = &self.ordered_set;
+        let inflight = &self.inflight;
+        if self.known_headers.len() <= live.len().saturating_add(4096) {
+            return;
+        }
+        self.known_headers.retain(|h| {
+            live.contains(h)
+                || inflight.contains_key(h)
+                || self
+                    .hash_height
+                    .get(h)
+                    .is_some_and(|ht| self.height_to_hash.get(ht) == Some(h))
+        });
+        self.header_fks.retain(|h, _| {
+            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
+        });
+        self.hash_height.retain(|h, _| {
+            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
+        });
+        self.path_prev.retain(|h, _| {
+            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
+        });
     }
 }

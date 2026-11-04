@@ -834,6 +834,10 @@ pub async fn ibd_cancellable(
                     st.hygiene();
                     cadence.mark_hygiene(now_cadence);
                 }
+                if cadence.deep_hygiene_due(now_cadence) {
+                    st.deep_hygiene();
+                    cadence.mark_deep_hygiene(now_cadence);
+                }
             }
 
             if cadence.assign_due(now_cadence, st_guard.inflight.is_empty()) {

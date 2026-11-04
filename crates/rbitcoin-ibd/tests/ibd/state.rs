@@ -166,7 +166,7 @@ fn reorg_clears_path_suffix() {
 
 /// InflightReq::default + known_headers prune when known ≫ live ordered set.
 #[test]
-fn inflight_default_and_known_headers_hygiene_prune() {
+fn inflight_default_and_known_headers_deep_hygiene_prune() {
     let d = InflightReq::default();
     assert!(d.peers.is_empty());
     // started_at is Instant::now() — just ensure it is in the past/near now.
@@ -187,7 +187,7 @@ fn inflight_default_and_known_headers_hygiene_prune() {
         st.header_fks.insert(hash, Fk(u64::from(i)));
     }
     assert!(st.known_headers.len() > 4096);
-    st.hygiene();
+    st.deep_hygiene();
     // Only live ordered (+ inflight) remains in known; bulk pruned.
     assert!(
         st.known_headers.len() <= 64,
@@ -197,4 +197,48 @@ fn inflight_default_and_known_headers_hygiene_prune() {
     assert!(st.known_headers.contains(&tip));
     // Auxiliary maps follow known after prune.
     assert!(st.hash_height.len() <= st.known_headers.len().saturating_add(8));
+}
+
+/// The per-second path must stay O(live). Chain-sized maps are swept only by
+/// `deep_hygiene`; a per-second `known_headers` sweep pegged the main loop at
+/// ~1 M headers (a 392-sample perf of the operator node put 99 % of the main
+/// thread in `hygiene` plus SipHash).
+#[test]
+fn hygiene_does_not_sweep_chain_sized_maps() {
+    let tip = h(0);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(1));
+    st.ordered.push_back(tip);
+    st.ordered_set.insert(tip);
+    // Off-path headers: recorded height, but no `height_to_hash` occupant.
+    for i in 1u32..=4200 {
+        let mut b = [0u8; 32];
+        b[0..4].copy_from_slice(&i.to_le_bytes());
+        let hash = BlockHash::from_byte_array(b);
+        st.known_headers.insert(hash);
+        st.hash_height.insert(hash, i);
+        st.header_fks.insert(hash, Fk(u64::from(i)));
+        st.path_prev.insert(hash, tip);
+    }
+    assert!(st.known_headers.len() > 4096);
+    st.hygiene();
+    assert_eq!(
+        st.known_headers.len(),
+        4201,
+        "the 1 Hz path must not sweep known_headers"
+    );
+    assert_eq!(st.hash_height.len(), 4201);
+    assert_eq!(st.header_fks.len(), 4200);
+    assert_eq!(st.path_prev.len(), 4200);
+
+    // The chain-sized prune still exists; it is just off the per-second path.
+    st.deep_hygiene();
+    assert_eq!(
+        st.known_headers.len(),
+        1,
+        "deep hygiene drops headers that do not occupy their height"
+    );
+    assert!(st.known_headers.contains(&tip));
+    assert_eq!(st.hash_height.len(), 1);
+    assert!(st.header_fks.is_empty());
+    assert!(st.path_prev.is_empty());
 }

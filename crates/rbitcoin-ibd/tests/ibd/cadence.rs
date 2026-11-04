@@ -44,6 +44,20 @@ fn hygiene_period_or_bloated() {
 }
 
 #[test]
+fn deep_hygiene_is_minutes_not_seconds() {
+    let mut c = IbdLoopCadence::new();
+    let t0 = Instant::now();
+    assert!(c.deep_hygiene_due(t0), "first turn is due");
+    c.mark_deep_hygiene(t0);
+    assert!(
+        !c.deep_hygiene_due(t0 + HYGIENE_PERIOD),
+        "the chain-sized sweep must not ride the 1 s hygiene period"
+    );
+    assert!(!c.deep_hygiene_due(t0 + DEEP_HYGIENE_PERIOD - Duration::from_millis(1)));
+    assert!(c.deep_hygiene_due(t0 + DEEP_HYGIENE_PERIOD));
+}
+
+#[test]
 fn headers_period_or_empty_path() {
     let mut c = IbdLoopCadence::new();
     let t0 = Instant::now();
