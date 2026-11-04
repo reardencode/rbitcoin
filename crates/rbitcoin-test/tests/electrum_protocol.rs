@@ -2228,6 +2228,19 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         "asof of a confirmed hash ahead of visible SH must not pin"
     );
     let asof_lag = rbitcoin_primitives::display_hash_hex(lag_hash);
+    let closed = rpc(
+        &mut stream,
+        30,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone()]),
+    )
+    .await;
+    let closed_msg = closed["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        closed_msg.contains("scripthash index disabled"),
+        "flag off does not serve the frozen index: {closed}"
+    );
+    q.set_sh_index_enabled(true);
     let at_wm = rpc(
         &mut stream,
         13,
