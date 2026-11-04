@@ -253,6 +253,37 @@ fn short_locator_in_one_window_cuts_the_long_body() {
     assert_eq!(t.edges(Fk(41)).unwrap().unwrap(), vec![edge(9, 4)]);
 }
 
+/// The body write runs out of space. The locator is unchanged, so reopen
+/// keeps the prefix and the next append lands on it.
+#[test]
+fn append_body_enospc_reopens_at_the_prefix() {
+    let dir = TempDir::labeled("input-body-enospc").unwrap();
+    let t = Input::create(dir.path()).unwrap();
+    let batch: Vec<_> = (0..10u32).map(|i| vec![edge(1, i)]).collect();
+    t.append(&batch).unwrap();
+    let body = t.body.io_handle();
+    struct Disarm(rbitcoin_store::io_handle::IoHandle);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_pwrite(self.0);
+        }
+    }
+    rbitcoin_store::io_handle::arm_short_pwrite(body);
+    let disarm = Disarm(body);
+    let more: Vec<_> = (0..5u32).map(|i| vec![edge(2, i)]).collect();
+    let err = t.append(&more).expect_err("input.body disk full");
+    assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    drop(disarm);
+    assert_eq!(t.count(), 10);
+    let path = dir.path().to_path_buf();
+    drop(t);
+    let t = Input::open(&path).expect("a failed body write reopens");
+    assert_eq!(t.count(), 10);
+    assert_eq!(t.edges(Fk(10)).unwrap().unwrap(), vec![edge(1, 9)]);
+    t.append(&[vec![edge(9, 4)]]).unwrap();
+    assert_eq!(t.edges(Fk(11)).unwrap().unwrap(), vec![edge(9, 4)]);
+}
+
 fn write_hwm(path: &std::path::Path, logical: u64) {
     use std::io::{Seek, SeekFrom, Write};
     let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();

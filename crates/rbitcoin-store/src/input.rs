@@ -283,11 +283,13 @@ impl Input {
             }
         }
         let loc_at = FILE_HEADER_LEN as u64 + base * LOC_SLOT;
-        self.loc.write_at(loc_at, &loc_bytes)?;
+        // Body before the locator. A failed body write leaves the previous
+        // prefix. Open cuts a body that ran ahead of a short locator.
         if !body_bytes.is_empty() {
             let body_start = self.body_end.load(Ordering::Acquire);
             self.body.write_at(body_start, &body_bytes)?;
         }
+        self.loc.write_at(loc_at, &loc_bytes)?;
         if !new_offs.is_empty() {
             {
                 let cps = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
