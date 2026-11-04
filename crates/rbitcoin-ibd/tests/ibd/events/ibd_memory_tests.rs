@@ -217,6 +217,77 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A second hash at a height that already has a body is not a bad peer.
+/// The queued body stays, and the new hash is pending rather than missing.
+#[test]
+fn undecodable_body_at_occupied_height_keeps_the_peer() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let block = mine(gen, 1_500_020_000, 1);
+    let hash = block.block_hash();
+    let mut st = IbdWorkState::new(
+        vec![super::super::assign::dummy_slot(0)],
+        hub.tip_hash(),
+        hub.tip_height(),
+    );
+    st.record_height(hash, 1);
+    st.header_fks.insert(hash, rbitcoin_primitives::Fk(1));
+    st.inflight
+        .insert(hash, rbitcoin_ibd::ibd::state::InflightReq::new(0));
+    let write_next = AtomicU32::new(0);
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        rbitcoin_ibd::ibd::events::FramedBody {
+            peer: 0,
+            hash,
+            payload: serialize(&block),
+            header_fk: None,
+        },
+    );
+    let queued = hub.query.block_queue_stats().0;
+    assert!(queued > 0, "the first body is queued");
+    assert_eq!(
+        hub.query.block_queue_hash_at_height(1),
+        Some(hash.to_byte_array())
+    );
+
+    let mut raw = [0u8; 32];
+    raw[0] = 0xab;
+    let other = BlockHash::from_byte_array(raw);
+    st.record_height(other, 1);
+    st.header_fks.insert(other, rbitcoin_primitives::Fk(1));
+    st.inflight
+        .insert(other, rbitcoin_ibd::ibd::state::InflightReq::new(0));
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        rbitcoin_ibd::ibd::events::FramedBody {
+            peer: 0,
+            hash: other,
+            payload: b"not a block".to_vec(),
+            header_fk: None,
+        },
+    );
+    assert!(
+        st.slots[0].alive,
+        "an occupied height is not a reason to drop the peer"
+    );
+    assert!(st.body.is_pending(&other));
+    assert!(!st.body.is_missing(&other));
+    assert_eq!(hub.query.block_queue_stats().0, queued);
+    assert_eq!(
+        hub.query.block_queue_hash_at_height(1),
+        Some(hash.to_byte_array())
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// One genesis chain. A re-sent stored run does not walk, an unmapped run
 /// walks once, an unknown parent is not retried, and a time-0 header is
 /// not stored.

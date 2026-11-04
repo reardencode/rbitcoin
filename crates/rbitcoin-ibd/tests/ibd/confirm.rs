@@ -7,7 +7,7 @@ use rbitcoin_ibd::ibd::confirm::{
     format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout, inflight_prune_height,
     stamp_reject_operator_msg, write_drain_max_parts, write_queue_cap, AccountedHeap, ConfirmFeed,
     ConfirmQueueDepths, ConfirmRejectClass, InflightRetain, RejectParent, CONFIRM_RUN_MAX_BLOCKS,
-    INFLIGHT_RETAIN_OWNED_LIMIT, INFLIGHT_RETAIN_STEP,
+    INFLIGHT_PIN_FLOOR_BYTES, INFLIGHT_RETAIN_OWNED_LIMIT, INFLIGHT_RETAIN_STEP,
 };
 
 #[test]
@@ -112,37 +112,40 @@ fn test_pin(id: u64) -> rbitcoin_query::CreatePin {
     )
 }
 
-/// Under 1 GiB, grow one step only when the current prune would drop packs.
-/// Over 1 GiB, shrink one step. The same step either way. Exactly 1 GiB holds.
+/// Pins already above the 50 MiB floor: under 1 GiB, grow one step only when
+/// the current prune would drop packs. Over 1 GiB, shrink one step. Exactly
+/// 1 GiB holds. The floor does not add another 50 MiB on top of that room.
 #[test]
 fn owned_heap_steps_inflight_around_one_gib_only_when_a_prune_would_drop() {
     let mut retain = InflightRetain::default();
+    let pins = INFLIGHT_PIN_FLOOR_BYTES + 1;
     let under = INFLIGHT_RETAIN_OWNED_LIMIT - 1;
     let over = INFLIGHT_RETAIN_OWNED_LIMIT + 1;
     assert_eq!(
-        retain.observe(under, false),
+        retain.observe(under, pins, false),
         0,
         "nothing to save does not extend the window"
     );
     assert_eq!(INFLIGHT_RETAIN_OWNED_LIMIT, 1_073_741_824);
-    assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP);
+    assert_eq!(INFLIGHT_PIN_FLOOR_BYTES, 50 * 1024 * 1024);
+    assert_eq!(retain.observe(under, pins, true), INFLIGHT_RETAIN_STEP);
     assert_eq!(retain.extra(), INFLIGHT_RETAIN_STEP);
-    assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP * 2);
+    assert_eq!(retain.observe(under, pins, true), INFLIGHT_RETAIN_STEP * 2);
     assert_eq!(retain.extra(), INFLIGHT_RETAIN_STEP * 2);
     assert_eq!(
-        retain.observe(under, false),
+        retain.observe(under, pins, false),
         INFLIGHT_RETAIN_STEP * 2,
         "a prune that already keeps every pack does not extend"
     );
     assert_eq!(
-        retain.observe(INFLIGHT_RETAIN_OWNED_LIMIT, true),
+        retain.observe(INFLIGHT_RETAIN_OWNED_LIMIT, pins, true),
         INFLIGHT_RETAIN_STEP * 2,
-        "exactly 1 GiB holds the window"
+        "exactly 1 GiB holds the window when pins already fill their room"
     );
-    assert_eq!(retain.observe(over, false), INFLIGHT_RETAIN_STEP);
-    assert_eq!(retain.observe(over, true), 0);
+    assert_eq!(retain.observe(over, pins, false), INFLIGHT_RETAIN_STEP);
+    assert_eq!(retain.observe(over, pins, true), 0);
     assert_eq!(
-        retain.observe(over, true),
+        retain.observe(over, pins, true),
         0,
         "the window does not go negative"
     );
@@ -181,6 +184,85 @@ fn owned_heap_steps_inflight_around_one_gib_only_when_a_prune_would_drop() {
     assert_eq!(
         heap.bytes(),
         100 + 200 + 300 + 2 * 48 + 3 * 16 + 400 + 5 + 6 + 7 + 8
+    );
+}
+
+/// A full body queue still leaves 50 MiB for pins. A queue under 1 GiB lets
+/// pins grow into the leftover, and stops at 1 GiB when that leftover is
+/// already larger than 50 MiB.
+#[test]
+fn pin_cache_keeps_fifty_mib_when_the_queue_fills_the_line() {
+    let floor = INFLIGHT_PIN_FLOOR_BYTES;
+    let limit = INFLIGHT_RETAIN_OWNED_LIMIT;
+
+    let mut full = InflightRetain::default();
+    let low = floor - 1;
+    assert_eq!(
+        full.observe(limit + low, low, true),
+        INFLIGHT_RETAIN_STEP,
+        "pins under 50 MiB grow while the rest of the heap is already at 1 GiB"
+    );
+    assert_eq!(full.observe(limit + low, low, false), INFLIGHT_RETAIN_STEP);
+
+    let mut at_floor = InflightRetain {
+        extra: INFLIGHT_RETAIN_STEP,
+    };
+    assert_eq!(
+        at_floor.observe(limit + floor, floor, true),
+        INFLIGHT_RETAIN_STEP,
+        "50 MiB of pins holds when the queue fills the line"
+    );
+
+    let mut over_floor = InflightRetain {
+        extra: INFLIGHT_RETAIN_STEP * 2,
+    };
+    let high = floor + 1;
+    assert_eq!(
+        over_floor.observe(limit + high, high, false),
+        INFLIGHT_RETAIN_STEP,
+        "pins over 50 MiB shrink back toward the floor"
+    );
+
+    let mut tight = InflightRetain::default();
+    let room = 10 * 1024 * 1024;
+    let non_pin = limit - room;
+    assert!(room < floor);
+    assert_eq!(
+        tight.observe(non_pin + room, room, true),
+        INFLIGHT_RETAIN_STEP,
+        "a leftover under 50 MiB still grows pins toward the floor"
+    );
+    tight.extra = INFLIGHT_RETAIN_STEP;
+    assert_eq!(
+        tight.observe(non_pin + floor, floor, true),
+        INFLIGHT_RETAIN_STEP,
+        "pins stop at 50 MiB when the leftover is smaller"
+    );
+
+    let mut open = InflightRetain::default();
+    let queue = 100 * 1024 * 1024;
+    let pin_fill = limit - queue;
+    assert!(pin_fill > floor);
+    open.extra = INFLIGHT_RETAIN_STEP;
+    assert_eq!(
+        open.observe(limit, pin_fill, true),
+        INFLIGHT_RETAIN_STEP,
+        "a small queue does not add 50 MiB on top of the 1 GiB line"
+    );
+    assert_eq!(
+        open.observe(limit + 1, pin_fill + 1, true),
+        0,
+        "pins over the leftover shrink, the same as a heap over 1 GiB"
+    );
+    let mut growing = InflightRetain::default();
+    assert_eq!(
+        growing.observe(queue + 1024, 1024, true),
+        INFLIGHT_RETAIN_STEP,
+        "under 1 GiB, a prune that would drop packs still extends the window"
+    );
+    assert_eq!(
+        growing.observe(queue + 1024, 1024, false),
+        INFLIGHT_RETAIN_STEP
     );
 }
 

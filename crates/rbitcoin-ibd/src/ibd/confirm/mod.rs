@@ -70,7 +70,7 @@ impl LoadAheadState {
         let would_drop = self
             .in_flight
             .has_tagged_below(inflight_prune_height(hi, self.retain.extra()));
-        let extra = self.retain.observe(accounted, would_drop);
+        let extra = self.retain.observe(accounted, inflight_bytes, would_drop);
         self.in_flight
             .prune_below_height(inflight_prune_height(hi, extra));
         self.publish_mem_stats();
@@ -1024,8 +1024,10 @@ pub const WRITE_QUEUE_CAP_DEFAULT: usize = 14;
 
 /// Blocks added to or removed from the extra in-flight window per wave.
 pub const INFLIGHT_RETAIN_STEP: u32 = 64;
-/// Accounted-heap line (1 GiB). Under it the window can grow; over it the window shrinks.
+/// Accounted-heap line (1 GiB) shared by the body queue and the pin estimate.
 pub const INFLIGHT_RETAIN_OWNED_LIMIT: u64 = 1 << 30;
+/// Pin-estimate bytes kept when the rest of that heap already fills the line.
+pub const INFLIGHT_PIN_FLOOR_BYTES: u64 = 50 * 1024 * 1024;
 /// `height_by_hash` entry estimate from the old `ibd: sizes` accounted total.
 #[doc(hidden)]
 pub const H2H_ENTRY_BYTES: u64 = 48;
@@ -1088,9 +1090,11 @@ impl AccountedHeap {
 
 /// Extra blocks kept below the drain+fence snapshot.
 ///
-/// Under [`INFLIGHT_RETAIN_OWNED_LIMIT`], a wave that would drop packs keeps
-/// [`INFLIGHT_RETAIN_STEP`] more. Over the limit, each wave gives that many
-/// back. Exactly on the limit, the window holds.
+/// Allowance is the larger of [`INFLIGHT_PIN_FLOOR_BYTES`] and the room under
+/// [`INFLIGHT_RETAIN_OWNED_LIMIT`] after every accounted byte except the pins.
+/// Under the allowance, a wave that would drop packs keeps
+/// [`INFLIGHT_RETAIN_STEP`] more. Over it, each wave gives that many back.
+/// Exactly on it, the window holds.
 #[derive(Debug, Default)]
 pub struct InflightRetain {
     pub extra: u32,
@@ -1101,12 +1105,16 @@ impl InflightRetain {
         self.extra
     }
 
-    /// Record one wave. `would_drop` is the current window, before this step.
+    /// Record one wave. `pin_bytes` is the in-flight CreatePin estimate inside
+    /// `accounted_bytes`. `would_drop` is the current window, before this step.
     /// Returns the extra blocks to keep below the drain+fence snapshot.
-    pub fn observe(&mut self, accounted_bytes: u64, would_drop: bool) -> u32 {
-        if accounted_bytes > INFLIGHT_RETAIN_OWNED_LIMIT {
+    pub fn observe(&mut self, accounted_bytes: u64, pin_bytes: u64, would_drop: bool) -> u32 {
+        let non_pin = accounted_bytes.saturating_sub(pin_bytes);
+        let room = INFLIGHT_RETAIN_OWNED_LIMIT.saturating_sub(non_pin);
+        let allowance = room.max(INFLIGHT_PIN_FLOOR_BYTES);
+        if pin_bytes > allowance {
             self.extra = self.extra.saturating_sub(INFLIGHT_RETAIN_STEP);
-        } else if accounted_bytes < INFLIGHT_RETAIN_OWNED_LIMIT && would_drop {
+        } else if pin_bytes < allowance && would_drop {
             self.extra = self.extra.saturating_add(INFLIGHT_RETAIN_STEP);
         }
         self.extra
