@@ -123,21 +123,7 @@ impl CreateLoc {
             ovf_rows: RwLock::new(ovf_rows),
             count: AtomicU64::new(full),
         };
-        let off_long = opened.off.data_len() / OFF_SLOT > count / LOC_WINDOW;
-        let ovf_past = opened
-            .ovf_rows
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|row| row.0 > count);
-        if count < full || off_long || ovf_past {
-            if opened.count() <= count {
-                opened
-                    .count
-                    .store(count.saturating_add(1), Ordering::Release);
-            }
-            opened.truncate_to_count(count)?;
-        }
+        opened.truncate_to_count(count)?;
         // A row past the overflow header belongs to a create this file does not name.
         let last_ovf = opened
             .ovf_rows
@@ -163,11 +149,25 @@ impl CreateLoc {
         if new_count > cur {
             return Err(StoreError::Corrupt("create.loc truncate past count"));
         }
+        // Off and the overflow file never outlive the loc header.
+        self.fit_off_and_ovf(new_count)?;
         if new_count == cur {
             return Ok(());
         }
         let loc_end = FILE_HEADER_LEN as u64 + new_count * SLOT;
+        self.loc.set_logical_len(loc_end)?;
+        self.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate((new_count / LOC_WINDOW) as usize);
+        self.count.store(new_count, Ordering::Release);
+        Ok(())
+    }
+
+    /// Shorten the checkpoint and overflow files to the creates `new_count` names.
+    fn fit_off_and_ovf(&self, new_count: u64) -> Result<(), StoreError> {
         let n_win = new_count / LOC_WINDOW;
+        let off_end = FILE_HEADER_LEN as u64 + n_win * OFF_SLOT;
         let kept = self
             .ovf_rows
             .read()
@@ -175,23 +175,17 @@ impl CreateLoc {
             .iter()
             .filter(|r| r.0 <= new_count)
             .count();
-        // Off and the overflow file land before the loc header. A crash
-        // after the loc header used to leave a long checkpoint. The RAM
-        // count moves last.
-        self.off
-            .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
-        self.ovf
-            .set_logical_len(FILE_HEADER_LEN as u64 + kept as u64 * CREATE_OVF_SLOT)?;
-        self.loc.set_logical_len(loc_end)?;
-        self.checkpoints
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .truncate(n_win as usize);
+        let ovf_end = FILE_HEADER_LEN as u64 + kept as u64 * CREATE_OVF_SLOT;
+        if self.off.logical_len() != off_end {
+            self.off.set_logical_len(off_end)?;
+        }
+        if self.ovf.logical_len() != ovf_end {
+            self.ovf.set_logical_len(ovf_end)?;
+        }
         self.ovf_rows
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|r| r.0 <= new_count);
-        self.count.store(new_count, Ordering::Release);
         Ok(())
     }
 
