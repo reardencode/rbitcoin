@@ -307,6 +307,21 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
     /// length prefix against [`MAX_V2_CONTENTS_LEN`] before reading the body.
     pub async fn read_genuine_contents<F, D>(
         &mut self,
+        on_progress: F,
+        on_decoy: D,
+    ) -> Result<Vec<u8>, NetError>
+    where
+        F: FnMut(usize),
+        D: FnMut(usize) -> Result<(), NetError>,
+    {
+        let mut plaintext = self.read_genuine_plaintext(on_progress, on_decoy).await?;
+        slide_off(&mut plaintext, 1);
+        Ok(plaintext)
+    }
+
+    /// Genuine plaintext, including the 1-byte ignore header. Skips decoys.
+    async fn read_genuine_plaintext<F, D>(
+        &mut self,
         mut on_progress: F,
         mut on_decoy: D,
     ) -> Result<Vec<u8>, NetError>
@@ -315,16 +330,14 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
         D: FnMut(usize) -> Result<(), NetError>,
     {
         loop {
-            let (packet_type, mut plaintext) = self.read_packet(&mut on_progress).await?;
+            let (packet_type, plaintext) = self.read_packet(&mut on_progress).await?;
             if packet_type == PacketType::Decoy {
                 on_decoy(plaintext.len())?;
                 continue;
             }
-            // plaintext = 1-byte ignore header + application contents
             if plaintext.is_empty() {
                 return Err(NetError::Protocol("empty v2 packet plaintext"));
             }
-            slide_off(&mut plaintext, 1);
             return Ok(plaintext);
         }
     }
@@ -600,41 +613,60 @@ pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage,
 /// [`parse_v2_contents`] for a buffer this reader already owns. The command
 /// prefix is slid off in place; the payload `Vec` keeps that allocation.
 fn parse_v2_contents_vec(magic: Magic, mut contents: Vec<u8>) -> Result<FramedMessage, NetError> {
+    let (command, prefix) = v2_command(&contents)?;
+    slide_off(&mut contents, prefix);
+    framed_payload(magic, command, contents)
+}
+
+/// Packet plaintext still has the ignore byte. One slide drops that byte
+/// and the command, so a block body is moved once.
+fn parse_v2_packet(magic: Magic, mut plaintext: Vec<u8>) -> Result<FramedMessage, NetError> {
+    if plaintext.is_empty() {
+        return Err(NetError::Protocol("empty v2 packet plaintext"));
+    }
+    let (command, prefix) = v2_command(&plaintext[1..])?;
+    slide_off(&mut plaintext, 1 + prefix);
+    framed_payload(magic, command, plaintext)
+}
+
+fn v2_command(contents: &[u8]) -> Result<([u8; 12], usize), NetError> {
     if contents.is_empty() {
         return Err(NetError::Protocol("empty v2 message contents"));
     }
     let first = contents[0];
-    let command = if first != 0 {
-        match command_for_short_id(first) {
-            Some(name) => command_to_12(name),
-            None => {
-                return Err(NetError::InvalidV2Type {
-                    contents_len: contents.len(),
-                });
-            }
-        }
-    } else {
-        if contents.len() < 1 + 12 {
-            return Err(NetError::Protocol("truncated v2 long command"));
-        }
-        let mut cmd12 = [0u8; 12];
-        cmd12.copy_from_slice(&contents[1..13]);
-        if command_from_12(&cmd12).is_err() {
+    if first != 0 {
+        let Some(name) = command_for_short_id(first) else {
             return Err(NetError::InvalidV2Type {
                 contents_len: contents.len(),
             });
-        }
-        cmd12
-    };
-    let prefix = if first == 0 { 13 } else { 1 };
-    slide_off(&mut contents, prefix);
-    if contents.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
-        return Err(NetError::MessageTooLarge(contents.len()));
+        };
+        return Ok((command_to_12(name), 1));
+    }
+    if contents.len() < 1 + 12 {
+        return Err(NetError::Protocol("truncated v2 long command"));
+    }
+    let mut cmd12 = [0u8; 12];
+    cmd12.copy_from_slice(&contents[1..13]);
+    if command_from_12(&cmd12).is_err() {
+        return Err(NetError::InvalidV2Type {
+            contents_len: contents.len(),
+        });
+    }
+    Ok((cmd12, 13))
+}
+
+fn framed_payload(
+    magic: Magic,
+    command: [u8; 12],
+    payload: Vec<u8>,
+) -> Result<FramedMessage, NetError> {
+    if payload.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
+        return Err(NetError::MessageTooLarge(payload.len()));
     }
     Ok(FramedMessage {
         magic,
         command,
-        payload: contents,
+        payload,
     })
 }
 
@@ -875,9 +907,9 @@ where
     F: FnMut(usize),
     D: FnMut(usize) -> Result<(), NetError>,
 {
-    let contents = reader
-        .read_genuine_contents(&mut on_progress, on_decoy)
+    let plaintext = reader
+        .read_genuine_plaintext(&mut on_progress, on_decoy)
         .await?;
-    on_progress(contents.len());
-    parse_v2_contents_vec(magic, contents)
+    on_progress(plaintext.len() - 1);
+    parse_v2_packet(magic, plaintext)
 }
