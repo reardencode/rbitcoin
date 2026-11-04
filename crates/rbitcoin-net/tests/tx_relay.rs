@@ -5635,3 +5635,121 @@ fn get_coin_decodes_only_the_spent_output_of_a_wide_parent() {
     drop(hub);
     let _ = std::fs::remove_dir_all(mp);
 }
+
+/// A 1 sat/vB parent and a child that pays the package up are one mining
+/// chunk. Fee flow moves that chunk's bucket once, not each member's own rate.
+#[test]
+fn cpfp_package_meters_the_chunk_once() {
+    fn member_rate(fee_sat: u64, weight: u64) -> u64 {
+        rbitcoin_mempool::Chunk {
+            txids: Vec::new(),
+            fee_sat,
+            weight,
+        }
+        .fee_rate_sat_per_kvb()
+    }
+    fn positive_buckets(flow: &[f64]) -> Vec<usize> {
+        flow.iter()
+            .enumerate()
+            .filter(|(_, v)| **v > 0.0)
+            .map(|(i, _)| i)
+            .collect()
+    }
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (_store, q, cbs) = pad_cbs(12);
+    let mut parent = spend_true(cbs[0], 1, spk);
+    let parent_fee = parent.weight().to_wu().div_ceil(4);
+    parent.output[0].value = Amount::from_sat(50_0000_0000 - parent_fee);
+    let parent_id = parent.compute_txid();
+    let mut child = spend_vout(
+        OutPoint {
+            txid: parent_id,
+            vout: 0,
+        },
+        1,
+    );
+    let child_vsize = child.weight().to_wu().div_ceil(4);
+    let pkg_fee = parent_fee.saturating_add(child_vsize).saturating_mul(20);
+    let child_fee = pkg_fee - parent_fee;
+    let parent_value = 50_0000_0000 - parent_fee;
+    child.output[0].value = Amount::from_sat(parent_value - child_fee);
+
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    let accepted = hub
+        .accept_package(&[parent.clone(), child.clone()])
+        .expect("package");
+    assert_eq!(accepted.len(), 2);
+    let child_id = child.compute_txid();
+    let parent_res = accepted
+        .iter()
+        .find(|r| r.txid == parent_id)
+        .expect("parent result");
+    let child_res = accepted
+        .iter()
+        .find(|r| r.txid == child_id)
+        .expect("child result");
+    let (chunk_rate, parent_rate, child_rate) = {
+        let g = hub.lock_read();
+        let cluster = g
+            .graph
+            .cluster_of(&parent_id)
+            .expect("parent is in a cluster");
+        let chunk = cluster
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&parent_id) && ch.txids.contains(&child_id))
+            .expect("parent and child are one chunk");
+        (
+            chunk.fee_rate_sat_per_kvb(),
+            member_rate(parent_res.fee_sat, parent_res.weight),
+            member_rate(child_res.fee_sat, child_res.weight),
+        )
+    };
+    let chunk_i = rbitcoin_mempool::fee_est::bucket_index(chunk_rate);
+    let parent_i = rbitcoin_mempool::fee_est::bucket_index(parent_rate);
+    let child_i = rbitcoin_mempool::fee_est::bucket_index(child_rate);
+    assert_ne!(
+        chunk_i, parent_i,
+        "chunk rate {chunk_rate} vs parent {parent_rate}"
+    );
+    assert_ne!(
+        chunk_i, child_i,
+        "chunk rate {chunk_rate} vs child {child_rate}"
+    );
+    let flow = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    assert_eq!(
+        positive_buckets(&flow),
+        vec![chunk_i],
+        "package must move the chunk bucket once, flow={flow:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.accept_tx(&parent).expect("parent");
+    let after_parent = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    assert_eq!(
+        positive_buckets(&after_parent),
+        vec![parent_i],
+        "a lone parent is its own chunk"
+    );
+    hub.accept_tx(&child).expect("child");
+    let after_child = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    let moved = positive_buckets(&after_child);
+    assert!(
+        moved.contains(&chunk_i),
+        "the child must move the chunk bucket, buckets={moved:?}"
+    );
+    assert!(
+        !moved.contains(&child_i),
+        "the child must not move its own feerate bucket, buckets={moved:?}"
+    );
+    assert!(
+        after_child[parent_i] <= after_parent[parent_i],
+        "the child must not add another sample in the parent bucket"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
