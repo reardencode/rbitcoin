@@ -155,11 +155,10 @@ pub fn verify_control_commitment(
     let mut curr = TapNodeHash::from_byte_array(tapleaf_hash.to_byte_array());
     for i in 0..nodes {
         let start = CONTROL_BASE + i * CONTROL_NODE;
-        let node = TapNodeHash::from_byte_array(
-            control[start..start + CONTROL_NODE]
-                .try_into()
-                .expect("32-byte merkle node"),
-        );
+        let node_bytes: [u8; CONTROL_NODE] = control[start..start + CONTROL_NODE]
+            .try_into()
+            .map_err(|_| ConsensusError::Script("TAPROOT_WRONG_CONTROL_SIZE".into()))?;
+        let node = TapNodeHash::from_byte_array(node_bytes);
         curr = TapNodeHash::from_node_hashes(curr, node);
     }
     let tweak = TapTweakHash::from_key_and_tweak(internal, Some(curr)).to_scalar();
@@ -191,8 +190,12 @@ pub fn verify_script_path(
     if items.len() < 2 {
         return Err(ConsensusError::Script("p2tr script path short".into()));
     }
-    let control_bytes = items.pop().unwrap();
-    let script_bytes = items.pop().unwrap();
+    let control_bytes = items
+        .pop()
+        .ok_or_else(|| ConsensusError::Script("p2tr script path short".into()))?;
+    let script_bytes = items
+        .pop()
+        .ok_or_else(|| ConsensusError::Script("p2tr script path short".into()))?;
     let mut stack = items;
 
     let script = Script::from_bytes(&script_bytes);

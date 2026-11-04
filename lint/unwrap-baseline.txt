@@ -1,6 +1,3 @@
-crates/rbitcoin-consensus/src/script/interpreter.rs	7
-crates/rbitcoin-consensus/src/script/nested.rs	2
-crates/rbitcoin-consensus/src/script/p2tr.rs	2
 crates/rbitcoin-ibd/src/ibd/confirm/mod.rs	3
 crates/rbitcoin-log/src/api_log.rs	2
 crates/rbitcoin-mempool/src/graph.rs	1

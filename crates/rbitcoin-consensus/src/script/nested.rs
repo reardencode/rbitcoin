@@ -40,10 +40,7 @@ pub fn try_p2sh_nested_segwit(
     }
 
     let script_sig = &tx.input[input_index.get()].script_sig;
-    if items.is_empty() {
-        return None;
-    }
-    let redeem = items.last().unwrap().as_slice();
+    let redeem = items.last()?.as_slice();
     let (version, program) = classify::witness_program(Script::from_bytes(redeem))?;
 
     // Core: scriptSig must be exactly CScript() << redeem (minimal single push).
@@ -96,10 +93,9 @@ pub fn verify_p2sh_legacy(
     tx: &Transaction,
     mut stack: Vec<Vec<u8>>,
 ) -> Result<(), ConsensusError> {
-    if stack.is_empty() {
+    let Some(redeem) = stack.pop() else {
         return Err(ConsensusError::Script("p2sh empty scriptSig".into()));
-    }
-    let redeem = stack.pop().unwrap();
+    };
     check_p2sh_redeem_hash(job.prevout_script(input_index)?, &redeem)?;
 
     let redeem_script = Script::from_bytes(&redeem);

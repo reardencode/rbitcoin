@@ -52,7 +52,12 @@ pub fn verify_tx_scripts_mode(
     tx: bitcoin::Transaction,
     interpreter_only: bool,
 ) -> Result<(), ConsensusError> {
-    verify_tx_scripts_forks_mode(prevouts, tx, true, true, true, true, true, interpreter_only)
+    verify_tx_scripts_forks_mode(
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        interpreter_only,
+    )
 }
 
 fn verify_scripts_with_flags(
@@ -79,11 +84,13 @@ pub fn verify_tx_scripts_detached_forks(
     verify_tx_scripts_forks_mode(
         prevouts,
         tx,
-        bip65_active,
-        bip112_active,
-        bip66_active,
-        bip16_active,
-        taproot_active,
+        crate::block::ScriptVerifyFlags::buried(
+            bip65_active,
+            bip112_active,
+            bip66_active,
+            bip16_active,
+            taproot_active,
+        ),
         false,
     )
 }
@@ -91,26 +98,11 @@ pub fn verify_tx_scripts_detached_forks(
 fn verify_tx_scripts_forks_mode(
     prevouts: Vec<bitcoin::TxOut>,
     tx: bitcoin::Transaction,
-    bip65_active: bool,
-    bip112_active: bool,
-    bip66_active: bool,
-    bip16_active: bool,
-    taproot_active: bool,
+    flags: crate::block::ScriptVerifyFlags,
     interpreter_only: bool,
 ) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        verify_scripts_with_flags(
-            prevouts,
-            tx,
-            crate::block::ScriptVerifyFlags::buried(
-                bip65_active,
-                bip112_active,
-                bip66_active,
-                bip16_active,
-                taproot_active,
-            ),
-            interpreter_only,
-        )
+        verify_scripts_with_flags(prevouts, tx, flags, interpreter_only)
     })
     .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }

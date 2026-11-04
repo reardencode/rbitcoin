@@ -18,6 +18,8 @@ pub mod p2tr;
 pub mod p2wpkh;
 #[doc(hidden)]
 pub mod p2wsh;
+#[doc(hidden)]
+pub mod script_fail;
 
 #[cfg(feature = "corpus")]
 pub mod core_script;
