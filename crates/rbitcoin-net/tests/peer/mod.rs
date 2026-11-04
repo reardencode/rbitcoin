@@ -6534,6 +6534,87 @@ async fn compact_push_follows_tx_relay() {
     assert!(!bo_mp.relay_enabled());
 }
 
+/// The compact announce goes out before connect. A high-bandwidth peer that
+/// answers at once still gets the missing transaction. A peer that did not
+/// ask for high-bandwidth is not offered the block.
+#[test]
+fn hb_compact_announce_serves_the_missing_tx() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-serves");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    mp.set_relay_enabled(true);
+    let tip = hub.tip_hash().unwrap();
+    let extra = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let block = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![extra.clone()],
+    );
+    let hash = block.block_hash();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18540, 61, false);
+    let target = live_peer(&peers, 18541, 62, false);
+    target.set_hb_from(true);
+    target.note_best_known(tip);
+    let quiet = live_peer(&peers, 18542, 63, false);
+    quiet.note_best_known(tip);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let (quiet_tx, mut quiet_rx) = mpsc::unbounded_channel();
+    quiet.attach_out(quiet_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "the high-bandwidth peer is announced the compact block"
+    );
+    assert!(
+        quiet_rx.try_recv().is_err(),
+        "a peer that did not ask for high-bandwidth is not announced this block"
+    );
+    assert!(!hub.has_block(&hash), "the announce races the body write");
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![1],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("the missing transaction is served before the body is connected");
+    };
+    assert_eq!(bt.transactions.len(), 1);
+    assert_eq!(bt.transactions[0].compute_txid(), extra.compute_txid());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One offered high-bandwidth peer builds the prefill and short ids off the
 /// worker. `assert_not_reactor` panics if that build stays on `tokio-rt-worker`.
 #[test]
