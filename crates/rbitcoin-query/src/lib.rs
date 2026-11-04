@@ -1433,10 +1433,10 @@ impl Query {
         }
     }
 
-    /// Electrum/Esplora scripthash reads: operator `--sh-index` or a leftover
-    /// watermark from a previous run. Never-indexed + flag off is fail-closed.
+    /// Electrum/Esplora scripthash reads follow `--sh-index`.
+    /// A leftover watermark from a previous run does not turn them on.
     pub fn sh_history_available(&self) -> bool {
-        self.sh_index_enabled() || self.sh_indexed_through_height().is_some()
+        self.sh_index_enabled()
     }
 
     /// Advance SH watermark only after Class C tip commit.
