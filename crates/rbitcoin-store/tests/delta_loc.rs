@@ -154,6 +154,61 @@ fn delta_loc_truncate_across_window_reopens_at_the_short_prefix() {
     );
 }
 
+/// The loc header names 7 creates inside one window. Overflow rows at 9 and
+/// 10 are still in the file. Open drops them, and the next overflow create
+/// appends.
+#[test]
+fn delta_loc_short_prefix_inside_a_window_drops_later_ovf_rows() {
+    let dir = TempDir::labeled("delta-ovf-inside-window").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let fat = 65536 * IDX_STRIDE;
+    let mut starts = Vec::with_capacity(10);
+    let mut lens = Vec::with_capacity(10);
+    let mut cursor = FILE_HEADER_LEN as u64;
+    for i in 0..10 {
+        let len = if i == 8 || i == 9 { fat } else { 8 };
+        starts.push(cursor);
+        lens.push(len);
+        cursor = cursor.saturating_add(len);
+    }
+    let _ = cursor;
+    loc.append(&starts, &lens).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let short = FILE_HEADER_LEN as u64 + 7 * 2;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("seqsigwit.loc"))
+        .unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&short.to_le_bytes()).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("short prefix opens");
+    assert_eq!(loc.count(), 7);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= 7),
+        "overflow row past the prefix: {rows:?}"
+    );
+    let next = FILE_HEADER_LEN as u64 + 7 * 8;
+    loc.append(&[next], &[fat])
+        .expect("next overflow create appends");
+    assert_eq!(loc.count(), 8);
+    assert_eq!(loc.range_batch(&[Fk(8)]).unwrap()[0], Some((next, fat)));
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(rows.len(), 1, "later overflow rows stayed: {rows:?}");
+    assert_eq!(rows[0].0, 8);
+}
+
 #[test]
 fn delta_loc_append_and_batch_order() {
     let dir = TempDir::labeled("delta-loc").unwrap();

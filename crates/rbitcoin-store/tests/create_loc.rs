@@ -36,6 +36,13 @@ fn ovf_data_len(dir: &Path) -> u64 {
     logical - FILE_HEADER_LEN as u64
 }
 
+fn write_loc_hwm(path: &Path, logical: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&logical.to_le_bytes()).unwrap();
+}
+
 fn write_legacy_create_ovf_v22(dir: &Path, rows: &[(u64, u16, u16)]) {
     use rbitcoin_primitives::{TableKind, STORE_MAGIC};
     let mut payload = Vec::new();
@@ -158,15 +165,10 @@ fn create_loc_truncate_across_window_reopens_at_the_short_prefix() {
     loc.append(&chain(&n_out, &vec![8u64; 1025])).unwrap();
     let path = dir.path().to_path_buf();
     drop(loc);
-    let short = FILE_HEADER_LEN as u64 + 1023 * SLOT;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path.join("create.loc"))
-        .unwrap();
-    use std::io::{Seek, SeekFrom, Write};
-    f.seek(SeekFrom::Start(8)).unwrap();
-    f.write_all(&short.to_le_bytes()).unwrap();
-    drop(f);
+    write_loc_hwm(
+        &path.join("create.loc"),
+        FILE_HEADER_LEN as u64 + 1023 * SLOT,
+    );
     let loc = CreateLoc::open(&path).expect("short prefix opens");
     assert_eq!(loc.count(), 1023);
     let rows = loc
@@ -178,6 +180,39 @@ fn create_loc_truncate_across_window_reopens_at_the_short_prefix() {
         rows.iter().all(|row| row.0 <= loc.count()),
         "overflow row past the prefix: {rows:?}"
     );
+}
+
+/// The loc header names 7 creates inside one window, so the checkpoint did
+/// not change. Overflow rows at 9 and 10 are still in the file. Open drops
+/// them, and the next overflow create appends.
+#[test]
+fn create_loc_short_prefix_inside_a_window_drops_later_ovf_rows() {
+    let dir = TempDir::labeled("create-loc-ovf-inside-window").unwrap();
+    let loc = CreateLoc::create(dir.path()).unwrap();
+    let mut n_out = vec![1u32; 10];
+    n_out[8] = 256;
+    n_out[9] = 256;
+    loc.append(&chain(&n_out, &[8u64; 10])).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    write_loc_hwm(&path.join("create.loc"), FILE_HEADER_LEN as u64 + 7 * SLOT);
+    let loc = CreateLoc::open(&path).expect("short prefix inside a window opens");
+    assert_eq!(loc.count(), 7);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= 7),
+        "overflow row past the prefix: {rows:?}"
+    );
+    let tx = FILE_HEADER_LEN as u64 + 7 * 8;
+    let sp = FILE_HEADER_LEN as u64 + 7 * IDX_STRIDE;
+    loc.append(&[rec(tx, 8, sp, 256)])
+        .expect("next overflow create appends");
+    assert_eq!(loc.count(), 8);
+    assert_eq!(loc.range_batch(&[Fk(8)]).unwrap()[0].unwrap().n_out, 256);
 }
 
 /// The window pread compares the end `plan_range_batch` paired with
