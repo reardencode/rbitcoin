@@ -71,7 +71,7 @@ fn tapscript_checksig_rejects_a_signature_that_is_not_64_or_65_bytes() {
         Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
     );
     let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
-    assert!(format!("{err}").contains("CHECKSIG"), "{err}");
+    assert!(format!("{err}").contains("SCHNORR_SIG_SIZE"), "{err}");
 }
 
 #[test]
