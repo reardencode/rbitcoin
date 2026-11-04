@@ -4677,13 +4677,14 @@ pub fn getblocktxn_reply(
             None => return Ok(Some(GetBlockTxnServe::BadIndex)),
         }
     }
+    // Confirmed height only. A staged body is not on the chain yet, and
+    // height 0 is genesis, so a missing height must not take this branch.
     let block_h = query
         .height_of_hash(&hash.to_byte_array())
         .ok()
         .flatten()
-        .map(|h| h.0)
-        .unwrap_or(0);
-    if tip_h.saturating_sub(block_h) > MAX_GETBLOCKTXN_DEPTH {
+        .map(|h| h.0);
+    if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_GETBLOCKTXN_DEPTH) {
         return Ok(Some(GetBlockTxnServe::Block(block)));
     }
     Ok(Some(GetBlockTxnServe::Txns(BlockTransactions {

@@ -6541,6 +6541,29 @@ async fn compact_push_follows_tx_relay() {
 fn hb_compact_announce_serves_the_missing_tx() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-serves");
     hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    let tip_h = hub.tip_height().unwrap();
+    assert!(
+        tip_h > MAX_GETBLOCKTXN_DEPTH,
+        "the getblocktxn depth fallback is in range"
+    );
+    let deep = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: genesis,
+            indexes: vec![0],
+        },
+        tip_h,
+    )
+    .expect("deep getblocktxn");
+    assert!(
+        matches!(deep, Some(GetBlockTxnServe::Block(_))),
+        "a connected block older than the depth is the full block"
+    );
     hub.set_prefill_compact(true);
     let mp = rbitcoin_net::tx_relay::MempoolHub::open(
         dir.path().join("mp"),
@@ -6628,6 +6651,10 @@ fn hb_compact_announce_serves_the_missing_tx() {
 fn hb_announce_stays_servable_when_a_sibling_wins() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-weaker");
     hub.ensure_genesis().unwrap();
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    assert!(hub.tip_height().unwrap() > MAX_GETBLOCKTXN_DEPTH);
     hub.set_prefill_compact(true);
     let mp = rbitcoin_net::tx_relay::MempoolHub::open(
         dir.path().join("mp"),
