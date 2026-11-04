@@ -609,7 +609,7 @@ pub fn eval_script(
                         if executing {
                             let v = pop(stack)?;
                             if minimal_if && !is_minimal_if_arg(&v) {
-                                return Err(ConsensusError::Script("MINIMALIF".into()));
+                                return Err(minimal_if_error(ctx));
                             }
                             cond = bitcoin::script::read_scriptbool(&v);
                         }
@@ -621,7 +621,7 @@ pub fn eval_script(
                         if executing {
                             let v = pop(stack)?;
                             if minimal_if && !is_minimal_if_arg(&v) {
-                                return Err(ConsensusError::Script("MINIMALIF".into()));
+                                return Err(minimal_if_error(ctx));
                             }
                             cond = !bitcoin::script::read_scriptbool(&v);
                         }
@@ -1546,14 +1546,16 @@ pub fn checksig_schnorr(
         (sig, bitcoin::sighash::TapSighashType::Default)
     } else if sig.len() == 65 {
         // BIP342: sighash byte must not be 0x00.
+        // Core CheckSchnorrSignature: 0x00 and an unknown type are hashtype
+        // failures, not a false CHECKSIG result.
         if sig[64] == 0x00 {
-            return Ok(false);
+            return Err(ConsensusError::Script("SCHNORR_SIG_HASHTYPE".into()));
         }
         let ty = bitcoin::sighash::TapSighashType::from_consensus_u8(sig[64])
-            .map_err(|_| ConsensusError::Script("tapscript sighash".into()))?;
+            .map_err(|_| ConsensusError::Script("SCHNORR_SIG_HASHTYPE".into()))?;
         (&sig[..64], ty)
     } else {
-        return Ok(false);
+        return Err(ConsensusError::Script("SCHNORR_SIG_SIZE".into()));
     };
     let xonly = bitcoin::key::XOnlyPublicKey::from_slice(pubkey)
         .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
@@ -1641,6 +1643,16 @@ pub fn decode_i64(
 #[doc(hidden)]
 pub fn is_minimal_if_arg(v: &[u8]) -> bool {
     v.is_empty() || v == [0x01]
+}
+
+/// Tapscript minimal-if is consensus. Witness v0 minimal-if is the policy flag.
+fn minimal_if_error(ctx: &EvalContext<'_>) -> ConsensusError {
+    let token = if ctx.sig_version == SigVersion::TapScript {
+        "TAPSCRIPT_MINIMALIF"
+    } else {
+        "MINIMALIF"
+    };
+    ConsensusError::Script(token.into())
 }
 
 #[doc(hidden)]

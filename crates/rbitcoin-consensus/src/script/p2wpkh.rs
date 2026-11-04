@@ -105,7 +105,14 @@ pub fn verify_interpreted(
 ) -> Result<(), ConsensusError> {
     let witness = &tx.input[input_index.get()].witness;
     if witness.len() != 2 {
-        return Err(ConsensusError::Script("p2wpkh witness len".into()));
+        // Core: an empty witness is WITNESS_PROGRAM_WITNESS_EMPTY. Any other
+        // count is WITNESS_PROGRAM_MISMATCH. The typed path keeps its own string.
+        let token = if witness.is_empty() {
+            "WITNESS_PROGRAM_WITNESS_EMPTY"
+        } else {
+            "WITNESS_PROGRAM_MISMATCH"
+        };
+        return Err(ConsensusError::Script(token.into()));
     }
     let mut script_code = Vec::with_capacity(25);
     script_code.extend_from_slice(&rbitcoin_primitives::P2PKH_PREFIX);

@@ -117,11 +117,11 @@ pub fn consensus_ordinal(message: &str) -> Option<i32> {
     let token = message.split(" txid=").next().unwrap_or(message);
     let fail = match token {
         "EVAL_FALSE" | "script false" => ScriptFail::EvalFalse,
-        "OP_RETURN" => ScriptFail::OpReturn,
-        "scriptnum" => ScriptFail::ScriptNum,
-        "SCRIPT_SIZE" => ScriptFail::ScriptSize,
+        "OP_RETURN" | "unknown opcode 0x6a" => ScriptFail::OpReturn,
+        "scriptnum" | "SCRIPTNUM" | "scriptnum overflow" => ScriptFail::ScriptNum,
+        "SCRIPT_SIZE" | "script too large" => ScriptFail::ScriptSize,
         "PUSH_SIZE" => ScriptFail::PushSize,
-        "OP_COUNT" => ScriptFail::OpCount,
+        "OP_COUNT" | "op count" => ScriptFail::OpCount,
         "stack size" => ScriptFail::StackSize,
         "SIG_COUNT" => ScriptFail::SigCount,
         "PUBKEY_COUNT" => ScriptFail::PubkeyCount,
@@ -142,13 +142,17 @@ pub fn consensus_ordinal(message: &str) -> Option<i32> {
         "SIG_DER" => ScriptFail::SigDer,
         "NULLDUMMY" => ScriptFail::SigNullDummy,
         "WITNESS_PROGRAM_WRONG_LENGTH" => ScriptFail::WitnessProgramWrongLength,
-        "WITNESS_PROGRAM_WITNESS_EMPTY" => ScriptFail::WitnessProgramWitnessEmpty,
+        "WITNESS_PROGRAM_WITNESS_EMPTY" | "p2tr empty witness" => {
+            ScriptFail::WitnessProgramWitnessEmpty
+        }
         "WITNESS_PROGRAM_MISMATCH" => ScriptFail::WitnessProgramMismatch,
         "WITNESS_MALLEATED" => ScriptFail::WitnessMalleated,
         "WITNESS_MALLEATED_P2SH" => ScriptFail::WitnessMalleatedP2sh,
         "WITNESS_UNEXPECTED" => ScriptFail::WitnessUnexpected,
-        "SCHNORR_SIG_SIZE" => ScriptFail::SchnorrSigSize,
-        "SCHNORR_SIG_HASHTYPE" | "tapscript sighash" => ScriptFail::SchnorrSigHashType,
+        "SCHNORR_SIG_SIZE" | "p2tr sig len" => ScriptFail::SchnorrSigSize,
+        "SCHNORR_SIG_HASHTYPE" | "tapscript sighash" | "p2tr sighash type" => {
+            ScriptFail::SchnorrSigHashType
+        }
         "SCHNORR_SIG" | "p2tr schnorr" | "tapscript CHECKSIG failed" => ScriptFail::SchnorrSig,
         "TAPROOT_WRONG_CONTROL_SIZE" => ScriptFail::TaprootWrongControlSize,
         "TAPSCRIPT_VALIDATION_WEIGHT" | "tapscript validation weight" => {

@@ -172,11 +172,23 @@ fn standard_spends_accept_on_both_paths_and_bad_p2wpkh_splits() {
 
     let (good_pkh, prev_pkh) = p2pkh_tx(&who, &who.sk);
     assert!(spend(vec![prev_pkh.clone()], good_pkh.clone(), false).is_ok());
-    assert!(spend(vec![prev_pkh], good_pkh, true).is_ok());
+    assert!(spend(vec![prev_pkh.clone()], good_pkh, true).is_ok());
+    let (bad_pkh, _) = p2pkh_tx(&who, &other);
+    let typed = err_text(spend(vec![prev_pkh.clone()], bad_pkh.clone(), false));
+    let interpreted = err_text(spend(vec![prev_pkh], bad_pkh, true));
+    assert!(typed.contains("p2pkh ecdsa"), "{typed}");
+    assert!(interpreted.contains("script false"), "{interpreted}");
+    assert!(!interpreted.contains("p2pkh ecdsa"), "{interpreted}");
 
     let (good_nested, prev_nested) = nested_tx(&who, &who.sk);
     assert!(spend(vec![prev_nested.clone()], good_nested.clone(), false).is_ok());
-    assert!(spend(vec![prev_nested], good_nested, true).is_ok());
+    assert!(spend(vec![prev_nested.clone()], good_nested, true).is_ok());
+    let (bad_nested, _) = nested_tx(&who, &other);
+    let typed = err_text(spend(vec![prev_nested.clone()], bad_nested.clone(), false));
+    let interpreted = err_text(spend(vec![prev_nested], bad_nested, true));
+    assert!(typed.contains("p2wpkh ecdsa"), "{typed}");
+    assert!(interpreted.contains("script false"), "{interpreted}");
+    assert!(!interpreted.contains("p2wpkh ecdsa"), "{interpreted}");
 }
 
 #[test]

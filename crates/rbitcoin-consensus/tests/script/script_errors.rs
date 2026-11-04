@@ -78,6 +78,10 @@ fn short_key_path_witness_is_a_script_error() {
     let witness = Witness::from_slice(&[&[0u8; 10][..]]);
     let got = token(verify_job_all_inputs(&job(spk, ScriptBuf::new(), witness)));
     assert_eq!(got, "p2tr sig len");
+    assert_eq!(
+        consensus_ordinal(&got),
+        Some(ScriptFail::SchnorrSigSize.ordinal())
+    );
 }
 
 #[test]
@@ -119,10 +123,10 @@ fn short_tapscript_schnorr_is_a_script_error() {
         ScriptBuf::new(),
         witness,
     )));
-    assert_eq!(got, "tapscript CHECKSIG failed");
+    assert_eq!(got, "SCHNORR_SIG_SIZE");
     assert_eq!(
         consensus_ordinal(&got),
-        Some(ScriptFail::SchnorrSig.ordinal())
+        Some(ScriptFail::SchnorrSigSize.ordinal())
     );
 
     let zeros = [0u8; 64];
@@ -138,6 +142,48 @@ fn short_tapscript_schnorr_is_a_script_error() {
         witness,
     )));
     assert_eq!(got, "tapscript CHECKSIG failed");
+    assert_eq!(
+        consensus_ordinal(&got),
+        Some(ScriptFail::SchnorrSig.ordinal())
+    );
+}
+
+#[test]
+fn scriptnum_overflow_op_return_and_empty_taproot_keep_core_ordinals() {
+    let overflow = ScriptBuf::from_bytes(vec![0x05, 0xff, 0xff, 0xff, 0xff, 0xff, 0x8b]);
+    let got = token(verify_job_all_inputs(&job(
+        overflow,
+        ScriptBuf::new(),
+        Witness::new(),
+    )));
+    assert_eq!(got, "scriptnum overflow");
+    assert_eq!(
+        consensus_ordinal(&got),
+        Some(ScriptFail::ScriptNum.ordinal())
+    );
+
+    let op_return = ScriptBuf::from_bytes(vec![0x6a]);
+    let got = token(verify_job_all_inputs(&job(
+        op_return,
+        ScriptBuf::new(),
+        Witness::new(),
+    )));
+    assert_eq!(got, "unknown opcode 0x6a");
+    assert_eq!(
+        consensus_ordinal(&got),
+        Some(ScriptFail::OpReturn.ordinal())
+    );
+
+    let got = token(verify_job_all_inputs(&job(
+        p2tr_program(&[0x11; 32]),
+        ScriptBuf::new(),
+        Witness::new(),
+    )));
+    assert_eq!(got, "p2tr empty witness");
+    assert_eq!(
+        consensus_ordinal(&got),
+        Some(ScriptFail::WitnessProgramWitnessEmpty.ordinal())
+    );
 }
 
 #[test]
@@ -289,6 +335,11 @@ fn script_fail_ordinals_match_core_v32() {
     assert_eq!(consensus_ordinal("p2tr schnorr"), Some(47));
     assert_eq!(consensus_ordinal("stack empty"), Some(18));
     assert_eq!(consensus_ordinal("CLTV"), Some(22));
+    assert_eq!(consensus_ordinal("scriptnum overflow"), Some(4));
+    assert_eq!(consensus_ordinal("SCRIPTNUM"), Some(4));
+    assert_eq!(consensus_ordinal("p2tr sig len"), Some(45));
+    assert_eq!(consensus_ordinal("p2tr sighash type"), Some(46));
+    assert_eq!(consensus_ordinal("SIG_HIGH_S"), None);
 }
 
 #[test]
