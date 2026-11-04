@@ -894,6 +894,75 @@ fn sh_writebehind_recover_requeues_unapplied_heights() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A zero include mark proves nothing. Recovery re-queues from the start,
+/// and applying that queue is what makes the index tip-ready. A mark written
+/// with the head still names the height it covers.
+#[test]
+fn zero_include_mark_requeues_from_the_start() {
+    let (dir, q) = temp_query("sh-zero-include");
+    let (mut h0, t0) = coinbase_block(0, Fk::NULL, None);
+    h0.merkle_root = t0.tx.txid;
+    h0.hash = rbitcoin_store::block_header_hash(
+        h0.version,
+        &[0u8; 32],
+        &h0.merkle_root,
+        h0.timestamp,
+        h0.bits,
+        h0.nonce,
+    );
+    let hash0 = h0.hash;
+    q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    q.finalize_sh_runs().unwrap();
+    assert!(q.store().scripthash.has_durable_index());
+    assert!(
+        q.store().scripthash.include_hwm() > 0,
+        "creating the head persists the include mark"
+    );
+    assert_eq!(
+        q.recover_sh_indexed_through().unwrap(),
+        Some(0),
+        "a mark that covers the head is that height, not a rebuild"
+    );
+
+    std::fs::remove_file(dir.path().join(rbitcoin_store::INCLUDE_HWM_NAME)).unwrap();
+    assert_eq!(q.store().scripthash.include_hwm(), 0);
+    let prev_fk = q.tip_header_fk().unwrap().unwrap();
+    let (mut h1, t1) = coinbase_block(1, prev_fk, Some(hash0));
+    h1.merkle_root = t1.tx.txid;
+    rehash_header(&mut h1, &hash0);
+    q.commit_class_a_only(&h1, &[t1]).unwrap();
+    q.confirm_block(Height(1), &h1.hash).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    drop(q);
+
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert_ne!(
+        q.sh_indexed_through_height(),
+        Some(1),
+        "a zero include mark must not report the tip as indexed"
+    );
+    assert!(
+        !q.sh_is_tip_ready(),
+        "wallet servers stay down while the gap is not durable"
+    );
+    let sh = script_hash(&[0x51]);
+    assert_eq!(
+        q.scripthash_history(&sh).unwrap().len(),
+        2,
+        "recovery re-queues from the start, so the unapplied height is visible"
+    );
+    q.apply_sh_pending().unwrap();
+    assert_eq!(q.sh_indexed_through_height(), Some(1));
+    assert!(
+        q.sh_is_tip_ready(),
+        "applying the recovered queue makes the index tip-ready without another block"
+    );
+    assert!(q.store().scripthash.include_hwm() > 0);
+    assert_eq!(q.scripthash_history(&sh).unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recover_sh_writebehind_fails_open_on_interior_missing_header_txs() {
     let (dir, q) = temp_query("sh-wb-recover-corrupt");
