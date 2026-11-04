@@ -7279,6 +7279,58 @@ fn hb_announce_ages_after_its_parent_is_disconnected() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The confirmed ancestor of this side body is past the walk cap, and the
+/// body's own height is the tip. Height 0 would already be the full block.
+#[test]
+fn hb_announce_long_side_chain_is_not_height_zero() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-long-side");
+    hub.ensure_genesis().unwrap();
+    let _mp = hb_relay_ready(&hub, dir.path());
+    let genesis = hub.block_at_height(0).unwrap().expect("genesis");
+    let base = genesis.header.time;
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH + 1 {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    let tip = hub.tip_height().unwrap();
+    assert_eq!(tip, MAX_GETBLOCKTXN_DEPTH + 2);
+    let mut prev = genesis.block_hash();
+    let mut side_tip = None;
+    let spk = ScriptBuf::from_bytes(vec![0x53]);
+    for n in 1..=MAX_GETBLOCKTXN_DEPTH + 2 {
+        let block = rbitcoin_consensus::mine_regtest_paying(
+            prev,
+            base.saturating_add(n * 600),
+            n,
+            spk.clone(),
+            vec![],
+        );
+        if n <= MAX_GETBLOCKTXN_DEPTH + 1 {
+            hub.ensure_header(&block.header).expect("side header");
+        }
+        prev = block.block_hash();
+        side_tip = Some(block);
+    }
+    let block = side_tip.expect("side tip");
+    let hash = block.block_hash();
+    hub.cache.stage_servable(block);
+    assert!(!hub.has_block(&hash));
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        tip,
+    )
+    .unwrap();
+    assert!(
+        matches!(reply, Some(GetBlockTxnServe::Txns(_))),
+        "a side body past the walk cap is not height 0"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A side body a month behind the best header is not served on any path.
 #[test]
 fn hb_announce_month_old_side_body_is_not_served() {

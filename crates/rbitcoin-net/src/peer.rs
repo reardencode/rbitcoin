@@ -4590,51 +4590,48 @@ pub async fn serve_getdata_wtx(
 #[doc(hidden)]
 pub const MAX_GETBLOCKTXN_DEPTH: u32 = 10;
 
-/// Confirmed-chain height. `None` is not genesis: height 0 is a real block,
-/// and a staged body has no row yet. A store error is also `None`, so a
-/// deep block is served as transactions until the height read works.
-fn confirmed_height(query: &Query, hash: &BlockHash) -> Option<u32> {
-    query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|h| h.0)
-}
-
 /// Best-chain height, or the same count walked back to a confirmed
 /// ancestor. A tip child is `tip + 1`, so it stays inside the compact
 /// window. A loser still ages out after its parent leaves the best chain.
+///
+/// The walk is [`crate::chain::ancestor_walk`]: at most
+/// [`MAX_GETBLOCKTXN_DEPTH`] headers, and `None` when that cap is hit.
+/// `None` is an unknown height, not genesis. Height 0 would already be
+/// the full block once the tip is past the window. A height-index error
+/// is the same unknown height: the body stays the transactions.
 fn served_block_height(query: &Query, block: &Block) -> Option<u32> {
-    if let Some(h) = confirmed_height(query, &block.block_hash()) {
-        return Some(h);
+    match query.height_of_hash(&block.block_hash().to_byte_array()) {
+        Ok(Some(h)) => return Some(h.0),
+        Err(_) => return None,
+        Ok(None) => {}
     }
-    let mut prev = block.header.prev_blockhash;
-    let mut steps = 1u32;
-    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
-        if prev.to_byte_array() == [0u8; 32] {
-            return Some(steps.saturating_sub(1));
-        }
-        if let Some(h) = confirmed_height(query, &prev) {
-            return Some(h.saturating_add(steps));
-        }
-        let Ok(Some((_, rec))) = query.get_header_by_hash(&prev.to_byte_array()) else {
-            return None;
-        };
-        let Ok(hdr) = query.wire_header_from_record(&rec) else {
-            return None;
-        };
-        prev = hdr.prev_blockhash;
-        steps = steps.saturating_add(1);
-    }
-    // Past the window above an ancestor that is still unconfirmed.
-    Some(0)
+    let hash = block.block_hash();
+    crate::chain::ancestor_walk(
+        &hash,
+        MAX_GETBLOCKTXN_DEPTH,
+        |cur| {
+            if cur == &hash {
+                return Some(block.header);
+            }
+            let Ok(Some((_, rec))) = query.get_header_by_hash(&cur.to_byte_array()) else {
+                return None;
+            };
+            query.wire_header_from_record(&rec).ok()
+        },
+        |prev| match query.height_of_hash(&prev.to_byte_array()) {
+            Ok(Some(h)) => Some(h.0),
+            Ok(None) | Err(_) => None,
+        },
+    )
 }
 
 /// Active-chain blocks are always served. A side body is silent once the
 /// best header is a month ahead of it, same as full-block `getdata`.
+/// A failed height read is not proof the block is off the active chain.
 fn within_relay_window(query: &Query, block: &Block) -> bool {
-    if confirmed_height(query, &block.block_hash()).is_some() {
-        return true;
+    match query.height_of_hash(&block.block_hash().to_byte_array()) {
+        Ok(Some(_)) | Err(_) => return true,
+        Ok(None) => {}
     }
     let Some(tip_h) = query.tip_height() else {
         return false;
