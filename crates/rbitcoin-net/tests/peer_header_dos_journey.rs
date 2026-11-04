@@ -1308,12 +1308,17 @@ fn self_announce_clearnet(peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>) 
 fn self_announce_overlay(peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>) {
     use bitcoin::p2p::address::AddrV2;
 
-    let onion_peer = live_peer(peers, 18481, 14, false);
-    onion_peer.set_wants_addrv2();
     let onion: rbitcoin_net::NetAddr =
         "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:18444"
             .parse()
             .unwrap();
+    let onion_peer = overlay_peer(
+        peers,
+        "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion:8333"
+            .parse()
+            .unwrap(),
+        rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+    );
     peers.set_p2p_onion(onion.host_str(), onion.port());
     peers.set_clearnet_listen(false);
     peers.set_listen_port(18445);
@@ -1342,8 +1347,14 @@ fn self_announce_overlay(peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>) {
         port: 0,
     };
     peers.set_p2p_i2p(i2p);
-    let i2p_peer = live_peer(peers, 18482, 15, false);
-    i2p_peer.set_wants_addrv2();
+    let i2p_peer = overlay_peer(
+        peers,
+        rbitcoin_net::NetAddr::I2p {
+            dest: [0x22; 32],
+            port: 0,
+        },
+        rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+    );
     match i2p_peer.take_self_announce_msg().expect("i2p announce") {
         NetworkMessage::AddrV2(v) => {
             assert!(
@@ -1372,6 +1383,210 @@ fn self_announce_overlay(peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>) {
         v1.take_self_announce_msg().is_none(),
         "v1 ADDR cannot carry an I2P destination"
     );
+}
+
+/// An addrv2 session to `net`, as the dialer or the listener records it.
+fn overlay_peer(
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    net: rbitcoin_net::NetAddr,
+    conn: rbitcoin_net::peers::PeerConnType,
+) -> std::sync::Arc<rbitcoin_net::peers::LivePeer> {
+    let addr = match net {
+        rbitcoin_net::NetAddr::Ip(sock) => sock,
+        other => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), other.port()),
+    };
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 0,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let inbound = conn == rbitcoin_net::peers::PeerConnType::Inbound;
+    let peer = peers.register_net(addr, net, addr, &ver, inbound, conn);
+    peer.set_wants_addrv2();
+    peer
+}
+
+fn self_announce_nets(peer: &rbitcoin_net::peers::LivePeer) -> Vec<&'static str> {
+    use bitcoin::p2p::address::AddrV2;
+    let Some(msg) = peer.take_self_announce_msg() else {
+        return Vec::new();
+    };
+    let NetworkMessage::AddrV2(v) = msg else {
+        panic!("expected AddrV2, got {msg:?}");
+    };
+    v.iter()
+        .map(|a| match a.addr {
+            AddrV2::Ipv4(_) => "ipv4",
+            AddrV2::TorV3(_) => "onion",
+            AddrV2::I2p(_) => "i2p",
+            ref other => panic!("unexpected self-announce {other:?}"),
+        })
+        .collect()
+}
+
+/// Onion, I2P and `--external-ip` all set. Each link announces only the
+/// address of its own network, so no peer can tie two of them together.
+#[test]
+fn self_announce_stays_on_the_link_network() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let onion: rbitcoin_net::NetAddr =
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap();
+    let i2p = rbitcoin_net::NetAddr::I2p {
+        dest: [0x11; 32],
+        port: 0,
+    };
+    let external = IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42));
+    let clearnet_peer = rbitcoin_net::NetAddr::Ip(SocketAddr::from(([93, 184, 216, 34], 8333)));
+    let loopback_inbound = rbitcoin_net::NetAddr::Ip(SocketAddr::from(([127, 0, 0, 1], 51000)));
+    let hub_with = |with_onion: bool, with_i2p: bool| {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        peers.set_discover(true);
+        peers.set_clearnet_listen(true);
+        peers.set_listen_port(8333);
+        peers.set_external_ips(vec![external]);
+        if with_onion {
+            peers.set_p2p_onion(onion.host_str(), onion.port());
+        }
+        if with_i2p {
+            peers.set_p2p_i2p(i2p);
+        }
+        peers
+    };
+
+    let out = rbitcoin_net::peers::PeerConnType::OutboundFullRelay;
+    let inbound = rbitcoin_net::peers::PeerConnType::Inbound;
+    let peers = hub_with(true, true);
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&peers, clearnet_peer, out)),
+        ["ipv4"],
+        "a clearnet peer gets neither the onion nor the i2p address"
+    );
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&peers, clearnet_peer, inbound)),
+        ["ipv4"]
+    );
+    let other_onion: rbitcoin_net::NetAddr =
+        "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion:8333"
+            .parse()
+            .unwrap();
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&peers, other_onion, out)),
+        ["onion"],
+        "an onion peer gets the onion and not the clearnet IP"
+    );
+    let other_i2p = rbitcoin_net::NetAddr::I2p {
+        dest: [0x44; 32],
+        port: 0,
+    };
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&peers, other_i2p, out)),
+        ["i2p"]
+    );
+    assert!(
+        self_announce_nets(&overlay_peer(&peers, loopback_inbound, inbound)).is_empty(),
+        "loopback inbound could be Tor or I2P, so it gets nothing"
+    );
+
+    let tor_only = hub_with(true, false);
+    let tor_inbound = overlay_peer(&tor_only, loopback_inbound, inbound);
+    assert_eq!(
+        self_announce_nets(&tor_inbound),
+        ["onion"],
+        "inbound on the onion listener gets the onion and not the clearnet IP"
+    );
+    let v1_tor_inbound = live_peer(&tor_only, 51001, 41, true);
+    assert!(
+        v1_tor_inbound.take_self_announce_msg().is_none(),
+        "v1 ADDR on the onion listener must not carry the clearnet IP"
+    );
+
+    let proxied = hub_with(true, true);
+    proxied.set_proxies(rbitcoin_net::NetProxies {
+        dialer: rbitcoin_net::socks::Dialer::socks(SocketAddr::from(([127, 0, 0, 1], 9050)), true),
+        i2p_sam: None,
+    });
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&proxied, clearnet_peer, out)),
+        ["onion"],
+        "a clearnet peer dialled through the proxy gets the onion only"
+    );
+
+    let i2p_only = hub_with(false, true);
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&i2p_only, loopback_inbound, inbound)),
+        ["i2p"]
+    );
+    assert_eq!(
+        self_announce_nets(&overlay_peer(&i2p_only, clearnet_peer, out)),
+        ["ipv4"]
+    );
+}
+
+/// A peer gossips this node's own onion, I2P and external addresses back.
+/// The `getaddr` reply still leaves them out.
+#[test]
+fn getaddr_reply_omits_own_addresses() {
+    let onion: rbitcoin_net::NetAddr =
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap();
+    let i2p = rbitcoin_net::NetAddr::I2p {
+        dest: [0x11; 32],
+        port: 0,
+    };
+    let external = SocketAddr::from(([42, 42, 42, 42], 8333));
+    let other = SocketAddr::from(([93, 184, 216, 34], 8333));
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let mut book = AddrMan::new();
+    book.set_onion_reachable(true);
+    book.set_i2p_reachable(true);
+    peers.set_addrman(Arc::new(std::sync::Mutex::new(book)));
+    let gossip = |addr: AddrV2, port: u16| AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        addr,
+        port,
+    };
+    let rbitcoin_net::NetAddr::Onion { pk, .. } = onion else {
+        unreachable!()
+    };
+    peers.learn_addrv2(&[
+        gossip(AddrV2::TorV3(pk), 8333),
+        gossip(AddrV2::I2p([0x11; 32]), 0),
+        gossip(AddrV2::Ipv4(Ipv4Addr::new(42, 42, 42, 42)), 8333),
+        gossip(AddrV2::Ipv4(Ipv4Addr::new(93, 184, 216, 34)), 8333),
+    ]);
+    let early_bind = SocketAddr::from(([127, 0, 0, 1], 8333));
+    let cached = peers.addr_response_net(early_bind, true);
+    assert_eq!(cached.len(), 1, "{cached:?}");
+    assert_eq!(cached[0].1, onion, "this seed samples the onion");
+
+    peers.set_p2p_onion(onion.host_str(), onion.port());
+    peers.set_p2p_i2p(i2p);
+    peers.set_external_ips(vec![external.ip()]);
+    assert!(
+        peers.addr_response_net(early_bind, true).is_empty(),
+        "a reply cached before the onion was set still leaves it out"
+    );
+    let got: Vec<_> = peers
+        .addr_response_net(SocketAddr::from(([127, 0, 0, 1], 8335)), true)
+        .into_iter()
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(got, vec![rbitcoin_net::NetAddr::Ip(other)]);
+    let v1 = peers.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 8334)));
+    assert_eq!(v1.len(), 1, "{v1:?}");
+    assert_eq!(v1[0].1.socket_addr().unwrap(), other);
 }
 
 /// One peer. Verack order, unknown parents, header floods, and minchainwork
