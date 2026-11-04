@@ -237,6 +237,14 @@ pub fn v2_packet_too_large_log(n: usize) -> String {
     format!("p2p: V2 transport error: packet too large ({n} bytes)")
 }
 
+/// Ciphertext for the packet in progress. An IBD read moves the reader's
+/// fixed buffer here, so the payload arm has one slice.
+#[doc(hidden)]
+pub enum CipherBuf {
+    Owned(Vec<u8>),
+    Ibd(Box<[u8]>),
+}
+
 /// Cancellation-safe BIP324 application read (length prefix, then body).
 #[doc(hidden)]
 pub enum DecryptState {
@@ -245,8 +253,7 @@ pub enum DecryptState {
         bytes_read: usize,
     },
     ReadingPayload {
-        /// `None` reads into [`V2SessionReader`]'s IBD ciphertext scratch.
-        owned: Option<Vec<u8>>,
+        buf: CipherBuf,
         packet_len: usize,
         bytes_read: usize,
     },
@@ -268,7 +275,8 @@ pub struct V2SessionReader<R> {
     pub inbound_cipher: InboundCipher,
     pub reader: ProtocolSessionReader<R>,
     pub state: DecryptState,
-    /// Present only on an IBD block reader. Tip-follow leaves this empty.
+    /// Fixed IBD ciphertext. Empty on tip-follow, and while a packet body
+    /// is in progress (the buffer then lives on [`DecryptState`]).
     ibd_ciphertext: Option<Box<[u8]>>,
 }
 
@@ -328,14 +336,20 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
     where
         F: FnMut(usize),
     {
+        let Self {
+            inbound_cipher,
+            reader,
+            state,
+            ibd_ciphertext,
+        } = self;
         loop {
-            match &mut self.state {
+            match state {
                 DecryptState::ReadingLength {
                     length_bytes,
                     bytes_read,
                 } => {
                     while *bytes_read < length_bytes.len() {
-                        let n = self.reader.read(&mut length_bytes[*bytes_read..]).await?;
+                        let n = reader.read(&mut length_bytes[*bytes_read..]).await?;
                         if n == 0 {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
@@ -345,44 +359,46 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
                         }
                         *bytes_read += n;
                     }
-                    let rest = self.inbound_cipher.decrypt_packet_len(*length_bytes);
+                    let rest = inbound_cipher.decrypt_packet_len(*length_bytes);
                     let contents_len = rest.saturating_sub(V2_PACKET_REST_OVERHEAD);
                     if contents_len > MAX_V2_CONTENTS_LEN {
                         rbitcoin_log::info!("{}", v2_packet_too_large_log(contents_len));
-                        self.state = DecryptState::reading_length();
+                        *state = DecryptState::reading_length();
                         return Err(NetError::MessageTooLarge(contents_len));
                     }
-                    let owned = if self.ibd_ciphertext.is_some() {
-                        None
-                    } else {
-                        Some(vec![0u8; rest])
+                    let buf = match ibd_ciphertext.take() {
+                        Some(scratch) => CipherBuf::Ibd(scratch),
+                        None => CipherBuf::Owned(vec![0u8; rest]),
                     };
-                    self.state = DecryptState::ReadingPayload {
-                        owned,
+                    *state = DecryptState::ReadingPayload {
+                        buf,
                         packet_len: rest,
                         bytes_read: 0,
                     };
                 }
                 DecryptState::ReadingPayload {
-                    owned,
+                    buf,
                     packet_len,
                     bytes_read,
                 } => {
                     let packet_len = *packet_len;
-                    if let Some(packet) = owned.as_mut() {
-                        fill_packet(&mut self.reader, packet, bytes_read, on_progress).await?;
-                        let decrypted = decrypt_packet(&mut self.inbound_cipher, packet)?;
-                        self.state = DecryptState::reading_length();
-                        return Ok(decrypted);
+                    let packet = match buf {
+                        CipherBuf::Owned(owned) => owned.as_mut_slice(),
+                        CipherBuf::Ibd(scratch) => &mut scratch[..packet_len],
+                    };
+                    fill_packet(reader, packet, bytes_read, on_progress).await?;
+                    let packet = match buf {
+                        CipherBuf::Owned(owned) => owned.as_slice(),
+                        CipherBuf::Ibd(scratch) => &scratch[..packet_len],
+                    };
+                    let decrypted = decrypt_packet(inbound_cipher, packet)?;
+                    if let DecryptState::ReadingPayload {
+                        buf: CipherBuf::Ibd(scratch),
+                        ..
+                    } = std::mem::replace(state, DecryptState::reading_length())
+                    {
+                        *ibd_ciphertext = Some(scratch);
                     }
-                    let scratch = self
-                        .ibd_ciphertext
-                        .as_mut()
-                        .ok_or(NetError::Protocol("ibd ciphertext buffer missing"))?;
-                    let packet = &mut scratch[..packet_len];
-                    fill_packet(&mut self.reader, packet, bytes_read, on_progress).await?;
-                    let decrypted = decrypt_packet(&mut self.inbound_cipher, packet)?;
-                    self.state = DecryptState::reading_length();
                     return Ok(decrypted);
                 }
             }
