@@ -6,4 +6,5 @@ Fixed
   disconnect that dies while shortening those files reopens at that prefix
   instead of refusing the datadir. Input edges for the kept creates stay
   put when that shorten is replayed. A body shorter than the prefix still
-  does not open. A body longer than it is cut back to the prefix.
+  does not open, including when the locator and the checkpoint already
+  agree. A body longer than it is cut back to the prefix.

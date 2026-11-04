@@ -147,16 +147,17 @@ impl Input {
             count: AtomicU64::new(full),
             body_end: AtomicU64::new(body_len),
         };
+        // Refuse a short body before any header write. A matching checkpoint
+        // still has to be checked: the body can move on its own.
+        let new_body = opened.body_end_if_durable(count)?;
         if count < full {
             opened.truncate_to_count(count)?;
         } else {
             let need = FILE_HEADER_LEN as u64 + n_win * OFF_SLOT;
             if opened.off.logical_len() > need {
-                // Same body rule as truncate: do not publish past the bytes
-                // already durable, and do not leave a tail past the prefix.
-                opened.fit_body_to_count(count)?;
                 opened.off.set_logical_len(need)?;
             }
+            opened.shrink_body_to(new_body)?;
         }
         Ok(opened)
     }
@@ -321,15 +322,16 @@ impl Input {
         if new_count == cur {
             return Ok(());
         }
-        // Absolute end of `new_count`. A body already at that prefix must not
-        // be shortened again, and a body short of it is not this prefix.
-        self.fit_body_to_count(new_count)?;
+        // Off and the locator land before the body. A kill before the body
+        // header still has a long body, which open cuts back. A body that is
+        // already short of this count is not durable.
+        let new_body = self.body_end_if_durable(new_count)?;
         let n_win = new_count / LOC_WINDOW;
-        // Checkpoint before the loc header, same crash window as create.loc.
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
         self.loc
             .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
+        self.shrink_body_to(new_body)?;
         {
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             cps.truncate(n_win as usize);
@@ -338,17 +340,18 @@ impl Input {
         Ok(())
     }
 
-    /// Publish `new_count`'s body end, or refuse when that end is not durable.
-    ///
-    /// Extending the header would treat spare bytes as inputs. A longer body
-    /// is the tail past this prefix.
-    fn fit_body_to_count(&self, new_count: u64) -> Result<(), StoreError> {
+    /// `new_count`'s body end when that many inputs are already in the body.
+    fn body_end_if_durable(&self, new_count: u64) -> Result<u64, StoreError> {
         let new_body = self.body_end_for_count(new_count)?;
-        let durable = self.body.logical_len();
-        if new_body > durable {
+        if new_body > self.body.logical_len() {
             return Err(StoreError::Corrupt("invariant: input.body truncate"));
         }
-        if new_body < durable {
+        Ok(new_body)
+    }
+
+    /// Cut a body that still holds inputs past `new_body`.
+    fn shrink_body_to(&self, new_body: u64) -> Result<(), StoreError> {
+        if new_body < self.body.logical_len() {
             self.body.set_logical_len(new_body)?;
         }
         self.body_end.store(new_body, Ordering::Release);
