@@ -136,6 +136,10 @@ static SHORT_PWRITE: std::sync::Mutex<Vec<IoHandle>> = std::sync::Mutex::new(Vec
 #[cfg(debug_assertions)]
 static FAIL_HWM: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(Vec::new());
 
+/// Next N `sync_data` calls on these read fds fail before the syscall.
+#[cfg(debug_assertions)]
+static FAIL_SYNC: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(Vec::new());
+
 #[cfg(debug_assertions)]
 fn disk_full_errno() -> i32 {
     #[cfg(unix)]
@@ -167,6 +171,7 @@ pub fn disarm_short_pwrite() {
         .unwrap_or_else(|e| e.into_inner())
         .clear();
     FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Drop one fd's arms. A process-wide clear races another test in this binary.
@@ -181,6 +186,53 @@ pub fn disarm_pwrite(handle: IoHandle) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|(h, _)| *h != handle);
+    FAIL_SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| *h != handle);
+}
+
+/// Fail the next `n` `sync_data` calls on `handle` before the syscall.
+///
+/// The spend-marker pin uses this so a skipped barrier still publishes the
+/// marker, and a barrier that runs does not.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_fail_sync(handle: IoHandle, n: u32) {
+    let mut slots = FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = slots.iter_mut().find(|(h, _)| *h == handle) {
+        slot.1 = n;
+    } else {
+        slots.push((handle, n));
+    }
+}
+
+/// Drop one fd's sync arm.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn disarm_sync(handle: IoHandle) {
+    FAIL_SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| *h != handle);
+}
+
+/// One armed `sync_data` on `handle` is consumed. Unarmed fds are untouched.
+#[cfg(debug_assertions)]
+pub(crate) fn take_fail_sync(handle: IoHandle) -> bool {
+    let mut slots = FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(i) = slots.iter().position(|(h, _)| *h == handle) else {
+        return false;
+    };
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+        return false;
+    }
+    slots[i].1 -= 1;
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+    }
+    true
 }
 
 /// Fail the next `n` eight-byte pwrites on `handle` without storing a byte.
