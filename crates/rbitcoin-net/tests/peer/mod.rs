@@ -6959,6 +6959,91 @@ fn hb_announce_stays_servable_when_the_block_is_too_new() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The parent was invalidated after the compact announce. `bad-prevblk` is
+/// not a mark on this hash, and the staged body still answers `getblocktxn`.
+#[test]
+fn hb_announce_stays_servable_when_the_parent_is_invalid() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-bad-prev");
+    hub.ensure_genesis().unwrap();
+    hub.accept_block(hb_tip_child(&hub)).unwrap();
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    mp.set_relay_enabled(true);
+    let tip = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hash = block.block_hash();
+    let coinbase = block.txdata[0].compute_txid();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18549, 70, false);
+    let target = live_peer(&peers, 18550, 71, false);
+    target.set_hb_from(true);
+    target.note_best_known(tip);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "the high-bandwidth peer is announced the compact block"
+    );
+    hub.invalidate_block(tip)
+        .expect("parent can be invalidated");
+    let still = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after the parent is invalidated");
+    assert!(
+        matches!(still, Some(GetBlockTxnServe::Txns(_))),
+        "invalidating the parent does not drop the announced body"
+    );
+    let err = rt
+        .block_on(accept_received_from_peer(&hub, block, Some(from.as_ref())))
+        .expect_err("the parent is invalid");
+    let msg = match &err {
+        rbitcoin_net::error::NetError::Consensus(m) => m.clone(),
+        other => panic!("expected bad-prevblk, got {other:?}"),
+    };
+    assert!(msg.contains("bad-prevblk"), "got {msg}");
+    assert!(
+        !hub.invalid_blocks().contains(&hash),
+        "bad-prevblk must not mark the announced hash"
+    );
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after bad-prevblk");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("bad-prevblk must not forget the announced body");
+    };
+    assert_eq!(bt.transactions[0].compute_txid(), coinbase);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One offered high-bandwidth peer builds the prefill and short ids off the
 /// worker. `assert_not_reactor` panics if that build stays on `tokio-rt-worker`.
 #[test]

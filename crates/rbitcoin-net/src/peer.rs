@@ -256,16 +256,24 @@ fn drop_servable_after_accept(
         Ok(AcceptOutcome::AlreadyHave) => true,
         Ok(AcceptOutcome::Accepted { .. }) => store_has_announced_body(hub, announced),
         Ok(AcceptOutcome::IgnoredWeaker) => false,
-        Err(e)
-            if net_error_needs_parent(e)
-                || matches!(e, NetError::Store(_))
-                || net_error_is_store_not_found(e)
-                || crate::chain::accept_err_is_temporary_time(e) =>
-        {
-            false
-        }
+        Err(e) if keep_staged_body_after_accept_err(hub, e) => false,
         Err(_) => true,
     }
+}
+
+/// Not a verdict on the staged bytes. `Mutated` stays dropped: `servable`
+/// is read before the store, so those transactions would answer every later
+/// `getdata` for this hash.
+fn keep_staged_body_after_accept_err(hub: &ChainHub, e: &NetError) -> bool {
+    if e.is_mutated() {
+        return false;
+    }
+    net_error_needs_parent(e)
+        || matches!(e, NetError::Store(_) | NetError::Cancelled)
+        || net_error_is_store_not_found(e)
+        || crate::chain::accept_err_is_temporary_time(e)
+        || matches!(e, NetError::Consensus(m) if m == "bad-prevblk")
+        || (hub.query.trust_peer() && crate::chain::accept_err_is_warn_and_apply(e))
 }
 
 fn store_has_announced_body(hub: &ChainHub, hash: &bitcoin::BlockHash) -> bool {
