@@ -233,7 +233,7 @@ pub async fn accept_received_from_peer(
             r
         })
     };
-    if !keep_servable_announce(&r) {
+    if drop_servable_after_accept(&r) {
         hub.cache.drop_servable(&announced);
     }
     if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
@@ -242,14 +242,21 @@ pub async fn accept_received_from_peer(
     r
 }
 
-/// The body stays servable when connect has not written it yet. A connected
-/// or rejected block is served from the store, or not at all.
-fn keep_servable_announce(r: &Result<AcceptOutcome, NetError>) -> bool {
+/// Drop the staged body only once the store can serve it, or the block was
+/// rejected. `UnknownParent` and a lost tip race come back as
+/// [`AcceptOutcome::IgnoredWeaker`], and the store still has no body.
+fn drop_servable_after_accept(r: &Result<AcceptOutcome, NetError>) -> bool {
     match r {
-        Err(e) if net_error_needs_parent(e) => true,
-        Err(NetError::Store(_)) => true,
-        Err(e) if net_error_is_store_not_found(e) => true,
-        _ => false,
+        Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => true,
+        Ok(AcceptOutcome::IgnoredWeaker) => false,
+        Err(e)
+            if net_error_needs_parent(e)
+                || matches!(e, NetError::Store(_))
+                || net_error_is_store_not_found(e) =>
+        {
+            false
+        }
+        Err(_) => true,
     }
 }
 
@@ -7361,7 +7368,7 @@ pub fn encode_served_witness_block(
 ) -> Result<Option<Vec<u8>>, NetError> {
     crate::reactor::assert_not_reactor("getdata reconstruct");
     let t0 = std::time::Instant::now();
-    if let Some(block) = cache.get_block(hash) {
+    if let Some(block) = cache.get_block(hash).or_else(|| cache.servable(hash)) {
         let tx_count = block.txdata.len() as u32;
         let encoded = crate::v2::encode_v2_contents(NetworkMessage::Block(block))?;
         let payload_len = encoded.len().saturating_sub(1);

@@ -6612,6 +6612,89 @@ fn hb_compact_announce_serves_the_missing_tx() {
     };
     assert_eq!(bt.transactions.len(), 1);
     assert_eq!(bt.transactions[0].compute_txid(), extra.compute_txid());
+    let encoded = encode_served_witness_block(&hub.cache, &hub.query, &hash)
+        .expect("getdata")
+        .expect("full-block getdata serves the announced body");
+    assert_eq!(encoded.first().copied(), Some(2), "v2 block short id");
+    let served: bitcoin::Block =
+        bitcoin::consensus::encode::deserialize(&encoded[1..]).expect("served block");
+    assert_eq!(served.txdata[1].compute_txid(), extra.compute_txid());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sibling wins the tip after the compact announce. Accept of the announced
+/// block does not connect it, and the store still cannot reconstruct it.
+#[test]
+fn hb_announce_stays_servable_when_a_sibling_wins() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-weaker");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    mp.set_relay_enabled(true);
+    let tip = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hash = block.block_hash();
+    let coinbase = block.txdata[0].compute_txid();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18543, 64, false);
+    let target = live_peer(&peers, 18544, 65, false);
+    target.set_hb_from(true);
+    target.note_best_known(tip);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "the high-bandwidth peer is announced the compact block"
+    );
+    let sibling = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        hub.tip_header().unwrap().time.saturating_add(1200),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    );
+    hub.accept_block(sibling).expect("sibling connects");
+    let weaker = rt
+        .block_on(accept_received_from_peer(&hub, block, Some(from.as_ref())))
+        .expect("announced sibling is not a peer fault");
+    assert_eq!(
+        weaker,
+        rbitcoin_net::chain::AcceptOutcome::IgnoredWeaker,
+        "the announced block lost the tip"
+    );
+    assert!(
+        !hub.has_block(&hash),
+        "the announced sibling is not connected"
+    );
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after the weaker accept");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("a weaker accept must not forget the announced body");
+    };
+    assert_eq!(bt.transactions[0].compute_txid(), coinbase);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
