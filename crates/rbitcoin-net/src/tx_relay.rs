@@ -3430,6 +3430,13 @@ impl MempoolHub {
     /// path walks on this thread, the async path awaits scripts off it.
     #[doc(hidden)]
     pub fn publish_indexed(&self, tx: &Transaction, r: &AcceptResult, prevouts: &[TxOut]) {
+        self.index_for_relay(tx, r, prevouts);
+        self.note_published_chunk_fees(std::slice::from_ref(&r.txid));
+    }
+
+    /// Relay index for one committed tx. Fee-flow metering is separate so a
+    /// pair can be one chunk sample.
+    fn index_for_relay(&self, tx: &Transaction, r: &AcceptResult, prevouts: &[TxOut]) {
         for old in &r.replaced {
             self.unindex_txid(old);
         }
@@ -3442,7 +3449,6 @@ impl MempoolHub {
         let w = tx.compute_wtxid();
         self.insert_relay_maps(r.txid, w, seq, r.accept_secs, true);
         self.reorg_servable.lock().unwrap().remove(&w);
-        self.note_fee_flow_admit(r.weight, r.fee_sat);
         self.push_recent(tx, r);
         self.index_txid(r.txid, tx, prevouts);
         let shs = self
@@ -3887,8 +3893,9 @@ impl MempoolHub {
             if !hub.try_contains(&parent_id) || !hub.try_contains(&child_id) {
                 return true;
             }
-            hub.publish_indexed(&parent, &parent_pub_res, &prevouts_p);
-            hub.publish_indexed(&child, &child_pub_res, &prevouts_c);
+            hub.index_for_relay(&parent, &parent_pub_res, &prevouts_p);
+            hub.index_for_relay(&child, &child_pub_res, &prevouts_c);
+            hub.note_published_chunk_fees(&[parent_id, child_id]);
             let _ = hub.expire_stale();
             hub.publish_fee_floor();
             false
@@ -4299,6 +4306,40 @@ impl MempoolHub {
         self.mark_fee_dirty();
     }
 
+    /// One fee-flow sample per mining chunk that contains a tx in `txids`.
+    ///
+    /// The rate is the chunk fee and sigop-adjusted weight the template
+    /// uses, not each member's own fee/weight. A chunk is sampled once
+    /// even when several of its members are in `txids`.
+    fn note_published_chunk_fees(&self, txids: &[Txid]) {
+        let admits = {
+            let g = self.lock_read();
+            let want: std::collections::BTreeSet<Txid> = txids.iter().copied().collect();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for txid in &want {
+                let Some(cluster) = g.graph.cluster_of(txid) else {
+                    continue;
+                };
+                for ch in cluster.chunks {
+                    if !ch.txids.iter().any(|t| want.contains(t)) {
+                        continue;
+                    }
+                    let Some(key) = ch.txids.first().copied() else {
+                        continue;
+                    };
+                    if seen.insert(key) {
+                        out.push((ch.weight, ch.fee_sat));
+                    }
+                }
+            }
+            out
+        };
+        for (weight, fee_sat) in admits {
+            self.note_fee_flow_admit(weight, fee_sat);
+        }
+    }
+
     #[doc(hidden)]
     pub fn mark_fee_dirty(&self) {
         self.fee_dirty.store(true, Ordering::Release);
@@ -4648,11 +4689,12 @@ impl MempoolHub {
         }
         let us = t0.elapsed().as_micros() as u64;
         self.meter_accept_stages(lock_us, stages);
+        let ids_for_fee: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
+        self.note_published_chunk_fees(&ids_for_fee);
         let per = us / (accepted.len().max(1) as u64);
         let mut ids = Vec::with_capacity(accepted.len());
         for (i, (tx, r)) in txs.iter().zip(accepted.iter()).enumerate() {
             self.meter_accept_wall(per, true);
-            self.note_fee_flow_admit(r.weight, r.fee_sat);
             self.push_recent(tx, r);
             for old in &r.replaced {
                 self.unindex_txid(old);
