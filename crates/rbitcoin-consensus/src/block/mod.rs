@@ -62,7 +62,28 @@ pub const MIN_TX_WEIGHT: u64 = 10 * 4;
 /// Most transactions a valid block can contain.
 pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usize;
 
+/// Core `CheckTransaction` in Core's order, except duplicate inputs: a block
+/// checks those for every transaction before its coinbase layout.
 pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+    check_tx_shape(tx, base_size)?;
+    reject_null_prevouts(tx)
+}
+
+/// Core `CheckTransaction` after the duplicate-input walk: a non-coinbase tx
+/// spends no null prevout.
+pub fn reject_null_prevouts(tx: &Transaction) -> Result<(), ConsensusError> {
+    if tx.is_coinbase() {
+        return Ok(());
+    }
+    if tx.input.iter().any(|inp| inp.previous_output.is_null()) {
+        return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
+    }
+    Ok(())
+}
+
+/// Core `CheckTransaction` before its input walk: an empty vin or vout, the
+/// stripped size, then each output value.
+pub fn check_tx_shape(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
     if tx.input.is_empty() {
         return Err(ConsensusError::BadTx("no inputs"));
     }
@@ -72,15 +93,7 @@ pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), Consensu
     if base_size > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadTx("bad-txns-oversize"));
     }
-    if tx.is_coinbase() {
-        return Ok(());
-    }
-    for inp in &tx.input {
-        if inp.previous_output.is_null() {
-            return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
-        }
-    }
-    Ok(())
+    tx_value_out(tx).map(|_| ())
 }
 
 fn reject_duplicate_outpoints(
@@ -210,11 +223,15 @@ pub fn validate_block_structure_with_pres(
     // One set for the block. A one-input tx cannot repeat an outpoint, so it
     // does not allocate. Runs before the coinbase layout check: two null
     // coinbase inputs are `bad-txns-inputs-duplicate`, not "first tx not coinbase".
+    // Core CheckTransaction checks a tx's shape and outputs before its inputs,
+    // so a tx this scan reaches is shape-checked here and again in
+    // `check_tx_local`.
     let mut block_outs: Option<crate::OutPointSet> = None;
-    for tx in &block.txdata {
+    for (tx, p) in block.txdata.iter().zip(pres.iter()) {
         if tx.input.len() < 2 {
             continue;
         }
+        check_tx_shape(tx, p.base_size)?;
         let seen = block_outs.get_or_insert_with(|| {
             crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default())
         });
@@ -223,7 +240,9 @@ pub fn validate_block_structure_with_pres(
     reject_bad_block_tx_layout(block, &pres)?;
 
     // Core CheckTransaction: after the root matches, so a swapped scriptSig is
-    // a merkle mismatch, and before ContextualCheckBlock's BIP34 height.
+    // a merkle mismatch, after the coinbase's shape and outputs, and before
+    // ContextualCheckBlock's BIP34 height.
+    check_tx_shape(&block.txdata[0], pres[0].base_size)?;
     let cb_ss = block.txdata[0].input[0].script_sig.len();
     if !(2..=100).contains(&cb_ss) {
         return Err(ConsensusError::BadBlock("bad-cb-length"));
@@ -263,19 +282,6 @@ pub fn validate_block_structure_with_pres(
     // height 1 this rejects mainnet block 1.
     if ctx.enforce_height_gates && ctx.params.bip34_active_at(ctx.height.0) {
         check_bip34_coinbase(&block.txdata[0], ctx.height.0)?;
-    }
-
-    // Money-range gate on the precompute path. `assemble_tx_value_out` applies
-    // the same per-output check when a tx has no precompute row.
-    for (tx, p) in block.txdata.iter().zip(pres.iter()) {
-        for o in &tx.output {
-            if exceeds_max_money(o.value.to_sat()) {
-                return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));
-            }
-        }
-        if exceeds_max_money(p.out_sum) {
-            return Err(ConsensusError::BadBlock("bad-txns-txouttotal-toolarge"));
-        }
     }
 
     {
@@ -1214,6 +1220,28 @@ pub fn exceeds_max_money(sats: u64) -> bool {
     sats > Amount::MAX_MONEY.to_sat()
 }
 
+/// Core `CheckTransaction` output walk: each value in wire order is
+/// `bad-txns-vout-negative`, then `bad-txns-vout-toolarge`, then the running
+/// sum is `bad-txns-txouttotal-toolarge`. The wire amount is a signed 64-bit
+/// value, which rust-bitcoin reads as `u64`.
+pub fn tx_value_out(tx: &Transaction) -> Result<i64, ConsensusError> {
+    let mut value_out = 0i64;
+    for o in &tx.output {
+        let sats = o.value.to_sat();
+        if sats > i64::MAX as u64 {
+            return Err(ConsensusError::BadTx("bad-txns-vout-negative"));
+        }
+        if exceeds_max_money(sats) {
+            return Err(ConsensusError::BadTx("bad-txns-vout-toolarge"));
+        }
+        value_out += sats as i64;
+        if exceeds_max_money(value_out as u64) {
+            return Err(ConsensusError::BadTx("bad-txns-txouttotal-toolarge"));
+        }
+    }
+    Ok(value_out)
+}
+
 /// Signed satoshis for an `out_sum` that already passed [`exceeds_max_money`].
 #[inline]
 pub fn money_range_out_sum(out_sum: u64) -> i64 {
@@ -1231,19 +1259,7 @@ pub fn assemble_tx_value_out(
 ) -> Result<i64, ConsensusError> {
     match pres.and_then(|p| p.get(ti)) {
         Some(p) => Ok(money_range_out_sum(p.out_sum)),
-        None => {
-            let mut value_out = 0i64;
-            for o in &tx.output {
-                let sats_u = o.value.to_sat();
-                if exceeds_max_money(sats_u) {
-                    return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));
-                }
-                value_out = value_out
-                    .checked_add(sats_u as i64)
-                    .ok_or(ConsensusError::BadTx("value out overflow"))?;
-            }
-            Ok(value_out)
-        }
+        None => tx_value_out(tx),
     }
 }
 
@@ -1370,6 +1386,36 @@ pub fn is_final_tx(tx: &Transaction, block_height: u32, lock_time_cutoff: u32) -
         return true;
     }
     tx.input.iter().all(|i| i.sequence.is_final())
+}
+
+/// The time [`is_final_tx`] compares a time lock with: the parent's median
+/// time once BIP113 (CSV) is active, else the block's own timestamp.
+pub fn lock_time_cutoff(ctx: &ValidationContext<'_>, block: &Block, prev_mtp: u32) -> u32 {
+    // Height 0 has no MTP history, so the cutoff is the block time even
+    // when CSV is active.
+    if ctx.height.0 == 0 || !ctx.params.csv_active_at(ctx.height.0) {
+        block.header.time
+    } else {
+        prev_mtp
+    }
+}
+
+/// Core `CheckBlock` and `ContextualCheckBlock` for a block at `ctx.height`
+/// whose parent has median time `prev_mtp`: structure, BIP34, the witness
+/// commitment, weight, sigops, and finality. Core runs these in `AcceptBlock`
+/// for every block, on the active chain or not; inputs and scripts wait for
+/// connect.
+pub fn check_block_on_parent(
+    block: &Block,
+    ctx: &ValidationContext<'_>,
+    prev_mtp: u32,
+) -> Result<(), ConsensusError> {
+    validate_block_structure(block, ctx)?;
+    let cutoff = lock_time_cutoff(ctx, block, prev_mtp);
+    for tx in &block.txdata {
+        reject_non_final(tx, ctx.height.0, cutoff)?;
+    }
+    Ok(())
 }
 
 /// BIP68 / CSV version gate: Core compares `nVersion` as **unsigned**

@@ -198,7 +198,7 @@ pub fn assemble_block_prevouts(
 
     let t_loop = Instant::now();
 
-    let lock_time_cutoff = assemble_lock_time_cutoff(ctx, block, prev_mtp);
+    let lock_time_cutoff = rbitcoin_consensus::block::lock_time_cutoff(ctx, block, prev_mtp);
     // Empty until a same-block coinbase is waived. Honest blocks do not allocate.
     let mut waived_out: Option<WaivedOut> = None;
 
@@ -276,20 +276,6 @@ pub fn assemble_prevout_guards(
         block.txdata.first().is_some_and(|tx| tx.is_coinbase()),
     )?;
     Ok(())
-}
-
-pub fn assemble_lock_time_cutoff(
-    ctx: &rbitcoin_consensus::ValidationContext<'_>,
-    block: &Block,
-    prev_mtp: u32,
-) -> u32 {
-    // Height 0 has no MTP history, so the cutoff is the block time even
-    // when CSV is active.
-    if ctx.height.0 == 0 || !ctx.params.csv_active_at(ctx.height.0) {
-        block.header.time
-    } else {
-        prev_mtp
-    }
 }
 
 #[allow(clippy::too_many_arguments)] // one non-coinbase assemble; call site stays unbundled

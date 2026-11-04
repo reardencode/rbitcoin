@@ -995,6 +995,44 @@ async fn empty_body_null_merkle_bans_before_the_header(
     assert_eq!(hub.tip_hash(), Some(tip));
 }
 
+/// Core `AcceptBlockHeader` refuses a child of an invalid block as
+/// `bad-prevblk` and does not index it. The ask is released, so after
+/// `reconsiderblock` of the parent a peer can serve that child again.
+async fn invalid_parent_child_is_fetched_after_reconsider(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+) {
+    hub.generate_to_script(1, op_true(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time.saturating_add(1);
+    let height = hub.tip_height().unwrap().saturating_add(1);
+    hub.invalidate_block(parent).unwrap();
+    let child = rbitcoin_consensus::mine_regtest_paying(parent, time, height, op_true(), vec![]);
+    let hash = child.block_hash();
+    let (out_tx, _rx) = mpsc::unbounded_channel();
+    let sender = live_peer(peers, 18490, 40, true);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    hub.note_asked_block(hash);
+    on_block(hub, &out_tx, &mut follow, Some(sender.as_ref()), &child)
+        .await
+        .unwrap();
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "a bad-prevblk child is not left claimed"
+    );
+
+    hub.reconsider_block(parent).unwrap();
+    assert_eq!(hub.tip_hash(), Some(parent));
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    hub.note_asked_block(hash);
+    on_block(hub, &out_tx, &mut follow, Some(sender.as_ref()), &child)
+        .await
+        .unwrap();
+    assert_eq!(hub.tip_hash(), Some(hash), "the refetched child connects");
+}
+
 /// Core `RemoveBlockRequest` on a merkle-mismatch drop: the body is not the
 /// header's, so another peer must be free to serve the real one.
 async fn merkle_mismatch_forgets_the_ask(
@@ -1371,6 +1409,7 @@ async fn peer_header_dos_and_self_announce() {
     sixty_four_byte_body_is_mutated(&hub, &peers).await;
     empty_body_null_merkle_bans_before_the_header(&hub, &peers).await;
     merkle_mismatch_forgets_the_ask(&hub, &peers).await;
+    invalid_parent_child_is_fetched_after_reconsider(&hub, &peers).await;
     duplicate_pair_disconnects(&hub, &peers).await;
     rejected_header_logs_core_reason(&hub).await;
 

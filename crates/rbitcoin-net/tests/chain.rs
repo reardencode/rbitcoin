@@ -3993,7 +3993,9 @@ fn failed_branch_tip_keeps_the_heavier_valid_prefix() {
 }
 
 /// `w2, w3` are held and out-work `x2`; the offered `w4` fails connect.
-/// The prefix stays the tip, and the call that delivered `w4` fails.
+/// The prefix stays the tip, and the call that delivered `w4` fails. Its
+/// coinbase overpays, which only connect sees: a rule `AcceptBlock` checks
+/// would refuse `w4` before it is held.
 #[test]
 fn failed_offered_block_is_rejected_when_its_held_prefix_stays() {
     let (dir, hub) = tmp_hub();
@@ -4007,18 +4009,77 @@ fn failed_offered_block_is_rejected_when_its_held_prefix_stays() {
         &[main[1].block_hash()],
     );
     let w3 = mine(w2.block_hash(), w2.header.time + 600, 3);
-    let w4 = mine(w3.block_hash(), w3.header.time + 600, 9);
+    let mut w4 = mine(w3.block_hash(), w3.header.time + 600, 4);
+    w4.txdata[0].output[0].value += bitcoin::Amount::from_sat(1);
+    w4.header.merkle_root = w4.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut w4.header);
     hub.hold_body(Arc::new(w2), false);
     hub.hold_body(Arc::new(w3.clone()), false);
     let err = hub
         .accept_received_block(w4.clone())
-        .expect_err("w4 has a wrong BIP34 height");
+        .expect_err("w4's coinbase overpays");
     assert_eq!(
         err.failing_block_hash(),
         Some(w4.block_hash().to_byte_array())
     );
     assert_eq!(hub.tip_hash(), Some(w3.block_hash()));
     assert!(hub.is_block_invalid(&w4.block_hash()));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Core `AcceptBlock` checks a peer's side block against its own parent
+/// before the body is kept: a non-final tx on an equal-work sibling, and a
+/// wrong BIP34 height on a block whose parent is held.
+#[test]
+fn side_block_is_checked_against_its_parent_before_it_is_held() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let main = mine_chain(&hub, 2, 1_300_075_000);
+    let x1 = &main[0];
+    let nonfinal = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::from_consensus(1_000_000),
+        input: vec![bitcoin::TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x5a; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ZERO,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let sibling = mine_regtest_paying(
+        x1.block_hash(),
+        x1.header.time + 7,
+        2,
+        op_true,
+        vec![nonfinal],
+    );
+    let reason = |b: &Block| {
+        let err = hub.accept_received_block(b.clone()).unwrap_err();
+        let rule = err.consensus_rules().cloned().expect("a rule reject");
+        assert!(hub.is_block_invalid(&b.block_hash()));
+        assert!(hub.held_body(&b.block_hash()).is_none());
+        rbitcoin_consensus::block_reject_reason(&rule)
+    };
+    assert_eq!(reason(&sibling), "bad-txns-nonfinal");
+
+    let genesis = x1.header.prev_blockhash;
+    let w1 = mine_distinct(genesis, x1.header.time + 1, 1, &[x1.block_hash()]);
+    assert_eq!(
+        hub.accept_received_block(w1.clone()).unwrap(),
+        AcceptOutcome::IgnoredWeaker
+    );
+    assert!(hub.held_body(&w1.block_hash()).is_some());
+    let w2 = mine(w1.block_hash(), w1.header.time + 600, 9);
+    assert_eq!(reason(&w2), "bad-cb-height");
+    assert_eq!(hub.tip_hash(), Some(main[1].block_hash()));
     let _ = std::fs::remove_dir_all(dir);
 }
 

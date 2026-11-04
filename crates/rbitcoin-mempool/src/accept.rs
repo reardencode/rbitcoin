@@ -194,6 +194,8 @@ pub struct AcceptResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptError {
     Policy(&'static str),
+    /// Core `CheckTransaction` reject, carried as its BIP22 reason.
+    CheckTransaction(String),
     MissingPrevout(OutPoint),
     /// Tx parked in the orphanage waiting on missing parent(s). Not a hard reject.
     /// `fresh` is true on first insert; re-delivery of the same parked tx is false.
@@ -239,6 +241,7 @@ impl std::fmt::Display for AcceptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AcceptError::Policy(s) => write!(f, "policy: {s}"),
+            AcceptError::CheckTransaction(s) => f.write_str(s),
             AcceptError::MissingPrevout(op) => write!(f, "missing prevout {op}"),
             AcceptError::Orphaned { txid, .. } => write!(f, "orphaned {txid}"),
             AcceptError::Duplicate(t) => write!(f, "duplicate {t}"),
@@ -415,14 +418,14 @@ pub fn block_fit_sigop_cost(
     Ok(cost)
 }
 
+/// Fee of a tx whose outputs already passed Core `CheckTransaction`, so their
+/// sum is at most `MAX_MONEY`.
 #[doc(hidden)]
 pub fn checked_fee_sat(tx: &Transaction, input_value: u64) -> Result<u64, AcceptError> {
-    let mut output_value = 0u64;
-    for output in &tx.output {
-        output_value = output_value
-            .checked_add(output.value.to_sat())
-            .ok_or(AcceptError::Policy("bad-txns-txouttotal-toolarge"))?;
-    }
+    let output_value = tx
+        .output
+        .iter()
+        .fold(0u64, |sum, o| sum.saturating_add(o.value.to_sat()));
     input_value
         .checked_sub(output_value)
         .ok_or(AcceptError::Policy("negative fee"))
@@ -1131,10 +1134,26 @@ impl ActiveMempool {
             min_relay,
             waive,
         } = opts;
+        let check_tx = |r: Result<(), rbitcoin_consensus::ConsensusError>| {
+            r.map_err(|e| {
+                AcceptError::CheckTransaction(rbitcoin_consensus::block_reject_reason(&e))
+            })
+        };
+        check_tx(rbitcoin_consensus::block::check_tx_shape(
+            tx,
+            tx.base_size(),
+        ))?;
+        let txid = tx.compute_txid();
+        // Core CheckTransaction: repeated inputs after the outputs and before
+        // null prevouts, and before any value sum (Finding 011: phantom fee).
+        let mut seen = BTreeSet::new();
+        if !tx.input.iter().all(|inp| seen.insert(inp.previous_output)) {
+            return Err(duplicate_inputs(waive, txid));
+        }
         if tx.is_coinbase() {
             return Err(AcceptError::Coinbase);
         }
-        let txid = tx.compute_txid();
+        check_tx(rbitcoin_consensus::block::reject_null_prevouts(tx))?;
         let wtxid = tx.compute_wtxid();
         if let Some(live) = self.graph.get(&txid) {
             if live.wtxid == wtxid {
@@ -1152,16 +1171,6 @@ impl ActiveMempool {
                     missing,
                     fresh: false,
                 });
-            }
-        }
-
-        // Finding 011: duplicate inputs before any value sum (phantom fee).
-        {
-            let mut seen = BTreeSet::new();
-            for inp in &tx.input {
-                if !seen.insert(inp.previous_output) {
-                    return Err(duplicate_inputs(waive, txid));
-                }
             }
         }
 
@@ -2443,7 +2452,9 @@ impl ActiveMempool {
 
     pub fn accept_failure_record(tx: &Transaction, e: &AcceptError) -> Option<AcceptFailureRecord> {
         match e {
-            AcceptError::InputsDuplicate | AcceptError::Coinbase => {
+            AcceptError::InputsDuplicate
+            | AcceptError::Coinbase
+            | AcceptError::CheckTransaction(_) => {
                 Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
             }
             AcceptError::Script(s)

@@ -112,7 +112,97 @@ fn rpc_regtest_from_genesis() {
     chain_ops_echo_overlap(&ctx);
     chain_ops_reconsider_invalidated_side_block(&ctx, &hub);
     chain_ops_decode_acceptance(&ctx, &hub);
+    chain_ops_child_of_invalidated_block(&ctx, &hub);
+    chain_ops_side_branch_contextual(&ctx, &hub);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `AcceptBlock` runs `ContextualCheckBlockHeader`, `CheckBlock`, and
+/// `ContextualCheckBlock` against the parent of every block, on the active
+/// chain or not. Only inputs and scripts wait for the branch to connect.
+fn chain_ops_side_branch_contextual(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let submit = |b: &Block| dispatch(ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+    let mine = |prev: BlockHash, time: u32, height: u32, txdata: Vec<Transaction>| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, true_spk(), txdata)
+    };
+    let nonfinal = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::from_consensus(1_000_000),
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x5a; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ZERO,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: true_spk(),
+        }],
+    };
+    let tip = hub.tip_header().unwrap();
+    let height = tip_count(ctx) as u32;
+    let sibling = mine(tip.prev_blockhash, tip.time + 30, height, vec![nonfinal.clone()]);
+    assert_eq!(submit(&sibling), "bad-txns-nonfinal", "an equal-work sibling");
+
+    let base = hub.query.header_at_height(Height(height - 2)).unwrap().unwrap().1;
+    let held = mine(BlockHash::from_byte_array(base.hash), tip.time + 31, height - 1, vec![]);
+    assert_eq!(submit(&held), "inconclusive", "a shorter side block is held");
+    let on_held = |time: u32, height: u32, txdata| mine(held.block_hash(), time, height, txdata);
+    for (block, want) in [
+        (on_held(held.header.time + 1, height + 5, vec![]), "bad-cb-height"),
+        (on_held(held.header.time + 2, height, vec![nonfinal]), "bad-txns-nonfinal"),
+        (on_held(1, height, vec![]), "time-too-old"),
+    ] {
+        assert_eq!(submit(&block), want, "a block on a held side parent");
+    }
+    let valid = on_held(held.header.time + 3, height, vec![]);
+    assert_eq!(submit(&valid), "inconclusive", "an equal-work side branch is held");
+    assert_eq!(hub.tip_hash(), Some(tip.block_hash()));
+}
+
+/// Core `AcceptBlockHeader`: a block whose parent is marked invalid is
+/// `bad-prevblk` and is not added to the block index. `reconsiderblock` of
+/// the parent therefore restores the parent, not that child.
+fn chain_ops_child_of_invalidated_block(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    let tip = hub.tip_header().unwrap();
+    let tip_hash = tip.block_hash();
+    let height = tip_count(ctx) as u32;
+    dispatch(ctx, "invalidateblock", vec![json!(tip_hash.to_string())]).unwrap();
+    assert_eq!(best_hash(ctx), json!(tip.prev_blockhash.to_string()));
+    let child = rbitcoin_consensus::mine_regtest_paying(
+        tip_hash,
+        tip.time + 1,
+        height + 1,
+        true_spk(),
+        vec![],
+    );
+    let child_hex = json!(block_hex(&child));
+    let r = dispatch(ctx, "submitblock", vec![child_hex.clone()]).unwrap();
+    assert_eq!(r, "bad-prevblk");
+    let child_id = json!(child.block_hash().to_string());
+    let tips = dispatch(ctx, "getchaintips", vec![]).unwrap();
+    assert!(
+        tips.as_array().unwrap().iter().all(|t| t["hash"] != child_id),
+        "the child is not indexed: {tips}"
+    );
+    let again = dispatch(ctx, "submitblock", vec![child_hex.clone()]).unwrap();
+    assert_eq!(again, "bad-prevblk", "the child was not cached as invalid");
+
+    dispatch(ctx, "reconsiderblock", vec![json!(tip_hash.to_string())]).unwrap();
+    assert_eq!(best_hash(ctx), json!(tip_hash.to_string()));
+    let tips = dispatch(ctx, "getchaintips", vec![]).unwrap();
+    assert!(
+        tips.as_array().unwrap().iter().all(|t| t["hash"] != child_id),
+        "reconsider does not bring back a child that was never indexed: {tips}"
+    );
+    let r = dispatch(ctx, "submitblock", vec![child_hex]).unwrap();
+    assert!(r.is_null(), "the child connects once its parent is valid: {r}");
+    assert_eq!(best_hash(ctx), child_id);
 }
 
 /// Bytes Core's decoders accept and refuse: `DecodeHexTx` tries the witness
@@ -2091,6 +2181,60 @@ fn chain_ops_submit_tx_shape(
     regrind(&mut sum);
     assert_eq!(submit(&sum), "bad-txns-txouttotal-toolarge");
 
+    // A wire amount is a signed 64-bit value. Core CheckTransaction walks the
+    // outputs in order: negative, then over MAX_MONEY, then the running sum.
+    let negative = Amount::from_sat(u64::MAX);
+    let with_outputs = |values: &[Amount]| {
+        let mut block = next(vec![]);
+        block.txdata[0].output = values
+            .iter()
+            .map(|&value| TxOut {
+                value,
+                script_pubkey: p2wpkh.clone(),
+            })
+            .collect();
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        regrind(&mut block);
+        block
+    };
+    assert_eq!(submit(&with_outputs(&[negative])), "bad-txns-vout-negative");
+    let max = Amount::MAX_MONEY;
+    assert_eq!(
+        submit(&with_outputs(&[max, max, negative])),
+        "bad-txns-txouttotal-toolarge",
+        "the running sum fails before the later negative output"
+    );
+    let negative_spend = bare(vec![tx_in(op)], vec![TxOut {
+        value: negative,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }]);
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_spend)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
+    let e = dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&negative_spend))]).unwrap_err();
+    assert_eq!(e["message"], "bad-txns-vout-negative", "{e}");
+    // Core CheckTransaction walks the outputs before the inputs, in a block
+    // and in the mempool alike.
+    let negative_dup = bare(vec![tx_in(op), tx_in(op)], vec![TxOut {
+        value: negative,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }]);
+    assert_eq!(submit(&next(vec![negative_dup.clone()])), "bad-txns-vout-negative");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&negative_dup)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-vout-negative", "{tma}");
+    // Core CheckTransaction checks repeated inputs before null prevouts.
+    let null_dup = bare(vec![tx_in(OutPoint::null()), tx_in(OutPoint::null())], one_out(1));
+    assert_eq!(submit(&next(vec![null_dup.clone()])), "bad-txns-inputs-duplicate");
+    let tma = dispatch(ctx, "testmempoolaccept", vec![json!([tx_hex(&null_dup)])]).unwrap();
+    assert_eq!(tma[0]["reject-reason"], "bad-txns-inputs-duplicate", "{tma}");
+    let empty_dup = bare(vec![tx_in(op), tx_in(op)], vec![]);
+    assert_eq!(submit(&next(vec![empty_dup])), "bad-txns-vout-empty");
+    // A coinbase's outputs are checked before its scriptSig length.
+    let mut short_coinbase = with_outputs(&[negative]);
+    short_coinbase.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    short_coinbase.header.merkle_root = short_coinbase.compute_merkle_root().unwrap();
+    regrind(&mut short_coinbase);
+    assert_eq!(submit(&short_coinbase), "bad-txns-vout-negative");
+
     let spend = bare(
         vec![tx_in(OutPoint {
             txid: Txid::from_byte_array([9; 32]),
@@ -3793,8 +3937,8 @@ fn chain_ops_reconsider_most_work(
 
     // A held child that never connected does not hide its restored parent:
     // h4 under the invalid h5 is still a fork to return to. h5 comes from a
-    // peer and is held under the invalidated h4 (Core's submitblock refuses
-    // it as `bad-prevblk`).
+    // peer while h4 is a valid fork, so it is held. Under the invalidated h4
+    // it would be `bad-prevblk` and not kept, as in Core.
     let h = generate(4);
     let top = dispatch(ctx, "getblockheader", vec![json!(h[3].to_string())]).unwrap();
     let mut bad = rbitcoin_consensus::mine_regtest_paying(
@@ -3809,8 +3953,14 @@ fn chain_ops_reconsider_most_work(
     bad.header.merkle_root = bad.compute_merkle_root().unwrap();
     rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
     call("invalidateblock", h[2]);
-    let _ = hub.accept_received_block(bad.clone());
+    let refused = hub.accept_received_block(bad.clone()).unwrap_err();
+    assert_eq!(refused.to_string(), "consensus: bad-prevblk");
     let i = side(h[0], 5);
+    call("reconsiderblock", h[2]);
+    assert_eq!(best(), i[4]);
+    let held = hub.accept_received_block(bad.clone()).unwrap();
+    assert_eq!(held, rbitcoin_net::AcceptOutcome::IgnoredWeaker);
+    call("invalidateblock", h[2]);
     call("reconsiderblock", h[2]);
     assert_eq!(best(), i[4]);
     assert_eq!(status(h[3]).as_deref(), Some("valid-fork"));

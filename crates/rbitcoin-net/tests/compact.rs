@@ -677,6 +677,9 @@ fn assert_mutated_not_block_failed(
             );
             assert_eq!(*h, hash.to_byte_array());
         }
+        NetError::Rules(rule) => {
+            assert!(err.is_mutated(), "got {rule:?}");
+        }
         other => panic!("expected mutated reject, got {other:?}"),
     }
     assert!(

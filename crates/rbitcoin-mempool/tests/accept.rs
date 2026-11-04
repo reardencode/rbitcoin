@@ -390,7 +390,7 @@ fn spend_tx(op: OutPoint, out_value: u64) -> Transaction {
 }
 
 #[test]
-fn prepare_admit_output_sum_overflow_is_policy_not_panic() {
+fn prepare_admit_negative_output_is_check_transaction_not_panic() {
     let dir = tmp_dir();
     let (op, _, utxos) = chain_utxo(100_000);
     let half = (u64::MAX / 2) + 2;
@@ -429,7 +429,7 @@ fn prepare_admit_output_sum_overflow_is_policy_not_panic() {
         )
         .expect_err("overflowing output sum");
     assert!(
-        matches!(err, AcceptError::Policy("bad-txns-txouttotal-toolarge")),
+        err == AcceptError::CheckTransaction("bad-txns-vout-negative".into()),
         "got {err}"
     );
     let _ = std::fs::remove_dir_all(&dir);

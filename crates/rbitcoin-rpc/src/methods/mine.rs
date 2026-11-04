@@ -1635,14 +1635,23 @@ fn prepare_submit(hub: &rbitcoin_net::ChainHub, mut block: Block) -> SubmitPrep 
     if !known {
         return SubmitPrep::Done(SubmitBlockOutcome::Rejected("prev-blk-not-found".into()));
     }
+    // Core `AcceptBlockHeader` refuses an invalid parent before any body rule
+    // and does not index the block.
+    if hub.is_block_invalid(&block.header.prev_blockhash) {
+        return SubmitPrep::Done(SubmitBlockOutcome::Rejected("bad-prevblk".into()));
+    }
     fill_witness_reserved_value(hub, &mut block);
-    match cheap_submit_tx_reject(
-        hub.query.as_ref(),
-        &block,
-        hub.params.coinbase_maturity(),
-        &hub.params,
-        hub.milestone,
-    ) {
+    // Core `AcceptBlock` rules first, then the cheap input reads.
+    let early = match hub.check_block_on_parent(&block) {
+        Err(e) if e.is_local_fault() => {
+            return SubmitPrep::Done(SubmitBlockOutcome::Error(e.to_string()));
+        }
+        Err(e) => Ok(Some(submit_reject_reason(&e))),
+        Ok(()) => {
+            cheap_submit_tx_reject(hub.query.as_ref(), &block, hub.params.coinbase_maturity())
+        }
+    };
+    match early {
         Err(e) => SubmitPrep::Done(SubmitBlockOutcome::Error(format!("store: {e}"))),
         Ok(Some(reason)) => {
             // Merkle and witness bytes are not the block hash. A coinbase-less
@@ -1824,14 +1833,15 @@ pub fn read_confirmed_prevout(
     )))
 }
 
-/// Hard consensus rejects stick. A mutated body, a missing parent, a block
-/// that is only too far in the future, and a block older than median time
-/// stay retryable. A warn-and-apply fault stays retryable while
+/// Hard consensus rejects stick. A mutated body, a missing or invalid parent,
+/// a block that is only too far in the future, and a block older than median
+/// time stay retryable. A warn-and-apply fault stays retryable while
 /// `--trust-peer` is on. `bad-diffbits` sticks.
 fn submit_reason_sticks(hub: &rbitcoin_net::ChainHub, block: &Block, reason: &str) -> bool {
     !submit_reason_is_mutated(block, reason)
         && reason != "high-hash"
         && reason != "prev-blk-not-found"
+        && reason != "bad-prevblk"
         && reason != "time-too-new"
         && reason != "time-too-old"
         && !(hub.query.trust_peer() && rbitcoin_consensus::reason_is_warn_and_apply(reason))
@@ -1847,34 +1857,18 @@ pub fn submit_reason_is_mutated(block: &Block, reason: &str) -> bool {
         || rbitcoin_consensus::block_mutated_without_coinbase(block)
 }
 
+/// Input reads for a block that already passed
+/// `ChainHub::check_block_on_parent`, so its merkle root and structure hold.
 #[doc(hidden)]
 pub fn cheap_submit_tx_reject(
     query: &rbitcoin_query::Query,
     block: &Block,
     maturity: u32,
-    params: &rbitcoin_consensus::ChainParams,
-    milestone: rbitcoin_consensus::Milestone,
 ) -> Result<Option<String>, rbitcoin_store::StoreError> {
     use bitcoin::{OutPoint, TxOut};
     let spend_height = cheap_spend_height(query, block)?;
     let parent_is_tip = parent_extends_tip(query, block)?;
-    // Core CheckMerkleRoot runs before every body rule. A repeat that keeps
-    // the root (CVE-2012-2459) is the only bad-txns-duplicate. Any other
-    // repeat spends a coin its first copy spent.
     let txids: Vec<Txid> = block.txdata.iter().map(Transaction::compute_txid).collect();
-    let leaves: Vec<[u8; 32]> = txids.iter().map(|t| t.to_byte_array()).collect();
-    let (root, mutated) = rbitcoin_store::merkle_root_mutated(&leaves);
-    if root != block.header.merkle_root.to_byte_array() {
-        return Ok(Some("bad-txnmrklroot".into()));
-    }
-    if mutated {
-        return Ok(Some("bad-txns-duplicate".into()));
-    }
-    // CheckBlock before inputs. connect_at is the other caller, and an
-    // equal-work sibling never reaches it.
-    if let Some(reason) = submit_checkblock_reason(block, spend_height, params, milestone)? {
-        return Ok(Some(reason));
-    }
     // A parent off the best chain can create the coins this block spends.
     // Only the branch connect sees them (Core checks inputs in ConnectBlock).
     if spend_height.is_none() {
@@ -1944,25 +1938,6 @@ pub fn cheap_submit_tx_reject(
         }
     }
     Ok(None)
-}
-
-/// Context-free CheckBlock for a known parent. A best-chain parent has a
-/// height, so BIP34 applies. A held-only parent has no height yet.
-#[doc(hidden)]
-pub fn submit_checkblock_reason(
-    block: &Block,
-    spend_height: Option<u32>,
-    params: &rbitcoin_consensus::ChainParams,
-    milestone: rbitcoin_consensus::Milestone,
-) -> Result<Option<String>, rbitcoin_store::StoreError> {
-    let vctx = match spend_height {
-        Some(h) => rbitcoin_consensus::ValidationContext::at(params, Height(h), milestone),
-        None => rbitcoin_consensus::ValidationContext::archive_structure(params),
-    };
-    match rbitcoin_consensus::validate_block_structure(block, &vctx) {
-        Ok(()) => Ok(None),
-        Err(e) => Ok(Some(rbitcoin_consensus::block_reject_reason(&e))),
-    }
 }
 
 #[doc(hidden)]
