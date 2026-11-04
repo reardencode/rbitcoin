@@ -144,6 +144,43 @@ fn create_loc_read_past_published_end_is_corrupt() {
     }
 }
 
+/// The loc header names 1023 creates. Off still has the 1024-window
+/// checkpoint and the overflow file still has the later rows. That is a
+/// crash after the short loc header and before off and ovf. Open keeps a
+/// prefix that does not name those rows.
+#[test]
+fn create_loc_truncate_across_window_reopens_at_the_short_prefix() {
+    let dir = TempDir::labeled("create-loc-window-crash").unwrap();
+    let loc = CreateLoc::create(dir.path()).unwrap();
+    let mut n_out = vec![1u32; 1025];
+    n_out[1023] = 256;
+    n_out[1024] = 256;
+    loc.append(&chain(&n_out, &vec![8u64; 1025])).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let short = FILE_HEADER_LEN as u64 + 1023 * SLOT;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("create.loc"))
+        .unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&short.to_le_bytes()).unwrap();
+    drop(f);
+    let loc = CreateLoc::open(&path).expect("short prefix opens");
+    assert!(loc.count() <= 1023, "count {}", loc.count());
+    assert!(loc.count() >= 1, "count {}", loc.count());
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= loc.count()),
+        "overflow row past the prefix: {rows:?}"
+    );
+}
+
 /// The window pread compares the end `plan_range_batch` paired with
 /// `count`. A later publish must not change that integer.
 #[test]

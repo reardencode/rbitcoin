@@ -110,6 +110,51 @@ fn delta_loc_checkpoint_enospc_drops_the_ovf_row() {
     );
 }
 
+/// The loc header names 1023 creates. The checkpoint and the overflow
+/// file still name the longer suffix. Open keeps the prefix.
+#[test]
+fn delta_loc_truncate_across_window_reopens_at_the_short_prefix() {
+    let dir = TempDir::labeled("delta-window-crash").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let mut starts = Vec::with_capacity(1025);
+    let mut lens = Vec::with_capacity(1025);
+    let mut cursor = FILE_HEADER_LEN as u64;
+    for i in 0..1025 {
+        let len = if i == 1023 || i == 1024 {
+            65536 * IDX_STRIDE
+        } else {
+            8
+        };
+        starts.push(cursor);
+        lens.push(len);
+        cursor = cursor.saturating_add(len);
+    }
+    loc.append(&starts, &lens).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let short = FILE_HEADER_LEN as u64 + 1023 * 2;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("seqsigwit.loc"))
+        .unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&short.to_le_bytes()).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("short prefix opens");
+    assert!(loc.count() <= 1023, "count {}", loc.count());
+    assert!(loc.count() >= 1, "count {}", loc.count());
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= loc.count()),
+        "overflow row past the prefix: {rows:?}"
+    );
+}
+
 #[test]
 fn delta_loc_append_and_batch_order() {
     let dir = TempDir::labeled("delta-loc").unwrap();

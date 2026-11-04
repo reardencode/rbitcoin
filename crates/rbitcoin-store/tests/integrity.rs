@@ -645,6 +645,227 @@ fn withheld_locator_header_does_not_seal_the_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn assert_withheld_overflow_stays_unsealed(dir: &std::path::Path, genesis: Fk, withheld: Fk) {
+    let s = Store::open_tiny(dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
+    assert_eq!(s.txs.count(), 1);
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(withheld).unwrap());
+    assert!(s.txs.get_meta_and_outputs(Fk(1)).is_ok());
+    assert!(s.txs.get_meta_and_outputs(Fk(2)).is_err());
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 0);
+    drop(s);
+}
+
+/// Genesis is sealed. The next connect's locator headers land and its
+/// overflow header does not. The sealed tip and the spend marker stay at
+/// genesis. Reopen drops that create.
+#[test]
+fn withheld_overflow_header_does_not_seal_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+    let sealed = on_disk_hwm(&dir.join("confirmed.body"));
+    let seal = std::fs::read(dir.join("tip_seal")).unwrap();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+
+    let ovf = s.txs.seqsigwit_loc.ovf.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf, 8);
+    let disarm = Disarm(ovf);
+    let (withheld, _) = connect_fat_witness(&s, &write, 1, prev, parent_hash);
+    drop(disarm);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    assert_eq!(
+        on_disk_hwm(&dir.join("confirmed.body")),
+        sealed,
+        "a withheld overflow header does not seal the new tip"
+    );
+    assert_eq!(std::fs::read(dir.join("tip_seal")).unwrap(), seal);
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .expect("checkpoint publishes");
+    assert_eq!(marker.durable_through(), 0);
+    drop(s);
+    assert_withheld_overflow_stays_unsealed(&dir, genesis, withheld);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--prune-seqsigwit` does not publish a witness locator. A withheld
+/// `create.loc.ovf` header is then the only short file. The tip stays at
+/// the sealed prefix.
+#[test]
+fn withheld_create_overflow_header_does_not_seal_when_pruned() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+    let sealed = on_disk_hwm(&dir.join("confirmed.body"));
+    let seal = std::fs::read(dir.join("tip_seal")).unwrap();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+    s.set_prune_seqsigwit_mode(true);
+
+    let ovf = s.txs.create_loc.ovf.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf, 8);
+    let disarm = Disarm(ovf);
+    let (withheld, _) = connect_wide_coinbase(&s, &write, 1, prev, parent_hash);
+    drop(disarm);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    assert_eq!(
+        on_disk_hwm(&dir.join("confirmed.body")),
+        sealed,
+        "a withheld create overflow header does not seal the new tip"
+    );
+    assert_eq!(std::fs::read(dir.join("tip_seal")).unwrap(), seal);
+    drop(s);
+    assert_withheld_overflow_stays_unsealed(&dir, genesis, withheld);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn connect_fat_witness(
+    s: &Store,
+    write: &rbitcoin_store::ClassCWrite,
+    h: u8,
+    prev: Fk,
+    parent_hash: [u8; 32],
+) -> (Fk, [u8; 32]) {
+    let txid = [h; 32];
+    let (mut rec, mut ins, outs) = coinbase(h);
+    rec.txid = txid;
+    // Strides at or above 65536 spill to seqsigwit.loc.ovf.
+    ins[0].witness = vec![vec![0u8; 65536 * 8]];
+    let tx_fk = s
+        .put_tx_full_batch_indexed(&[(rec, ins, outs)], false)
+        .unwrap()[0];
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&[txid]);
+    let header = hdr_merkle(prev, parent_hash, h, merkle);
+    let hash = header.hash;
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs.put_range(write, header_fk, tx_fk, 1).unwrap();
+    s.strong_tx.set_strong(write, tx_fk, header_fk).unwrap();
+    s.confirmed
+        .set(write, Height(u32::from(h)), header_fk)
+        .unwrap();
+    (header_fk, hash)
+}
+
+fn connect_wide_coinbase(
+    s: &Store,
+    write: &rbitcoin_store::ClassCWrite,
+    h: u8,
+    prev: Fk,
+    parent_hash: [u8; 32],
+) -> (Fk, [u8; 32]) {
+    let txid = [h; 32];
+    let rec = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 256,
+    };
+    let ins = vec![InputRecord::coinbase(u32::MAX, vec![h], vec![])];
+    let outs = vec![OutputRecord::unspent(1, vec![0x51]); 256];
+    let tx_fk = s
+        .put_tx_full_batch_indexed(&[(rec, ins, outs)], false)
+        .unwrap()[0];
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&[txid]);
+    let header = hdr_merkle(prev, parent_hash, h, merkle);
+    let hash = header.hash;
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs.put_range(write, header_fk, tx_fk, 1).unwrap();
+    s.strong_tx.set_strong(write, tx_fk, header_fk).unwrap();
+    s.confirmed
+        .set(write, Height(u32::from(h)), header_fk)
+        .unwrap();
+    (header_fk, hash)
+}
+
+fn write_hwm(path: &std::path::Path, logical: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&logical.to_le_bytes()).unwrap();
+}
+
+/// The loc header was shortened across a 1024-create window. Off and the
+/// overflow file were not. Open keeps a shorter prefix and does not leave
+/// the tip sealed past it.
+#[test]
+fn truncate_across_window_does_not_keep_a_sealed_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let mut batch = Vec::with_capacity(1024);
+    let mut txids = Vec::with_capacity(1024);
+    for i in 0..1024u16 {
+        let mut txid = [2u8; 32];
+        txid[0] = (i & 0xff) as u8;
+        txid[1] = (i >> 8) as u8;
+        txids.push(txid);
+        let wide = i == 1022 || i == 1023;
+        let n_out = if wide { 256 } else { 1 };
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: n_out,
+        };
+        let ins = vec![InputRecord::coinbase(u32::MAX, vec![txid[0]], vec![])];
+        let outs = vec![OutputRecord::unspent(1, vec![0x51]); n_out as usize];
+        batch.push((rec, ins, outs));
+    }
+    let fks = s.put_tx_full_batch_indexed(&batch, false).unwrap();
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&txids);
+    let header = hdr_merkle(prev, parent_hash, 2, merkle);
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs
+        .put_range(&write, header_fk, fks[0], 1024)
+        .unwrap();
+    for fk in &fks {
+        s.strong_tx.set_strong(&write, *fk, header_fk).unwrap();
+    }
+    s.confirmed.set(&write, Height(1), header_fk).unwrap();
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    assert_eq!(s.txs.count(), 1025);
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    drop(s);
+
+    let short =
+        rbitcoin_store::file::FILE_HEADER_LEN as u64 + 1023 * rbitcoin_store::create_loc::SLOT;
+    write_hwm(&dir.join("create.loc"), short);
+
+    let s = Store::open_tiny(&dir).expect("a mid-truncate crash opens");
+    assert!(s.txs.count() <= 1023, "open kept {} creates", s.txs.count());
+    let tip = s.confirmed.tip_height().map(|h| h.0);
+    assert!(
+        tip.unwrap_or(0) < 1,
+        "tip {tip:?} stays sealed past the prefix"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn shorten_creates(s: &Store, n: u64) {
     let txs = &s.txs;
     let stems = rbitcoin_store::tx_table::ClassASkewStems {
