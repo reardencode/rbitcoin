@@ -4,10 +4,10 @@
 
 use crate::bulk_io::ReadOp;
 use crate::delta_loc::{
-    checkpoint_fit, create_table_file, decode_create_pair, encode_create_ovf_row, load_create_ovf,
-    loc_file_off, loc_window, loc_within, migrate_create_ovf_v22_if_needed, open_table_file,
-    pack_create_pair, strides_from_aligned_len, unresolved_ovf_cut, CREATE_OVF_SLOT, IDX_STRIDE,
-    LOC_WINDOW,
+    checkpoint_prefix, create_table_file, decode_create_pair, encode_create_ovf_row,
+    load_create_ovf, loc_file_off, loc_window, loc_within, migrate_create_ovf_v22_if_needed,
+    open_table_file, pack_create_pair, strides_from_aligned_len, unresolved_ovf_cut,
+    CREATE_OVF_SLOT, IDX_STRIDE, LOC_WINDOW,
 };
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
@@ -100,7 +100,7 @@ impl CreateLoc {
             return Err(StoreError::Corrupt("invariant: create.loc size"));
         }
         let full = data / SLOT;
-        let Some(count) = checkpoint_fit(full, off.data_len(), OFF_SLOT) else {
+        let Some(count) = checkpoint_prefix(full, off.data_len(), OFF_SLOT) else {
             return Err(StoreError::Corrupt("invariant: create.off size"));
         };
         let n_win = count / LOC_WINDOW;
@@ -123,7 +123,19 @@ impl CreateLoc {
             ovf_rows: RwLock::new(ovf_rows),
             count: AtomicU64::new(full),
         };
-        if count < full {
+        let off_long = opened.off.data_len() / OFF_SLOT > count / LOC_WINDOW;
+        let ovf_past = opened
+            .ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|row| row.0 > count);
+        if count < full || off_long || ovf_past {
+            if opened.count() <= count {
+                opened
+                    .count
+                    .store(count.saturating_add(1), Ordering::Release);
+            }
             opened.truncate_to_count(count)?;
         }
         // A row past the overflow header belongs to a create this file does not name.
@@ -163,12 +175,14 @@ impl CreateLoc {
             .iter()
             .filter(|r| r.0 <= new_count)
             .count();
-        // Kept overflow rows are a prefix.
-        self.loc.set_logical_len(loc_end)?;
+        // Off and the overflow file land before the loc header. A crash
+        // after the loc header used to leave a long checkpoint. The RAM
+        // count moves last.
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
         self.ovf
             .set_logical_len(FILE_HEADER_LEN as u64 + kept as u64 * CREATE_OVF_SLOT)?;
+        self.loc.set_logical_len(loc_end)?;
         self.checkpoints
             .write()
             .unwrap_or_else(|e| e.into_inner())

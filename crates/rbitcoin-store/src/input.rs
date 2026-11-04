@@ -5,7 +5,7 @@
 //! u24 LE. `input.off` checkpoints the body file offset at each 1024-create
 //! window after the first.
 
-use crate::delta_loc::{loc_window, loc_within, LOC_WINDOW};
+use crate::delta_loc::{checkpoint_prefix, loc_window, loc_within, LOC_WINDOW};
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_primitives::{Fk, TableKind};
@@ -120,11 +120,11 @@ impl Input {
         if loc_data % LOC_SLOT != 0 {
             return Err(StoreError::Corrupt("invariant: input.loc size"));
         }
-        let count = loc_data / LOC_SLOT;
-        let n_win = count / LOC_WINDOW;
-        if off.data_len() != n_win * OFF_SLOT {
+        let full = loc_data / LOC_SLOT;
+        let Some(count) = checkpoint_prefix(full, off.data_len(), OFF_SLOT) else {
             return Err(StoreError::Corrupt("invariant: input.off size"));
-        }
+        };
+        let n_win = count / LOC_WINDOW;
         let body_len = body.logical_len();
         if body_len < FILE_HEADER_LEN as u64
             || !(body_len - FILE_HEADER_LEN as u64).is_multiple_of(REC_LEN)
@@ -139,14 +139,23 @@ impl Input {
                 checkpoints[i] = u64::from_le_bytes(chunk.try_into().unwrap());
             }
         }
-        Ok(Self {
+        let opened = Self {
             loc,
             off,
             body,
             checkpoints: RwLock::new(checkpoints),
-            count: AtomicU64::new(count),
+            count: AtomicU64::new(full),
             body_end: AtomicU64::new(body_len),
-        })
+        };
+        if count < full {
+            opened.truncate_to_count(count)?;
+        } else {
+            let need = FILE_HEADER_LEN as u64 + n_win * OFF_SLOT;
+            if opened.off.logical_len() > need {
+                opened.off.set_logical_len(need)?;
+            }
+        }
+        Ok(opened)
     }
 
     pub fn count(&self) -> u64 {
@@ -322,12 +331,13 @@ impl Input {
         if new_body < FILE_HEADER_LEN as u64 {
             return Err(StoreError::Corrupt("invariant: input.body truncate"));
         }
-        self.loc
-            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
-        self.body.set_logical_len(new_body)?;
         let n_win = new_count / LOC_WINDOW;
+        // Checkpoint before the loc header, same crash window as create.loc.
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
+        self.body.set_logical_len(new_body)?;
+        self.loc
+            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
         {
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             cps.truncate(n_win as usize);

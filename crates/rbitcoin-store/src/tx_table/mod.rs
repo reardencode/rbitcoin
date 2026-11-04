@@ -996,19 +996,22 @@ fn file_header_behind(file: &crate::file::TableFile) -> bool {
 fn durable_loc_count(
     loc: &crate::file::TableFile,
     off: &crate::file::TableFile,
+    ovf: &crate::file::TableFile,
     slot: u64,
     off_slot: u64,
-) -> u64 {
+    pair: bool,
+) -> Result<u64, StoreError> {
     let data = loc
         .header_persist_len()
         .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
     if slot == 0 || !data.is_multiple_of(slot) {
-        return 0;
+        return Ok(0);
     }
     let off_data = off
         .header_persist_len()
         .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
-    crate::delta_loc::checkpoint_fit(data / slot, off_data, off_slot).unwrap_or(0)
+    let fitted = crate::delta_loc::checkpoint_fit(data / slot, off_data, off_slot).unwrap_or(0);
+    crate::delta_loc::withheld_ovf_limit(loc, ovf, fitted, pair)
 }
 
 fn class_a_loc_pairs(
@@ -1647,31 +1650,35 @@ impl TxTable {
         if !self.class_a_header_behind() {
             return Ok(self.count());
         }
-        Ok(self.locator_header_count())
+        self.locator_header_count()
     }
 
-    /// Create count named by the locator headers. A body header is not part
-    /// of this count: open truncates a body that ran ahead and refuses one
-    /// that fell short.
-    fn locator_header_count(&self) -> u64 {
+    /// Create count named by the locator headers, including a withheld
+    /// overflow header. A body header is not part of this count: open
+    /// truncates a body that ran ahead and refuses one that fell short.
+    fn locator_header_count(&self) -> Result<u64, StoreError> {
         let prune = self.prune_seqsigwit_mode();
         let mut hi = durable_loc_count(
             &self.create_loc.loc,
             &self.create_loc.off,
+            &self.create_loc.ovf,
             crate::create_loc::SLOT,
             crate::create_loc::OFF_SLOT,
-        );
+            true,
+        )?;
         hi = hi.min(self.create_loc.count());
         if !prune {
             hi = hi.min(durable_loc_count(
                 &self.seqsigwit_loc.loc,
                 &self.seqsigwit_loc.off,
+                &self.seqsigwit_loc.ovf,
                 2,
                 8,
-            ));
+                false,
+            )?);
             hi = hi.min(self.seqsigwit_loc.count());
         }
-        hi
+        Ok(hi)
     }
 
     pub(crate) fn class_a_header_behind(&self) -> bool {
