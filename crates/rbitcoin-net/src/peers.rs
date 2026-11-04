@@ -602,7 +602,12 @@ impl LivePeer {
     pub fn take_local_addr_due(&self, now: u64) -> Option<SocketAddr> {
         const DAY: u64 = 24 * 60 * 60;
         let hub = self.owner.upgrade()?;
-        let sock = self.self_announce_link(&hub).local_socket(&hub)?;
+        // A socket, as v1 ADDR carries it: clearnet only, since a CJDNS
+        // address would re-encode as plain IPv6.
+        if self.self_announce_link(&hub) != SelfAnnounceLink::Clearnet {
+            return None;
+        }
+        let sock = SelfAnnounceLink::Clearnet.local_socket(&hub)?;
         let prev = self.next_local_addr_send.load(Ordering::Relaxed);
         if prev != 0 && now < prev {
             return None;

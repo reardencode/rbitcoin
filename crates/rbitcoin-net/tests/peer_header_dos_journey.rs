@@ -1550,9 +1550,11 @@ fn self_announce_stays_on_the_link_network() {
         ["cjdns"],
         "a CJDNS peer gets the fc00::/8 address and not the public IP"
     );
-    assert_eq!(
-        overlay_peer(&with_cjdns, cjdns_peer, out).take_local_addr_due(1_000),
-        Some(SocketAddr::new(IpAddr::V6(cjdns_bind), 8333))
+    assert!(
+        overlay_peer(&with_cjdns, cjdns_peer, out)
+            .take_local_addr_due(1_000)
+            .is_none(),
+        "the v1 socket timer never hands out a CJDNS address"
     );
     assert_eq!(
         self_announce_nets(&overlay_peer(&with_cjdns, clearnet_peer, out)),
