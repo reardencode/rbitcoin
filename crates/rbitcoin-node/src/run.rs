@@ -326,6 +326,29 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     })
 }
 
+/// Height 0 is the chain this datadir already stored. No height 0 is an
+/// empty store and still opens. A different genesis is the wrong network.
+/// This does not write the network into `store/meta`.
+#[doc(hidden)]
+pub fn refuse_foreign_genesis(
+    query: &Query,
+    params: &rbitcoin_consensus::ChainParams,
+) -> Result<(), NodeError> {
+    let stored = match query.header_at_height(rbitcoin_primitives::Height::GENESIS) {
+        Ok(Some((_, rec))) => rec.hash,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(NodeError::Init(format!("genesis header: {e}"))),
+    };
+    if stored == bitcoin::hashes::Hash::to_byte_array(params.genesis_hash) {
+        return Ok(());
+    }
+    let stored_hash = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(stored);
+    Err(NodeError::Init(format!(
+        "Incorrect or no genesis block found. Wrong datadir for network? stored genesis {stored_hash} does not match started genesis {}",
+        params.genesis_hash
+    )))
+}
+
 /// Long-running P2P (+ optional Electrum): seed resolve, catch-up, persistent follow, progress logs.
 ///
 /// Cleanly exits on **SIGTERM** / **SIGINT** (`kill <pid>` or Ctrl+C): flushes the store
@@ -347,6 +370,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let handle = run_node(config.clone())?;
     status.enter(Phase::Starting);
     let params = config.chain_params()?;
+    refuse_foreign_genesis(&handle.query, &params)?;
     let milestone = config.milestone();
     if let Some(anchor) = milestone.anchor {
         info!(
