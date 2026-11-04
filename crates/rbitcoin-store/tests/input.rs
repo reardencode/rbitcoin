@@ -140,6 +140,44 @@ fn new_store_creates_inputs_stems() {
 }
 
 #[test]
+fn reopen_after_short_body_keeps_the_prefix_inputs() {
+    let dir = TempDir::labeled("input-short-body").unwrap();
+    let t = Input::create(dir.path()).unwrap();
+    let mut batch = Vec::with_capacity(1025);
+    for i in 0..1023u32 {
+        batch.push(vec![edge(1, i)]);
+    }
+    // Create 1024 adds no body bytes. Create 1025's input is the tail a
+    // second subtraction would take from create 1023.
+    batch.push(vec![]);
+    batch.push(vec![edge(9, 4)]);
+    t.append(&batch).unwrap();
+    let kept = t.edges(Fk(1023)).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(t);
+
+    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
+    write_hwm(&path.join("input.off"), header);
+    write_hwm(&path.join("input.body"), header + 1023 * REC_LEN);
+    let t = Input::open(&path).expect("a short body with a long locator opens");
+    assert_eq!(t.count(), 1023);
+    assert_eq!(t.body.logical_len(), header + 1023 * REC_LEN);
+    assert_eq!(t.edges(Fk(1)).unwrap().unwrap(), vec![edge(1, 0)]);
+    assert_eq!(t.edges(Fk(1023)).unwrap(), kept);
+    drop(t);
+    let t = Input::open(&path).unwrap();
+    assert_eq!(t.count(), 1023);
+    assert_eq!(t.edges(Fk(1023)).unwrap(), kept);
+}
+
+fn write_hwm(path: &std::path::Path, logical: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&logical.to_le_bytes()).unwrap();
+}
+
+#[test]
 fn append_rejects_n_in_past_u16() {
     let dir = TempDir::labeled("input-wide").unwrap();
     let t = Input::create(dir.path()).unwrap();

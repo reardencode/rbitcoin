@@ -857,13 +857,104 @@ fn truncate_across_window_does_not_keep_a_sealed_tip() {
     write_hwm(&dir.join("create.loc"), short);
 
     let s = Store::open_tiny(&dir).expect("a mid-truncate crash opens");
-    assert!(s.txs.count() <= 1023, "open kept {} creates", s.txs.count());
-    let tip = s.confirmed.tip_height().map(|h| h.0);
-    assert!(
-        tip.unwrap_or(0) < 1,
-        "tip {tip:?} stays sealed past the prefix"
-    );
+    assert_eq!(s.txs.count(), 1023, "open kept the short loc prefix");
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Height 1 ends on the fitted locator count. The next block's overflow row
+/// is past that count and its header does not land. The spend marker stays
+/// on height 1.
+#[test]
+fn withheld_overflow_past_the_fitted_count_keeps_height_one() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_wide_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+
+    let (prev, parent_hash) = connect_plain_block(&s, &write, 1, prev, parent_hash, 1022);
+    assert_eq!(s.txs.count(), 1023);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .expect("height 1 publishes");
+    assert_eq!(marker.durable_through(), 1);
+
+    let ovf = s.txs.create_loc.ovf.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf, 8);
+    let disarm = Disarm(ovf);
+    let _withheld = connect_wide_coinbase(&s, &write, 2, prev, parent_hash);
+    drop(disarm);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    s.note_spend_snapshot(2);
+    s.checkpoint_spend_through(2).unwrap();
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .expect("checkpoint publishes");
+    assert_eq!(
+        marker.durable_through(),
+        1,
+        "a withheld row past the fitted count unsealed height 1"
+    );
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.txs.count(), 1023);
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn connect_plain_block(
+    s: &Store,
+    write: &rbitcoin_store::ClassCWrite,
+    h: u8,
+    prev: Fk,
+    parent_hash: [u8; 32],
+    n: u16,
+) -> (Fk, [u8; 32]) {
+    let mut batch = Vec::with_capacity(usize::from(n));
+    let mut txids = Vec::with_capacity(usize::from(n));
+    for i in 0..n {
+        let mut txid = [h; 32];
+        txid[0] = (i & 0xff) as u8;
+        txid[1] = (i >> 8) as u8;
+        txids.push(txid);
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
+        let ins = vec![InputRecord::coinbase(u32::MAX, vec![txid[0]], vec![])];
+        let outs = vec![OutputRecord::unspent(1, vec![0x51])];
+        batch.push((rec, ins, outs));
+    }
+    let fks = s.put_tx_full_batch_indexed(&batch, false).unwrap();
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&txids);
+    let header = hdr_merkle(prev, parent_hash, h, merkle);
+    let hash = header.hash;
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs
+        .put_range(write, header_fk, fks[0], u32::from(n))
+        .unwrap();
+    for fk in &fks {
+        s.strong_tx.set_strong(write, *fk, header_fk).unwrap();
+    }
+    s.confirmed
+        .set(write, Height(u32::from(h)), header_fk)
+        .unwrap();
+    (header_fk, hash)
 }
 
 fn shorten_creates(s: &Store, n: u64) {

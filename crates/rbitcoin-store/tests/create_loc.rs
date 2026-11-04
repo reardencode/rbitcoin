@@ -168,8 +168,7 @@ fn create_loc_truncate_across_window_reopens_at_the_short_prefix() {
     f.write_all(&short.to_le_bytes()).unwrap();
     drop(f);
     let loc = CreateLoc::open(&path).expect("short prefix opens");
-    assert!(loc.count() <= 1023, "count {}", loc.count());
-    assert!(loc.count() >= 1, "count {}", loc.count());
+    assert_eq!(loc.count(), 1023);
     let rows = loc
         .ovf_rows
         .read()
