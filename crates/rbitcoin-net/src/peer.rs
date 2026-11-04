@@ -4601,18 +4601,33 @@ fn confirmed_height(query: &Query, hash: &BlockHash) -> Option<u32> {
         .map(|h| h.0)
 }
 
-/// Best-chain height, or one past a confirmed parent when this body is not
-/// on the best chain yet. A tip child is `tip + 1`, so it stays inside the
-/// compact window. A loser ages out once the tip moves past that height.
+/// Best-chain height, or the same count walked back to a confirmed
+/// ancestor. A tip child is `tip + 1`, so it stays inside the compact
+/// window. A loser still ages out after its parent leaves the best chain.
 fn served_block_height(query: &Query, block: &Block) -> Option<u32> {
     if let Some(h) = confirmed_height(query, &block.block_hash()) {
         return Some(h);
     }
-    let prev = block.header.prev_blockhash;
-    if prev.to_byte_array() == [0u8; 32] {
-        return Some(0);
+    let mut prev = block.header.prev_blockhash;
+    let mut steps = 1u32;
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+        if prev.to_byte_array() == [0u8; 32] {
+            return Some(steps.saturating_sub(1));
+        }
+        if let Some(h) = confirmed_height(query, &prev) {
+            return Some(h.saturating_add(steps));
+        }
+        let Ok(Some((_, rec))) = query.get_header_by_hash(&prev.to_byte_array()) else {
+            return None;
+        };
+        let Ok(hdr) = query.wire_header_from_record(&rec) else {
+            return None;
+        };
+        prev = hdr.prev_blockhash;
+        steps = steps.saturating_add(1);
     }
-    confirmed_height(query, &prev).map(|h| h.saturating_add(1))
+    // Past the window above an ancestor that is still unconfirmed.
+    Some(0)
 }
 
 /// Active-chain blocks are always served. A side body is silent once the

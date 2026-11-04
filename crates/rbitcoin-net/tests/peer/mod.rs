@@ -7108,10 +7108,60 @@ fn hb_announce_ages_out_of_the_compact_window() {
         matches!(near, Some(GetBlockTxnServe::Txns(_))),
         "a one-block-deep loser is still the requested transactions"
     );
-    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+    // Height 1 at tip 7 is depth 6: compact is already the full block,
+    // getblocktxn is not. Treating the height as 0 would already be a
+    // full getblocktxn here only at a higher tip; tip 11 is that split.
+    while hub.tip_height().unwrap() < MAX_CMPCTBLOCK_DEPTH + 2 {
         hub.accept_block(hb_tip_child(&hub)).unwrap();
     }
-    assert!(hub.tip_height().unwrap() > MAX_GETBLOCKTXN_DEPTH);
+    assert_eq!(hub.tip_height().unwrap(), 7);
+    let mid_tx = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(mid_tx, Some(GetBlockTxnServe::Txns(_))),
+        "depth 6 is still the requested transactions"
+    );
+    let mid_cmpct = compact_serve_outcome(
+        &hub.cache,
+        &hub.query,
+        &hash,
+        hub.tip_height().unwrap(),
+        2,
+        vec![0],
+    )
+    .unwrap();
+    assert!(
+        matches!(mid_cmpct, CompactServe::Full(_)),
+        "depth 6 is past the compact window"
+    );
+    while hub.tip_height().unwrap() < MAX_GETBLOCKTXN_DEPTH + 1 {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    assert_eq!(hub.tip_height().unwrap(), 11);
+    let still = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(still, Some(GetBlockTxnServe::Txns(_))),
+        "depth 10 is not yet the full block"
+    );
+    hub.accept_block(hb_tip_child(&hub)).unwrap();
+    assert_eq!(hub.tip_height().unwrap(), 12);
     assert!(!hub.has_block(&hash));
     let aged = getblocktxn_reply(
         &hub.cache,
@@ -7139,6 +7189,75 @@ fn hb_announce_ages_out_of_the_compact_window() {
     assert!(
         matches!(cmpct, CompactServe::Full(_)),
         "a loser more than five below the tip is not a compact block"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A one-block reorg disconnects the announced block's parent. The body
+/// still ages out once the new tip is more than ten above that height.
+#[test]
+fn hb_announce_ages_after_its_parent_is_disconnected() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-reorg-age");
+    hub.ensure_genesis().unwrap();
+    let _mp = hb_relay_ready(&hub, dir.path());
+    hub.accept_block(hb_tip_child(&hub)).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hash = block.block_hash();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18557, 78, false);
+    let target = live_peer(&peers, 18558, 79, false);
+    target.set_hb_from(true);
+    target.note_best_known(parent);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(matches!(
+        out_rx.try_recv().map(PeerOut::expect_msg),
+        Ok(NetworkMessage::CmpctBlock(_))
+    ));
+    let genesis = hub.block_at_height(0).unwrap().expect("genesis");
+    let base = hub.tip_header().unwrap().time;
+    let spk = ScriptBuf::from_bytes(vec![0x52]);
+    let c1 = rbitcoin_consensus::mine_regtest_paying(
+        genesis.block_hash(),
+        base.saturating_add(600),
+        1,
+        spk.clone(),
+        vec![],
+    );
+    let c2 = rbitcoin_consensus::mine_regtest_paying(
+        c1.block_hash(),
+        base.saturating_add(1200),
+        2,
+        spk,
+        vec![],
+    );
+    hub.accept_branch(&[std::sync::Arc::new(c1), std::sync::Arc::new(c2)])
+        .expect("heavier branch connects");
+    assert!(!hub.is_connected(&parent), "the parent left the best chain");
+    assert!(!hub.has_block(&hash));
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    assert!(hub.tip_height().unwrap() > MAX_GETBLOCKTXN_DEPTH + 1);
+    let aged = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(aged, Some(GetBlockTxnServe::Block(_))),
+        "a disconnected parent does not keep the loser in the transaction reply"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
