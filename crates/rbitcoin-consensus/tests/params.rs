@@ -107,6 +107,7 @@ fn mainnet_buried_deployments_match_core() {
     assert_eq!(p.csv_height(), 419_328);
     assert_eq!(p.segwit_height(), 481_824);
     assert_eq!(p.taproot_height(), 709_632);
+    assert_eq!(p.silent_payment_height(), 842_579);
     assert!(!p.segwit_active_at(481_823));
     assert!(p.segwit_active_at(481_824));
 }
@@ -135,6 +136,7 @@ fn for_network_and_helpers() {
     assert_eq!(tn.csv_height(), 770_112);
     assert_eq!(tn.segwit_height(), 834_624);
     assert_eq!(tn.taproot_height(), 2_011_968);
+    assert_eq!(tn.silent_payment_height(), 2_813_155);
     assert_eq!(tn.coinbase_maturity(), 100);
     assert!(!tn.no_pow_retargeting());
     assert!(tn.allow_min_difficulty_blocks());

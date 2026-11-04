@@ -356,7 +356,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             milestone.height
         );
     }
-    apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
+    apply_startup_index_mode(&handle.query, &config, params.silent_payment_height())?;
     rbitcoin_query::prepare_live_indexes(&handle.query)
         .map_err(|e| crate::error::NodeError::Init(format!("index startup repair failed: {e}")))?;
     let bind = config.listen.start_p2p_bind(config.network);

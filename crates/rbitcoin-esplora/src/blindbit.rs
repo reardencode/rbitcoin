@@ -212,7 +212,7 @@ pub fn still_confirmed(query: &Query, block: &ServedBlock) -> Result<(), QueryEr
     }
 }
 
-/// Thin rows at a served height. The index starts at Taproot activation,
+/// Thin rows at a served height. The index starts at BIP-352 activation,
 /// so an earlier height is not indexed.
 #[allow(clippy::result_large_err)] // axum Response, as in handlers
 pub fn thin_rows(

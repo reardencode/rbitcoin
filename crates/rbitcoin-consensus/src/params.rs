@@ -421,6 +421,16 @@ impl ChainParams {
             Network::Regtest => 0,
         }
     }
+
+    /// Mainnet: 842579 - 8 May, 2024 when BIP-352 was merged
+    pub fn silent_payment_height(&self) -> u32 {
+        match self.network {
+            Network::Bitcoin => 842_579,
+            Network::Testnet => 2_813_155,
+            Network::Signet | Network::Testnet4 => 1,
+            Network::Regtest => 0,
+        }
+    }
 }
 
 #[doc(hidden)]
