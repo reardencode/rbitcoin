@@ -6564,6 +6564,12 @@ fn hb_compact_announce_serves_the_missing_tx() {
         matches!(deep, Some(GetBlockTxnServe::Block(_))),
         "a connected block older than the depth is the full block"
     );
+    let deep_cmpct = compact_serve_outcome(&hub.cache, &hub.query, &genesis, tip_h, 2, vec![0])
+        .expect("deep compact getdata");
+    assert!(
+        matches!(deep_cmpct, CompactServe::Full(_)),
+        "a connected block older than the compact depth is the full block"
+    );
     hub.set_prefill_compact(true);
     let mp = rbitcoin_net::tx_relay::MempoolHub::open(
         dir.path().join("mp"),
@@ -6642,6 +6648,19 @@ fn hb_compact_announce_serves_the_missing_tx() {
     let served: bitcoin::Block =
         bitcoin::consensus::encode::deserialize(&encoded[1..]).expect("served block");
     assert_eq!(served.txdata[1].compute_txid(), extra.compute_txid());
+    let staged = compact_serve_outcome(
+        &hub.cache,
+        &hub.query,
+        &hash,
+        hub.tip_height().unwrap(),
+        2,
+        vec![0],
+    )
+    .expect("compact getdata");
+    assert!(
+        matches!(staged, CompactServe::Cmpct(_)),
+        "a staged tip child stays a compact block when the tip is past the compact depth"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6750,6 +6769,193 @@ fn hb_announce_stays_servable_when_a_sibling_wins() {
     )
     .expect("getblocktxn after invalidate");
     assert!(reply.is_none(), "an invalidated block is not served");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Accept of the announced block can return `Accepted` because a different
+/// held branch connected. That result must not drop the staged body.
+#[test]
+fn hb_announce_stays_servable_when_another_held_branch_connects() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-other-branch");
+    hub.ensure_genesis().unwrap();
+    for _ in 0..=MAX_GETBLOCKTXN_DEPTH {
+        hub.accept_block(hb_tip_child(&hub)).unwrap();
+    }
+    assert!(hub.tip_height().unwrap() > MAX_GETBLOCKTXN_DEPTH);
+    let fork_h = hub.tip_height().unwrap().saturating_sub(1);
+    let fork = hub
+        .block_at_height(fork_h)
+        .unwrap()
+        .expect("parent of the tip");
+    let base = hub.tip_header().unwrap().time;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let p1 = rbitcoin_consensus::mine_regtest_paying(
+        fork.block_hash(),
+        base.saturating_add(600),
+        fork_h.saturating_add(1),
+        spk.clone(),
+        vec![],
+    );
+    let p2 = rbitcoin_consensus::mine_regtest_paying(
+        p1.block_hash(),
+        base.saturating_add(1200),
+        fork_h.saturating_add(2),
+        spk.clone(),
+        vec![],
+    );
+    let p3 = rbitcoin_consensus::mine_regtest_paying(
+        p2.block_hash(),
+        base.saturating_add(1800),
+        fork_h.saturating_add(3),
+        spk,
+        vec![],
+    );
+    hub.hold_unconnected_body(p1);
+    hub.hold_unconnected_body(p2);
+    hub.hold_unconnected_body(p3);
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    mp.set_relay_enabled(true);
+    let tip = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hash = block.block_hash();
+    let coinbase = block.txdata[0].compute_txid();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18545, 66, false);
+    let target = live_peer(&peers, 18546, 67, false);
+    target.set_hb_from(true);
+    target.note_best_known(tip);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "the high-bandwidth peer is announced the compact block"
+    );
+    let sibling = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        hub.tip_header().unwrap().time.saturating_add(1200),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    );
+    assert_ne!(sibling.block_hash(), hash);
+    hub.accept_block(sibling).expect("sibling connects");
+    let outcome = rt
+        .block_on(accept_received_from_peer(&hub, block, Some(from.as_ref())))
+        .expect("announced block is not a peer fault");
+    assert!(
+        matches!(outcome, rbitcoin_net::chain::AcceptOutcome::Accepted { .. }),
+        "a heavier held branch connects, got {outcome:?}"
+    );
+    assert!(
+        !hub.has_block(&hash),
+        "the announced block was not the one that connected"
+    );
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after the other branch");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("accepting a different branch must not forget the announced body");
+    };
+    assert_eq!(bt.transactions[0].compute_txid(), coinbase);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A compact announce of a block the clock still calls too new stays
+/// servable. The failure is not a permanent reject.
+#[test]
+fn hb_announce_stays_servable_when_the_block_is_too_new() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-announce-too-new");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    mp.set_relay_enabled(true);
+    let tip = hub.tip_hash().unwrap();
+    let now = hub.tip_header().unwrap().time;
+    hub.clock.set_mock(i64::from(now));
+    let block = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        now.saturating_add(600),
+        1,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    );
+    let hash = block.block_hash();
+    let coinbase = block.txdata[0].compute_txid();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18547, 68, false);
+    let target = live_peer(&peers, 18548, 69, false);
+    target.set_hb_from(true);
+    target.note_best_known(tip);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "the high-bandwidth peer is announced the compact block"
+    );
+    // The header was acceptable when it was announced. The clock then sits
+    // more than two hours behind that stamp, which is not a permanent reject.
+    hub.clock.set_mock(i64::from(now) - 3 * 3600);
+    let err = rt
+        .block_on(accept_received_from_peer(&hub, block, Some(from.as_ref())))
+        .expect_err("the block is still too new");
+    let msg = err
+        .consensus_rules()
+        .map(rbitcoin_consensus::block_reject_reason)
+        .unwrap_or_else(|| panic!("expected a rule failure, got {err:?}"));
+    assert!(msg.contains("time-too-new"), "got {msg}");
+    assert!(!hub.is_block_invalid(&hash));
+    let reply = getblocktxn_reply(
+        &hub.cache,
+        &hub.query,
+        BlockTransactionsRequest {
+            block_hash: hash,
+            indexes: vec![0],
+        },
+        hub.tip_height().unwrap(),
+    )
+    .expect("getblocktxn after time-too-new");
+    let Some(GetBlockTxnServe::Txns(bt)) = reply else {
+        panic!("a not-yet-valid timestamp must not forget the announced body");
+    };
+    assert_eq!(bt.transactions[0].compute_txid(), coinbase);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -233,7 +233,7 @@ pub async fn accept_received_from_peer(
             r
         })
     };
-    if drop_servable_after_accept(&r) {
+    if drop_servable_after_accept(hub, &announced, &r) {
         hub.cache.drop_servable(&announced);
     }
     if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
@@ -242,22 +242,41 @@ pub async fn accept_received_from_peer(
     r
 }
 
-/// Drop the staged body only once the store can serve it, or the block was
-/// rejected. `UnknownParent` and a lost tip race come back as
-/// [`AcceptOutcome::IgnoredWeaker`], and the store still has no body.
-fn drop_servable_after_accept(r: &Result<AcceptOutcome, NetError>) -> bool {
+/// Drop the staged body only once this hash is in the store, or the block
+/// was rejected for good. `Accepted` can be a different held branch.
+/// `UnknownParent` and a lost tip race come back as
+/// [`AcceptOutcome::IgnoredWeaker`]. A not-yet-valid timestamp is not a
+/// permanent reject, and the store still has no body.
+fn drop_servable_after_accept(
+    hub: &ChainHub,
+    announced: &bitcoin::BlockHash,
+    r: &Result<AcceptOutcome, NetError>,
+) -> bool {
     match r {
-        Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => true,
+        Ok(AcceptOutcome::AlreadyHave) => true,
+        Ok(AcceptOutcome::Accepted { .. }) => store_has_announced_body(hub, announced),
         Ok(AcceptOutcome::IgnoredWeaker) => false,
         Err(e)
             if net_error_needs_parent(e)
                 || matches!(e, NetError::Store(_))
-                || net_error_is_store_not_found(e) =>
+                || net_error_is_store_not_found(e)
+                || crate::chain::accept_err_is_temporary_time(e) =>
         {
             false
         }
         Err(_) => true,
     }
+}
+
+fn store_has_announced_body(hub: &ChainHub, hash: &bitcoin::BlockHash) -> bool {
+    if hub.has_block(hash) {
+        return true;
+    }
+    hub.query
+        .reconstruct_block_by_hash(&hash.to_byte_array())
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// The hub and key a misbehavior exit may record. Noban and manual peers
@@ -4453,13 +4472,10 @@ pub fn compact_serve_outcome(
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(CompactServe::Missing);
     };
-    let block_h = query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|ht| ht.0)
-        .unwrap_or(0);
-    if tip_h.saturating_sub(block_h) > MAX_CMPCTBLOCK_DEPTH {
+    // Missing is not genesis. A staged body has no confirmed height, and
+    // height 0 is a real block.
+    let block_h = confirmed_height(query, hash);
+    if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_CMPCTBLOCK_DEPTH) {
         return Ok(CompactServe::Full(block));
     }
     match HeaderAndShortIds::from_block(&block, rand_nonce(), ver, &pref) {
@@ -4564,6 +4580,17 @@ pub async fn serve_getdata_wtx(
 /// Core: past this depth a `getblocktxn` is answered with the full block.
 #[doc(hidden)]
 pub const MAX_GETBLOCKTXN_DEPTH: u32 = 10;
+
+/// Confirmed-chain height. `None` is not genesis: height 0 is a real block,
+/// and a staged body has no row yet. A store error is also `None`, so a
+/// deep block is served as transactions until the height read works.
+fn confirmed_height(query: &Query, hash: &BlockHash) -> Option<u32> {
+    query
+        .height_of_hash(&hash.to_byte_array())
+        .ok()
+        .flatten()
+        .map(|h| h.0)
+}
 
 #[doc(hidden)]
 pub enum GetBlockTxnServe {
@@ -4677,13 +4704,7 @@ pub fn getblocktxn_reply(
             None => return Ok(Some(GetBlockTxnServe::BadIndex)),
         }
     }
-    // Confirmed height only. A staged body is not on the chain yet, and
-    // height 0 is genesis, so a missing height must not take this branch.
-    let block_h = query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|h| h.0);
+    let block_h = confirmed_height(query, &hash);
     if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_GETBLOCKTXN_DEPTH) {
         return Ok(Some(GetBlockTxnServe::Block(block)));
     }
