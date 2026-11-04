@@ -212,6 +212,47 @@ fn long_body_reopen_cuts_back_to_the_locator_prefix() {
     assert_eq!(t.edges(Fk(1024)).unwrap().unwrap(), vec![edge(9, 4)]);
 }
 
+/// The locator and the checkpoint still name 1024 creates. The body header
+/// was already shortened. Open refuses that datadir.
+#[test]
+fn open_refuses_a_short_body_when_the_headers_agree() {
+    let dir = TempDir::labeled("input-headers-agree-short-body").unwrap();
+    let t = Input::create(dir.path()).unwrap();
+    let batch = vec![vec![edge(1, 0)]; 1024];
+    t.append(&batch).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(t);
+
+    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
+    write_hwm(&path.join("input.body"), header + 100 * REC_LEN);
+    match Input::open(&path) {
+        Err(StoreError::Corrupt("invariant: input.body truncate")) => {}
+        Err(err) => panic!("{err}"),
+        Ok(_) => panic!("open kept a short body behind a long locator"),
+    }
+}
+
+/// The locator was shortened inside a window, so the checkpoint did not
+/// change. Open cuts the long body back before the next append.
+#[test]
+fn short_locator_in_one_window_cuts_the_long_body() {
+    let dir = TempDir::labeled("input-same-window-long-body").unwrap();
+    let t = Input::create(dir.path()).unwrap();
+    let batch: Vec<_> = (0..80u32).map(|i| vec![edge(1, i)]).collect();
+    t.append(&batch).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(t);
+
+    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
+    write_hwm(&path.join("input.loc"), header + 40 * LOC_SLOT);
+    let t = Input::open(&path).expect("a long body with a short locator opens");
+    assert_eq!(t.count(), 40);
+    assert_eq!(t.body.logical_len(), header + 40 * REC_LEN);
+    assert_eq!(t.edges(Fk(40)).unwrap().unwrap(), vec![edge(1, 39)]);
+    t.append(&[vec![edge(9, 4)]]).unwrap();
+    assert_eq!(t.edges(Fk(41)).unwrap().unwrap(), vec![edge(9, 4)]);
+}
+
 fn write_hwm(path: &std::path::Path, logical: u64) {
     use std::io::{Seek, SeekFrom, Write};
     let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
