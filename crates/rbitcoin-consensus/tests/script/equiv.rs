@@ -5,6 +5,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::key::{Keypair, TapTweak};
 use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
+use bitcoin::taproot::{LeafVersion, TaprootBuilder};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
 use rbitcoin_consensus::block::{ScriptCheckJob, ScriptVerifyFlags};
@@ -173,5 +174,88 @@ fn two_input_taproot_gets_every_prevout() {
     assert_eq!(
         equiv_verify(&tx, std::slice::from_ref(&spent), 0, EQUIV_ALLOWED),
         Err(EquivFail::BadInput)
+    );
+}
+
+fn p2tr_program(key: &[u8]) -> ScriptBuf {
+    let mut spk = vec![0x51, 0x20];
+    spk.extend_from_slice(key);
+    ScriptBuf::from_bytes(spk)
+}
+
+/// Core `SignatureHashSchnorr` fails `SIGHASH_SINGLE` when `nIn >= nOut`
+/// as `SCHNORR_SIG_HASHTYPE` (46), before the signature is checked.
+#[test]
+fn sighash_single_past_outputs_is_schnorr_hashtype() {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
+    let kp = Keypair::from_secret_key(&secp, &sk);
+    let (xonly, _) = kp.x_only_public_key();
+    let mut sig = secp
+        .sign_schnorr_no_aux_rand(&Message::from_digest([1u8; 32]), &kp)
+        .as_ref()
+        .to_vec();
+    sig.push(0x03);
+    let spk = p2tr_program(&xonly.serialize());
+    let prevouts = vec![
+        TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: spk.clone(),
+        },
+        TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: spk,
+        },
+    ];
+    let tx = shell(vec![
+        one_in(ScriptBuf::new(), Witness::new()),
+        one_in(ScriptBuf::new(), Witness::from_slice(&[sig.as_slice()])),
+    ]);
+    assert_eq!(
+        equiv_verify(&tx, &prevouts, 1, EQUIV_ALLOWED),
+        Err(EquivFail::Script(46))
+    );
+
+    let leaf = ScriptBuf::from_bytes(vec![0xac]);
+    let internal = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[8u8; 32]).unwrap());
+    let (internal_xonly, _) = internal.x_only_public_key();
+    let spend = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal_xonly)
+        .unwrap();
+    let control = spend
+        .control_block(&(leaf.clone(), LeafVersion::TapScript))
+        .unwrap()
+        .serialize();
+    let mut sig = secp
+        .sign_schnorr_no_aux_rand(&Message::from_digest([2u8; 32]), &kp)
+        .as_ref()
+        .to_vec();
+    sig.push(0x83);
+    let witness = Witness::from_slice(&[
+        sig.as_slice(),
+        xonly.serialize().as_ref(),
+        leaf.as_bytes(),
+        control.as_slice(),
+    ]);
+    let program = p2tr_program(&spend.output_key().to_x_only_public_key().serialize());
+    let prevouts = vec![
+        TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: program.clone(),
+        },
+        TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: program,
+        },
+    ];
+    let tx = shell(vec![
+        one_in(ScriptBuf::new(), Witness::new()),
+        one_in(ScriptBuf::new(), witness),
+    ]);
+    assert_eq!(
+        equiv_verify(&tx, &prevouts, 1, EQUIV_ALLOWED),
+        Err(EquivFail::Script(46))
     );
 }

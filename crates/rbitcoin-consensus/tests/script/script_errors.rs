@@ -568,6 +568,7 @@ fn shipped_script_tokens_map_to_core_ordinals() {
         ("cleanstack", 30),
         ("tapscript xonly", 47),
         ("p2tr xonly", 47),
+        ("tapscript sighash single", 46),
     ] {
         assert_eq!(consensus_ordinal(token), Some(ordinal), "{token}");
     }

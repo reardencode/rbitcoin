@@ -163,7 +163,7 @@ pub fn consensus_ordinal(message: &str) -> Option<i32> {
         "WITNESS_MALLEATED_P2SH" => ScriptFail::WitnessMalleatedP2sh,
         "WITNESS_UNEXPECTED" => ScriptFail::WitnessUnexpected,
         "SCHNORR_SIG_SIZE" | "p2tr sig len" => ScriptFail::SchnorrSigSize,
-        "SCHNORR_SIG_HASHTYPE" | "tapscript sighash" | "p2tr sighash type" => {
+        "SCHNORR_SIG_HASHTYPE" | "tapscript sighash single" | "p2tr sighash type" => {
             ScriptFail::SchnorrSigHashType
         }
         "SCHNORR_SIG"
