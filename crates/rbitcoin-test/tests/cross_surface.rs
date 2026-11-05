@@ -3368,15 +3368,18 @@ async fn history_closed(electrum_addr: SocketAddr, scripthash: &str) {
     let mut el = TcpStream::connect(electrum_addr)
         .await
         .expect("electrum listens");
-    let hist = electrum_rpc(
-        &mut el,
-        1,
-        "blockchain.scripthash.get_history",
-        json!([scripthash]),
-    )
-    .await;
-    let msg = hist["error"]["message"].as_str().unwrap_or("");
-    assert!(msg.contains("scripthash index disabled"), "{hist}");
+    for (id, method) in [
+        (1u64, "blockchain.scripthash.get_history"),
+        (2, "blockchain.scripthash.get_balance"),
+        (3, "blockchain.scripthash.listunspent"),
+    ] {
+        let hist = electrum_rpc(&mut el, id, method, json!([scripthash])).await;
+        let msg = hist["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("scripthash index disabled"),
+            "{method}: {hist}"
+        );
+    }
 }
 
 async fn history_len(electrum_addr: SocketAddr, scripthash: &str) -> usize {
@@ -3455,11 +3458,11 @@ async fn enter_tip_mode_indexes() {
     assert_eq!(history_len(electrum_addr, &op_true).await, 3);
     stop_run_p2p(rpc_addr, node).await;
 
-    // Index off again: Electrum still listens. The watermark from the
-    // previous run keeps history answering.
+    // Index off again: Electrum still listens. A watermark left on disk
+    // does not keep history, balance, or listunspent answering.
     let node = start(false);
     wait_listeners(&[rpc_addr, electrum_addr]).await;
-    assert_eq!(history_len(electrum_addr, &op_true).await, 3);
+    history_closed(electrum_addr, &op_true).await;
     stop_run_p2p(rpc_addr, node).await;
 
     // A crash left a collect run behind and the write-behind mark short of

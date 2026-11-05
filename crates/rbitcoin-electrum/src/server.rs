@@ -2189,6 +2189,15 @@ pub fn electrum_at_chain_view<F>(
 where
     F: FnMut(&Query, &Value, Option<&ChainView>, bool) -> Result<Value, String>,
 {
+    // A leftover watermark must not choose the error. `asof:` ahead of that
+    // mark is `asof not on chain`; at or behind it the pin succeeds and the
+    // later gate says the index is off. Refuse before any pin.
+    if method_needs_sh_index(method) && !query.sh_history_available() {
+        return (
+            Err(rbitcoin_query::SCRIPTHASH_INDEX_DISABLED.to_string()),
+            None,
+        );
+    }
     let kind = electrum_pin_kind(method);
     match take_trailing_asof(method, params) {
         Ok((stripped, Some(hash))) => match query.pin_view(kind, Some(&hash)) {
