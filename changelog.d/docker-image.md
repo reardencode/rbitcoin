@@ -1,7 +1,7 @@
 Added
 
 - **Container image and aarch64 Linux binaries.** Each release tag
-  publishes `ghcr.io/reardencode/rbitcoin` (and Docker Hub
+  publishes `ghcr.io/rbitcoin-org/rbitcoin` (and Docker Hub
   `reardencode/rbitcoin` once enabled) for `linux/amd64` and
   `linux/arm64`: the Release musl binaries on `FROM scratch`, running as
   uid 10001 with the datadir at `/data/datadir`. Tags are `X.Y.Z`, `X.Y`,

@@ -3,7 +3,7 @@
 
 [environment]
 CLIENT_NAME=Bitcoin Core
-CLIENT_BUGREPORT=https://github.com/reardencode/rbitcoin/issues
+CLIENT_BUGREPORT=https://github.com/rbitcoin-org/rbitcoin/issues
 SRCDIR=@SRCDIR@
 BUILDDIR=@BUILDDIR@
 EXEEXT=

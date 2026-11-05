@@ -106,9 +106,9 @@ Pull-request and review text follows
 Read the thread before a review or a reply. Do not copy that section here.
 
 ```bash
-gh pr create --repo reardencode/rbitcoin --head <area>/<short-name> --title "…" --body "…"
-gh pr view --repo reardencode/rbitcoin --json mergeable,mergeStateStatus
-./scripts/pr-checks-watch.sh --repo reardencode/rbitcoin --pr <n> \
+gh pr create --repo rbitcoin-org/rbitcoin --head <area>/<short-name> --title "…" --body "…"
+gh pr view --repo rbitcoin-org/rbitcoin --json mergeable,mergeStateStatus
+./scripts/pr-checks-watch.sh --repo rbitcoin-org/rbitcoin --pr <n> \
   --interest windows
 ```
 
@@ -125,8 +125,8 @@ stop polling, fetch that job’s log, and start the fix. `gh pr checks --watch`
 waits out `coverage` and zizmor after a job this change already failed.
 
 ```bash
-gh api --allow-escape-sequences repos/reardencode/rbitcoin/actions/jobs/<job-id>/logs
-gh run view <run-id> --repo reardencode/rbitcoin --job <job-id> --log-failed
+gh api --allow-escape-sequences repos/rbitcoin-org/rbitcoin/actions/jobs/<job-id>/logs
+gh run view <run-id> --repo rbitcoin-org/rbitcoin --job <job-id> --log-failed
 ```
 
 **Unmergeable means tests do not run.** If `mergeable` is `CONFLICTING` or

@@ -1,6 +1,6 @@
 # rbitcoin
 
-[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/reardencode/rbitcoin/badges/coverage.json)](TESTING.md)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rbitcoin-org/rbitcoin/badges/coverage.json)](TESTING.md)
 
 Bitcoin **full node** in Rust aimed at **production server-side** use: multi-peer
 IBD, tip follow, block/tx relay (tip mode), optional **Core-class JSON-RPC**, and
@@ -90,7 +90,7 @@ and Windows/macOS notes: **[`CONTRIBUTING.md`](./CONTRIBUTING.md)** (Getting
 started).
 
 ```bash
-git clone https://github.com/reardencode/rbitcoin.git && cd rbitcoin
+git clone https://github.com/rbitcoin-org/rbitcoin.git && cd rbitcoin
 cargo build -p rbitcoin-node -p rbitcoin-cli
 ```
 

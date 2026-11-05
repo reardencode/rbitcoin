@@ -148,4 +148,4 @@ else
   echo "release: pushed ${branch} + ${tag} → $REMOTE"
 fi
 echo "release: GitHub Actions .github/workflows/release.yml builds musl/Windows/Darwin"
-echo "release: https://github.com/reardencode/rbitcoin/releases/tag/${tag}"
+echo "release: https://github.com/rbitcoin-org/rbitcoin/releases/tag/${tag}"

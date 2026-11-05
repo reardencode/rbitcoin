@@ -5,7 +5,7 @@
 # Owner: TESTING.md (Mutation testing).
 set -euo pipefail
 
-REPO="${GITHUB_REPOSITORY:-reardencode/rbitcoin}"
+REPO="${GITHUB_REPOSITORY:-rbitcoin-org/rbitcoin}"
 BRANCH="${MUTANTS_STATE_BRANCH:-mutants-state}"
 CURSOR_SRC="${1:-cursor.json}"
 MISSED_SRC="${2:-missed.txt}"

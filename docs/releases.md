@@ -125,8 +125,8 @@ All hermetic pins: `./scripts/release.test.sh` (includes
 This VM’s App token is HTTPS-only. Prefer `--no-push` then:
 
 ```bash
-git push https://github.com/reardencode/rbitcoin.git refs/tags/vX.Y.Z
-git push https://github.com/reardencode/rbitcoin.git refs/heads/vX.Y.x   # X.Y.0 only
+git push https://github.com/rbitcoin-org/rbitcoin.git refs/tags/vX.Y.Z
+git push https://github.com/rbitcoin-org/rbitcoin.git refs/heads/vX.Y.x   # X.Y.0 only
 ```
 
 An operator with SSH `pushurl` may omit `--no-push`.

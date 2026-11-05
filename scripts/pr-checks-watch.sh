@@ -4,7 +4,7 @@
 # after windows (or another job of interest) is already red.
 set -euo pipefail
 
-REPO="${PR_CHECKS_REPO:-reardencode/rbitcoin}"
+REPO="${PR_CHECKS_REPO:-rbitcoin-org/rbitcoin}"
 PR=""
 ONCE=0
 SLEEP_S=10

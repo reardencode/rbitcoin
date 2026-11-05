@@ -41,7 +41,7 @@ either module into a NixOS configuration:
 
 ```nix
 {
-  inputs.rbitcoin.url = "github:reardencode/rbitcoin";
+  inputs.rbitcoin.url = "github:rbitcoin-org/rbitcoin";
 
   outputs =
     {
@@ -183,7 +183,7 @@ Default `--datadir` is cwd-relative `datadir` via `Path::new(".").join("datadir"
 
 ### Container image
 
-Each `v*.*.*` tag publishes `ghcr.io/reardencode/rbitcoin` for
+Each `v*.*.*` tag publishes `ghcr.io/rbitcoin-org/rbitcoin` for
 `linux/amd64` and `linux/arm64`, and Docker Hub `reardencode/rbitcoin` once
 the maintainers enable it ([`releases.md`](../releases.md)). The image is
 the Release musl binaries on `FROM scratch`: no shell, no libc, no base
@@ -194,7 +194,7 @@ image. Tags are `X.Y.Z`, `X.Y` (newest patch on that line), and `latest`
 docker volume create rbitcoin
 docker run -d --name rbitcoin --stop-timeout 300 \
   -v rbitcoin:/data -p 8333:8333 \
-  ghcr.io/reardencode/rbitcoin:X.Y.Z \
+  ghcr.io/rbitcoin-org/rbitcoin:X.Y.Z \
   --listen 0.0.0.0:8333 --rpc-listen 127.0.0.1:8332
 docker logs -f rbitcoin
 docker exec rbitcoin rbitcoin-cli getblockchaininfo

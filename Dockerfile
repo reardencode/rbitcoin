@@ -34,7 +34,7 @@ STOPSIGNAL SIGTERM
 
 LABEL org.opencontainers.image.title="rbitcoin" \
       org.opencontainers.image.description="Experimental Bitcoin full node (rbitcoin-node) and CLI" \
-      org.opencontainers.image.source="https://github.com/reardencode/rbitcoin" \
+      org.opencontainers.image.source="https://github.com/rbitcoin-org/rbitcoin" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
