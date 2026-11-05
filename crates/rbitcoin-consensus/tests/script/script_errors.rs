@@ -321,6 +321,34 @@ fn pinned_interpreter_strings_stay() {
 }
 
 #[test]
+fn interpreter_only_p2wpkh_witness_count_is_mismatch() {
+    let mut program = vec![0x00, 0x14];
+    program.extend_from_slice(&[0x11; 20]);
+    let spk = ScriptBuf::from_bytes(program);
+    for witness in [
+        Witness::new(),
+        Witness::from_slice(&[&[0x01][..]]),
+        Witness::from_slice(&[&[0x01][..], &[0x02][..], &[0x03][..]]),
+    ] {
+        let mut spent = job(spk.clone(), ScriptBuf::new(), witness);
+        spent.interpreter_only = true;
+        let got = token(verify_job_all_inputs(&spent));
+        assert_eq!(got, "WITNESS_PROGRAM_MISMATCH", "{got}");
+        assert_eq!(
+            consensus_ordinal(&got),
+            Some(ScriptFail::WitnessProgramMismatch.ordinal())
+        );
+    }
+    let typed = token(verify_job_all_inputs(&job(
+        spk,
+        ScriptBuf::new(),
+        Witness::new(),
+    )));
+    assert_eq!(typed, "p2wpkh witness len");
+    assert_eq!(consensus_ordinal(&typed), None);
+}
+
+#[test]
 fn script_fail_ordinals_match_core_v32() {
     assert_eq!(ScriptFail::EvalFalse.ordinal(), 2);
     assert_eq!(ScriptFail::ScriptNum.ordinal(), 4);
