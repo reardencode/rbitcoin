@@ -2091,25 +2091,38 @@ impl ActiveMempool {
 
     /// Lift one parked orphan that waits only on `parent` and spends its
     /// dust output, so it can be admitted with `parent` as 1p1c (Core finds
-    /// the orphan child of a reconsiderable parent the same way). `tried`
-    /// skips a child whose pair with `parent` already failed.
+    /// the orphan child of a reconsiderable parent the same way). A child
+    /// that `peer`, the parent's sender, announced goes first, as in Core's
+    /// `Find1P1CPackage`. `tried` skips a child whose pair with `parent`
+    /// already failed.
     pub fn lift_dust_spender(
         &mut self,
         parent: &Transaction,
+        peer: u64,
         tried: impl Fn(&Transaction) -> bool,
     ) -> Option<LiftedOrphan> {
         let pid = parent.compute_txid();
-        let child = self
+        let mut untried = self
             .orphanage
             .by_parent
             .get(&pid)?
             .iter()
             .filter_map(|id| self.orphanage.by_txid.get(id))
-            .find(|e| {
+            .filter(|e| {
                 e.missing.len() == 1 && policy::spends_dust_of(parent, &e.tx) && !tried(&e.tx)
-            })?
-            .tx
-            .clone();
+            });
+        let mut other = None;
+        let child = loop {
+            let Some(e) = untried.next() else {
+                break other?;
+            };
+            if e.announcers.contains(&peer) {
+                break e;
+            }
+            other.get_or_insert(e);
+        }
+        .tx
+        .clone();
         self.lift_parked_member(&child)
     }
 
@@ -2630,16 +2643,18 @@ impl ActiveMempool {
             return None;
         }
         let parent = self.extra_by_txid(pid)?.clone();
-        if !self.package_pays_min_relay(&parent, child, utxos) {
+        if !self.package_clears_floor(&parent, child, utxos) {
             return None;
         }
         Some(parent)
     }
 
-    /// Combined parent+child fee must meet min-relay. Parent inputs must be
-    /// confirmed (no unconfirmed grandparent — same limit as Core 1p1c).
+    /// Combined parent+child fee must meet the mempool fee floor, the rolling
+    /// minimum included, as Core checks a package against `GetMinFee`. Parent
+    /// inputs must be confirmed (no unconfirmed grandparent — same limit as
+    /// Core 1p1c).
     #[doc(hidden)]
-    pub fn package_pays_min_relay(
+    pub fn package_clears_floor(
         &self,
         parent: &Transaction,
         child: &Transaction,
@@ -2676,7 +2691,7 @@ impl ActiveMempool {
         policy::meets_min_relay_fee_at(
             pf.saturating_add(cf),
             pw.saturating_add(cw),
-            self.min_relay_sat_kvb,
+            self.mempool_min_fee_sat_kvb(),
         )
     }
 

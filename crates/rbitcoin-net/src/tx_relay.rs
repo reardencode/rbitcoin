@@ -602,7 +602,8 @@ pub fn fee_progress_due(elapsed: Duration) -> bool {
 /// SHA256 over the pair's sorted wtxids, like Core's `GetPackageHash`. Kept
 /// in the recent rejects so a peer pair that failed is not tried again this
 /// block.
-fn package_hash(parent: &Transaction, child: &Transaction) -> Wtxid {
+#[doc(hidden)]
+pub fn package_hash(parent: &Transaction, child: &Transaction) -> Wtxid {
     use bitcoin::hashes::{sha256, HashEngine};
     let mut ids = [parent.compute_wtxid(), child.compute_wtxid()];
     ids.sort_by_key(|w| w.to_byte_array());
@@ -3051,9 +3052,10 @@ impl MempoolHub {
     /// A peer's child pairs only with a parent whose dust output it spends.
     /// A peer's child of any other low-fee parent waits in the orphanage
     /// (Core functional `p2p_orphan_handling.py`). A peer pair that already
-    /// failed is not tried again until the next block clears the recent
-    /// rejects, as Core's reconsiderable-rejects filter keyed by package
-    /// hash. A local submit is tried every time.
+    /// failed, or a parent that failed inside an earlier pair, is not tried
+    /// again until the next block clears the recent rejects, as Core's
+    /// reconsiderable-rejects filter keyed by package hash. A local submit is
+    /// tried every time.
     fn untried_pair_parent(
         &self,
         g: &ActiveMempool,
@@ -3077,7 +3079,7 @@ impl MempoolHub {
             return PairLookup::Skip;
         }
         let key = package_hash(parent, child);
-        if self.try_recent_reject(&key) {
+        if self.try_recent_reject(&parent.compute_wtxid()) || self.try_recent_reject(&key) {
             return PairLookup::Skip;
         }
         match g.try_one_parent_package(child, missing, utxo) {
@@ -3117,10 +3119,15 @@ impl MempoolHub {
             e,
             AcceptError::Policy("min relay fee") | AcceptError::Policy("mempool min fee")
         );
-        if origin.peer().is_none() || !fee_only {
+        let peer = origin.peer()?;
+        if !fee_only
+            || rbitcoin_consensus::policy::dust_vouts(parent)
+                .next()
+                .is_none()
+        {
             return None;
         }
-        self.lock_write().lift_dust_spender(parent, |child| {
+        self.lock_write().lift_dust_spender(parent, peer, |child| {
             self.try_recent_reject(&package_hash(parent, child))
         })
     }
@@ -3166,8 +3173,8 @@ impl MempoolHub {
             }
         };
         // Parent is live until the child commits (or we roll it back). A
-        // concurrent spender of the parent that lands in this window survives
-        // `remove_txid(parent)` if the child then fails.
+        // concurrent spender of the parent that lands in this window keeps
+        // the parent in if the child then fails.
         let sample_p = self.sample_chain_coins(parent, utxo);
         let parent_commit = {
             let mut g = self.lock_write();
@@ -3175,7 +3182,8 @@ impl MempoolHub {
         };
         let (parent_res, prevouts_p) = match parent_commit.result {
             Ok(r) => (r, parent_commit.prevouts),
-            Err(_) => {
+            Err(e) => {
+                self.note_if_accept_failure(parent, &e);
                 self.unindex_evicted(&parent_commit.failed_evict);
                 self.restore_replaced(&parent_commit.undone);
                 self.publish_fee_floor();
@@ -3234,12 +3242,17 @@ impl MempoolHub {
         }
     }
 
+    /// Take back a 1p1c parent whose child did not commit. A spender of the
+    /// parent that another admit committed meanwhile keeps the parent in.
     #[doc(hidden)]
     pub fn rollback_1p1c_parent(&self, txid: &Txid, evicted: &[Txid]) {
         let mut gone = evicted.to_vec();
         {
             let mut g = self.lock_write();
-            gone.extend(g.remove_txid_tree(txid));
+            let spent = g.graph.descendant_set(txid).is_some_and(|d| d.len() > 1);
+            if !spent {
+                gone.extend(g.remove_txid_tree(txid));
+            }
         }
         self.unindex_evicted(&gone);
     }
@@ -4214,11 +4227,16 @@ impl MempoolHub {
         .await;
         let (parent_res, prevouts_p) = match parent_commit.result {
             Ok(r) => (r, parent_commit.prevouts),
-            Err(_) => {
+            Err(e) => {
                 let hub = Arc::clone(self);
                 let failed = parent_commit.failed_evict;
                 let undone = parent_commit.undone;
-                crate::reactor::off_pool(move || hub.unindex_evicted(&failed)).await;
+                let parent_f = parent.clone();
+                crate::reactor::off_pool(move || {
+                    hub.note_if_accept_failure(&parent_f, &e);
+                    hub.unindex_evicted(&failed);
+                })
+                .await;
                 self.restore_replaced_async(undone).await;
                 let hub = Arc::clone(self);
                 crate::reactor::off_pool(move || hub.publish_fee_floor()).await;

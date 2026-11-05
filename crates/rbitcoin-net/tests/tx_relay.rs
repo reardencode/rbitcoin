@@ -896,20 +896,12 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
     hub.accept_tx(&sib).expect("paying sibling of live parent");
     assert!(hub.relay_seq_of(&sib_w).is_some());
     assert!(hub.accept_time_txid(&sib_id).is_some());
-    let tmpl = hub.template_updates();
+    // A 1p1c rollback keeps a parent that another admit's child spends.
     hub.rollback_1p1c_parent(&lpid, &[]);
-    assert!(!hub.contains(&lpid));
-    assert!(!hub.contains(&sib_id));
-    assert!(!hub.is_local_origin(&payer.compute_txid()));
-    assert!(
-        hub.relay_seq_of(&sib_w).is_none(),
-        "published spender must leave wtxid/relay maps"
-    );
-    assert!(hub.accept_time_txid(&sib_id).is_none());
-    assert!(
-        hub.template_updates() > tmpl,
-        "template must bump like remove_for_block_spent"
-    );
+    assert!(hub.contains(&lpid));
+    assert!(hub.contains(&sib_id));
+    assert!(hub.relay_seq_of(&sib_w).is_some());
+    assert!(hub.is_local_origin(&payer.compute_txid()));
     // The local submit path is async. A child of a below-relay parent still
     // brings that parent in without a blocking-pool thread.
     let hub = Arc::new(hub);
@@ -3465,6 +3457,103 @@ fn invalid_anchor_spenders_do_not_hold_the_slot() {
             "the paying child got in"
         );
         assert_eq!(hub.orphan_count(), 0, "the dust spenders were dropped");
+    }
+}
+
+/// [`zero_fee_anchor`] grown to about `pad` vbytes by an OP_RETURN.
+fn padded_anchor(coin: Txid, pad: usize) -> Transaction {
+    let mut parent = zero_fee_anchor(coin);
+    let mut script = vec![0x6a];
+    script.resize(1 + pad, 0);
+    parent.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(script),
+    });
+    parent
+}
+
+/// Under fee pressure the pair's combined feerate must clear the rolling
+/// floor. A large 0-fee parent whose child pays the floor only for itself
+/// stays out in either order.
+#[test]
+fn peer_anchor_pair_pays_the_rolling_floor_as_a_package() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.lock_write().note_evicted_feerate(5_000);
+
+        let parent = padded_anchor(cbs[0], 9_000);
+        let child = spend_anchor(&parent, cbs[1], 2_000);
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert!(!hub.contains(&parent.compute_txid()), "parent first");
+
+        let parent = padded_anchor(cbs[2], 9_000);
+        let child = spend_anchor(&parent, cbs[3], 2_000);
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        assert!(!hub.contains(&parent.compute_txid()), "child first");
+    }
+}
+
+/// A parent that fails inside a peer pair is remembered by wtxid, so the
+/// next child of it does not verify and commit the parent again.
+#[test]
+fn failed_anchor_parent_is_not_tried_again_per_child() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        // Over the TRUC size limit, which only the commit checks.
+        let parent = padded_anchor(cbs[0], 10_100);
+        let err = from_peer(&hub, &parent, 7, on_async).expect_err("alone");
+        assert!(
+            matches!(err, AcceptError::Policy("min relay fee")),
+            "{err:?}"
+        );
+        let first = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &first, 8, on_async).is_err());
+        assert!(
+            hub.try_recent_reject(&parent.compute_wtxid()),
+            "the parent's commit failure is remembered"
+        );
+        let second = spend_anchor(&parent, cbs[1], 60_000);
+        assert!(from_peer(&hub, &second, 8, on_async).is_err());
+        assert!(
+            !hub.try_recent_reject(&package_hash(&parent, &second)),
+            "the second pair is not tried"
+        );
+    }
+}
+
+/// Free spenders of the anchor that another peer parked do not use up the
+/// parent's one try: the child its sender announced goes first.
+#[test]
+fn anchor_parent_tries_its_senders_child_first() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = zero_fee_anchor(cbs[0]);
+        for height in 1..=10 {
+            let free = Transaction {
+                lock_time: LockTime::from_height(height).unwrap(),
+                ..v3_spend(
+                    &[OutPoint::new(parent.compute_txid(), 1)],
+                    vec![pay_true(0)],
+                )
+            };
+            let err = from_peer(&hub, &free, 9, on_async).expect_err("parked");
+            assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        }
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &child, 7, on_async).is_err());
+        from_peer(&hub, &parent, 7, on_async).expect("the sender's child pays");
+        assert!(hub.contains(&child.compute_txid()));
     }
 }
 

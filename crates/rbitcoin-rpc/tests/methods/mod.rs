@@ -4388,6 +4388,71 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A 0-fee parent's anchor stays in only while a child spends it, so
+/// `prioritisetransaction` refuses it, as Core does.
+#[test]
+fn prioritise_refuses_a_tx_with_dust() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (_, mut parent) =
+        spend_generated_coinbase(&ctx, 1, 50_0000_0000, ScriptBuf::from_bytes(vec![0x51]));
+    parent.version = TxVersion::non_standard(3);
+    parent.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    });
+    let (_, mut child) = spend_generated_coinbase(
+        &ctx,
+        2,
+        50_0000_0000 - 50_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    child.version = TxVersion::non_standard(3);
+    child.input.push(TxIn {
+        previous_output: OutPoint::new(parent.compute_txid(), 1),
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    });
+    let hex = |tx: &Transaction| rbitcoin_primitives::hex_encode(serialize(tx));
+    let pkg = dispatch(
+        &ctx,
+        "submitpackage",
+        vec![json!([hex(&parent), hex(&child)])],
+    )
+    .unwrap();
+    assert_eq!(pkg["package_msg"], "success", "{pkg}");
+    let refused = dispatch(
+        &ctx,
+        "prioritisetransaction",
+        vec![
+            json!(parent.compute_txid().to_string()),
+            json!(0),
+            json!(1_000),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(refused["code"], ERR_INVALID_PARAMETER, "{refused}");
+    assert_eq!(
+        rpc_message(&refused),
+        "Priority is not supported for transactions with dust outputs.",
+    );
+    let child_ok = dispatch(
+        &ctx,
+        "prioritisetransaction",
+        vec![
+            json!(child.compute_txid().to_string()),
+            json!(0),
+            json!(1_000),
+        ],
+    )
+    .unwrap();
+    assert_eq!(child_ok, json!(true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn rpc_submit_nonstandard_version_is_version() {
     use bitcoin::absolute::LockTime;

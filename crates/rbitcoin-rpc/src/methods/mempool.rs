@@ -1941,6 +1941,17 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         .mempool
         .as_ref()
         .ok_or_else(|| rpc_error(ERR_MISC, "no mempool"))?;
+    // A dust output enters only on a 0-fee tx whose child spends it. A fee
+    // on the parent would let a template take it alone (Core refuses too).
+    let dust = mp
+        .get_tx(&txid)
+        .is_some_and(|tx| rbitcoin_consensus::policy::dust_vouts(&tx).next().is_some());
+    if dust {
+        return Err(rpc_error(
+            ERR_INVALID_PARAMETER,
+            "Priority is not supported for transactions with dust outputs.",
+        ));
+    }
     mp.prioritise_tx(txid, fee_delta);
     Ok(json!(true))
 }

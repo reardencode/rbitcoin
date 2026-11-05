@@ -20,12 +20,16 @@ Added
   minimum relay fee like any low-fee parent, so `submitpackage` admits it
   beside the child that pays for it. This is the shape of Bark's exit
   package. A package that replaces such a pair and then fails puts the
-  pair back.
+  pair back. `prioritisetransaction` refuses a transaction in the mempool
+  that has a 0-value output, as Core does.
 - **Peers relay the anchor pair.** A peer's 0-fee anchor parent and the
   child that spends the anchor are admitted together as 1p1c, whichever
   arrives first, so an exit package one node accepts reaches the rest of
-  the network, also when a full mempool has raised the fee floor. A peer's
-  child of any other low-fee parent still waits in the orphanage. A peer
-  pair that fails is not tried again until the next block, one waiting
-  child is tried per parent delivery, and a child that fails hard is
-  dropped rather than parked again.
+  the network, also when a full mempool has raised the fee floor. The
+  pair's combined feerate must clear that floor. A peer's child of any
+  other low-fee parent still waits in the orphanage. A peer pair that
+  fails, or a parent that fails inside a pair, is not tried again until
+  the next block. One waiting child is tried per parent delivery, the
+  parent's sender's child first, and a child that fails hard is dropped
+  rather than parked again. If a pair's child fails after another peer's
+  child of the same parent got in, the parent stays.
