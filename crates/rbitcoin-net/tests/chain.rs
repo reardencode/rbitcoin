@@ -6419,3 +6419,58 @@ fn bip94_off_tip_retarget_scales_the_period_first_bits() {
     assert_eq!(expected(true), 0x1c0f_fff0);
     assert_eq!(expected(false), 0x1c3f_ffc0);
 }
+
+/// A block proposal reads each spent parent once and decodes only the
+/// spent outputs: three spends of a 1,000-output parent cost one body
+/// read and three output decodes.
+#[test]
+fn check_block_proposal_decodes_only_the_spent_outputs_of_a_wide_parent() {
+    let (dir, hub) = tmp_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(101, op_true.clone(), vec![])
+        .unwrap();
+    let mut wide = mature_spend_tx(&hub, 1);
+    wide.output = (0..1_000u64)
+        .map(|i| TxOut {
+            value: Amount::from_sat(40_000 + i),
+            script_pubkey: op_true.clone(),
+        })
+        .collect();
+    hub.generate_to_script(1, op_true.clone(), vec![wide.clone()])
+        .unwrap();
+    let spends: Vec<Transaction> = [2u32, 7, 9]
+        .iter()
+        .map(|&v| Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: wide.compute_txid(),
+                    vout: v,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000 + u64::from(v) - 1_000),
+                script_pubkey: op_true.clone(),
+            }],
+        })
+        .collect();
+    let block = hub.assemble_block_to_script(op_true, spends).unwrap();
+    let _ = hub.query.store().txs.sample_reset_body_decodes();
+    let _ = hub.query.store().txs.sample_reset_outputs_decoded();
+    assert_eq!(hub.check_block_proposal(&block), Ok(3_000));
+    assert_eq!(
+        hub.query.store().txs.sample_reset_body_decodes(),
+        1,
+        "one body read for the parent"
+    );
+    assert_eq!(
+        hub.query.store().txs.sample_reset_outputs_decoded(),
+        3,
+        "only the three spent outputs decoded"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

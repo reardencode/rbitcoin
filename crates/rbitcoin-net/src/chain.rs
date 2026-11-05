@@ -5112,9 +5112,9 @@ pub fn chain_txout<'a>(
 }
 
 /// The confirmed-parent outputs `block` spends: one tip-only fk resolve and
-/// one packed body decode per distinct parent
-/// ([`Query::connected_tx_outputs`]), keeping only the spent vouts with the
-/// parent's fk and create height. A row that exists only in a reorged-out
+/// one body read per distinct parent, decoding only the spent vouts
+/// ([`Query::connected_tx_outputs_at`]), with the parent's fk and create
+/// height. A row that exists only in a reorged-out
 /// block resolves to nothing, as in Core. Spends of `txids` (created in the
 /// block) are left to the connect loop; a parent that does not resolve
 /// contributes nothing, so its spends reject in block order.
@@ -5133,22 +5133,22 @@ pub fn confirmed_parent_outputs(
         }
     }
     let mut outs = HashMap::new();
-    for (txid, vouts) in vouts_by_parent {
-        let Some((fk, created_h, all)) = query
-            .connected_tx_outputs(&txid.to_byte_array())
+    for (txid, mut vouts) in vouts_by_parent {
+        vouts.sort_unstable();
+        vouts.dedup();
+        let Some((fk, created_h, found)) = query
+            .connected_tx_outputs_at(&txid.to_byte_array(), &vouts)
             .ok()
             .flatten()
         else {
             continue;
         };
-        for vout in vouts {
-            if let Some(out) = all.get(vout as usize) {
-                let txout = TxOut {
-                    value: Amount::from_sat(out.value),
-                    script_pubkey: ScriptBuf::from_bytes(out.script.clone()),
-                };
-                outs.insert(OutPoint { txid, vout }, (fk, created_h, txout));
-            }
+        for (vout, out) in found {
+            let txout = TxOut {
+                value: Amount::from_sat(out.value),
+                script_pubkey: ScriptBuf::from_bytes(out.script),
+            };
+            outs.insert(OutPoint { txid, vout }, (fk, created_h, txout));
         }
     }
     outs

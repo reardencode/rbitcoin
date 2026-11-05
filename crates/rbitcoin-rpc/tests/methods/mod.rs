@@ -8375,3 +8375,83 @@ fn request_task_methods_answer_as_core() {
         "{err}"
     );
 }
+
+/// `submitblock` resolves the block's spent parents once each and decodes
+/// only the spent outputs: three spends of a 1,000-output parent cost one
+/// body read and three output decodes on the whole submit path.
+#[test]
+fn submitblock_reads_each_spent_parent_once_and_only_its_spent_outputs() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let cb = Txid::from_byte_array(generated_coinbase_txid(&ctx, 1));
+    let wide = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint { txid: cb, vout: 0 },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: (0..1_000u64)
+            .map(|i| TxOut {
+                value: Amount::from_sat(40_000 + i),
+                script_pubkey: op_true.clone(),
+            })
+            .collect(),
+    };
+    let t0 = hub.tip_header().unwrap().time;
+    let h = hub.tip_height().unwrap();
+    let b1 = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        t0 + 1,
+        h + 1,
+        op_true.clone(),
+        vec![wide.clone()],
+    );
+    assert!(dispatch(&ctx, "submitblock", vec![json!(block_hex(&b1))])
+        .unwrap()
+        .is_null());
+    let spends: Vec<Transaction> = [2u32, 7, 9]
+        .iter()
+        .map(|&v| Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: wide.compute_txid(),
+                    vout: v,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000 + u64::from(v) - 1_000),
+                script_pubkey: op_true.clone(),
+            }],
+        })
+        .collect();
+    let b2 =
+        rbitcoin_consensus::mine_regtest_paying(b1.block_hash(), t0 + 2, h + 2, op_true, spends);
+    let _ = ctx.query.store().txs.sample_reset_body_decodes();
+    let _ = ctx.query.store().txs.sample_reset_outputs_decoded();
+    assert!(dispatch(&ctx, "submitblock", vec![json!(block_hex(&b2))])
+        .unwrap()
+        .is_null());
+    assert_eq!(
+        ctx.query.store().txs.sample_reset_body_decodes(),
+        1,
+        "one body read for the parent"
+    );
+    assert_eq!(
+        ctx.query.store().txs.sample_reset_outputs_decoded(),
+        3,
+        "only the three spent outputs decoded"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -132,6 +132,10 @@ pub use confirm_stats::{
 
 pub type QueryError = StoreError;
 
+/// A parent on the connected chain for a prevout reader: its create fk,
+/// its create height, and the requested outputs in ascending vout order.
+pub type ConnectedOutputs = (Fk, u32, Vec<(u32, OutputRecord)>);
+
 /// A mempool tx against the visible scripthash height.
 ///
 /// Wallet unconfirmed reads hide [`Covered`](Self::Covered) and keep the
@@ -2410,33 +2414,44 @@ impl Query {
         Err(StoreError::NotFound)
     }
 
-    /// Output at `vout` for a known create fk (packed Class A works without head).
-    ///
-    /// Outs-only Class A (`get_tx_meta_and_outputs`); does not zip `seqsigwit`.
+    /// Output at `vout` for a known create fk (packed Class A works without
+    /// head): one body read, that output decoded alone.
     pub fn tx_output_at_fk(&self, create_fk: Fk, vout: u32) -> Result<OutputRecord, QueryError> {
-        let (meta, outs) = self.store.get_tx_meta_and_outputs(create_fk)?;
-        if vout >= meta.output_count {
-            return Err(StoreError::NotFound);
-        }
-        outs.get(vout as usize).cloned().ok_or(StoreError::NotFound)
+        self.tx_outputs_at_fk(create_fk, &[vout])?
+            .pop()
+            .map(|(_, out)| out)
+            .ok_or(StoreError::NotFound)
     }
 
-    /// A parent on the connected chain for a prevout reader: tip-only fk
-    /// resolve (`txid.body` verify, no decode) that also yields the create
-    /// height, then one packed outs decode for every output. `None` when
-    /// `txid` has no row on the best chain or the tx index is off. Mempool
-    /// accept and the block proposal check share this.
-    pub fn connected_tx_outputs(
+    /// Outputs at `vouts` for a known create fk, in ascending vout order:
+    /// one body read, only those outputs decoded. A vout past the output
+    /// count is left out.
+    pub fn tx_outputs_at_fk(
+        &self,
+        create_fk: Fk,
+        vouts: &[u32],
+    ) -> Result<Vec<(u32, OutputRecord)>, QueryError> {
+        self.store.get_tx_outputs_at(create_fk, vouts)
+    }
+
+    /// The outputs at `vouts` of a parent on the connected chain, for a
+    /// prevout reader: tip-only fk resolve (`txid.body` verify, no decode)
+    /// that also yields the create height, then one body read decoding
+    /// only those outputs. A vout past the output count is left out.
+    /// `None` when `txid` has no row on the best chain or the tx index is
+    /// off. Mempool accept and the block proposal check share this.
+    pub fn connected_tx_outputs_at(
         &self,
         txid: &[u8; 32],
-    ) -> Result<Option<(Fk, u32, Vec<OutputRecord>)>, QueryError> {
+        vouts: &[u32],
+    ) -> Result<Option<ConnectedOutputs>, QueryError> {
         if !self.tx_index_enabled() {
             return Ok(None);
         }
         let Some((fk, height)) = self.store.get_fk_by_txid_tip_height(txid)? else {
             return Ok(None);
         };
-        let (_, outs) = self.store.get_tx_meta_and_outputs(fk)?;
+        let outs = self.store.get_tx_outputs_at(fk, vouts)?;
         Ok(Some((fk, height, outs)))
     }
 
