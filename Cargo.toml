@@ -24,7 +24,7 @@ default-members = ["crates/rbitcoin-node"]
 version = "0.8.99"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/reardencode/rbitcoin"
+repository = "https://github.com/rbitcoin-org/rbitcoin"
 # Matches CI + nixpkgs/crane pin (rustc 1.95). Not a lower “aspirational” MSRV.
 rust-version = "1.95"
 

@@ -28,14 +28,14 @@ with `# <run_id> <phase> <sha>`. Fetch that branch. Do not check it out
 over the session worktree.
 
 ```bash
-git fetch https://github.com/reardencode/rbitcoin.git mutants-state
+git fetch https://github.com/rbitcoin-org/rbitcoin.git mutants-state
 git show FETCH_HEAD:missed.txt
 git show FETCH_HEAD:cursor.json
 git log -n 14 --format='%H%x09%cI' FETCH_HEAD -- cursor.json
 ```
 
 ```bash
-gh pr list --repo reardencode/rbitcoin --state merged --search 'head:mutants/' --limit 30 \
+gh pr list --repo rbitcoin-org/rbitcoin --state merged --search 'head:mutants/' --limit 30 \
   --json number,headRefName,mergedAt
 ```
 
@@ -56,7 +56,7 @@ command owns the catch rate, the net, the backlog pace, and the days
 left. Field names live in `TESTING.md`.
 
 ```bash
-git fetch https://github.com/reardencode/rbitcoin.git mutants-state
+git fetch https://github.com/rbitcoin-org/rbitcoin.git mutants-state
 git log -n 14 --format='%H%x09%cI' FETCH_HEAD -- cursor.json > /tmp/mutants-cursors.list
 : > /tmp/mutants-health.jsonl
 while IFS=$'\t' read -r sha at; do
@@ -64,7 +64,7 @@ while IFS=$'\t' read -r sha at; do
 done < /tmp/mutants-cursors.list >> /tmp/mutants-health.jsonl
 python3 scripts/mutants_queue.py health --jsonl /tmp/mutants-health.jsonl
 base=$(git show FETCH_HEAD:cursor.json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("new_base",""))')
-git fetch https://github.com/reardencode/rbitcoin.git master
+git fetch https://github.com/rbitcoin-org/rbitcoin.git master
 git rev-list --count "${base}..FETCH_HEAD"
 ```
 

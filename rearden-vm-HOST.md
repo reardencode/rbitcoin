@@ -74,7 +74,7 @@ Cargo/clippy/deny/rustc stdout: [`docs/how-we-plan.md`](docs/how-we-plan.md)
 
 ## Fetch and push
 
-`origin` stays SSH (`git@github.com:reardencode/rbitcoin.git`) with HTTPS
+`origin` stays SSH (`git@github.com:rbitcoin-org/rbitcoin.git`) with HTTPS
 fetch. This VM has no App SSH key (`ssh -T git@github.com` → Permission
 denied). Never `git remote set-url origin` (worktrees share remotes).
 
@@ -85,13 +85,13 @@ Bot `git fetch` / `git push` use an explicit HTTPS URL. Do not
 ```bash
 ~/.config/rbitcoin-grok/gh-login.sh
 git fetch origin
-git push https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
-gh pr create --repo reardencode/rbitcoin --head <area>/<short-name> --title "…" --body "…"
+git push https://github.com/rbitcoin-org/rbitcoin.git HEAD:<area>/<short-name>
+gh pr create --repo rbitcoin-org/rbitcoin --head <area>/<short-name> --title "…" --body "…"
 
 # rebase then update the topic branch
 git rebase origin/master
-git push --force-with-lease https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
+git push --force-with-lease https://github.com/rbitcoin-org/rbitcoin.git HEAD:<area>/<short-name>
 
 # after merge, delete the topic branch only
-git push https://github.com/reardencode/rbitcoin.git --delete <area>/<merged-short>
+git push https://github.com/rbitcoin-org/rbitcoin.git --delete <area>/<merged-short>
 ```

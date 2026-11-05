@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${1:-$ROOT/coverage/badge.json}"
-REPO="${GITHUB_REPOSITORY:-reardencode/rbitcoin}"
+REPO="${GITHUB_REPOSITORY:-rbitcoin-org/rbitcoin}"
 BRANCH="badges"
 
 if [[ "${BADGE_DRY_RUN:-}" == "1" ]]; then

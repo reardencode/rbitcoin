@@ -3573,7 +3573,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Mainnet 963556 (reardencode/rbitcoin#843): two confirm writes appended
+/// Mainnet 963556 (rbitcoin-org/rbitcoin#843): two confirm writes appended
 /// their bodies and then rejected on the planned-fk check, so Class A held
 /// 9,506 bodies the head never received. The segment rolled on entry count,
 /// the seal re-read a range that included those orphans, and the last 9,506

@@ -5,7 +5,7 @@ Fixed
   answers after the first hash on its chain, so with a candidate whose bodies
   nobody serves, a peer on a heavier fork sent 2,000 headers from a checkpoint
   the node already had, and the node stayed on that candidate
-  ([#1337](https://github.com/reardencode/rbitcoin/issues/1337)). While the
+  ([#1337](https://github.com/rbitcoin-org/rbitcoin/issues/1337)). While the
   queue has room the locator starts at the stored tip, then a lighter fork
   still being weighed when it is taller than the confirmed tip, then the
   proved points under an unproved queue. After that prefix it descends by

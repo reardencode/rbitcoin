@@ -727,7 +727,7 @@ in
 
     systemd.services.rbitcoin = {
       description = "rbitcoin full node";
-      documentation = [ "https://github.com/reardencode/rbitcoin/blob/master/OPERATOR.md" ];
+      documentation = [ "https://github.com/rbitcoin-org/rbitcoin/blob/master/OPERATOR.md" ];
       wantedBy = [ "multi-user.target" ];
       wants = [
         "network-online.target"

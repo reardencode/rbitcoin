@@ -26,7 +26,7 @@ First `cargo` also fetches crates.io deps. Keep several **GiB** free for `target
 ### Clone and first build
 
 ```bash
-git clone https://github.com/reardencode/rbitcoin.git
+git clone https://github.com/rbitcoin-org/rbitcoin.git
 cd rbitcoin
 # rustup reads rust-toolchain.toml (1.95.0 + rustfmt + clippy)
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"   # matches CI; optional

@@ -120,7 +120,7 @@ same snapshots on that tag and attaches them to a GitHub Release:
 
 `workflow_dispatch` on that workflow builds artifacts only (no Release).
 
-The operator image (`ghcr.io/reardencode/rbitcoin`, `linux/amd64` +
+The operator image (`ghcr.io/rbitcoin-org/rbitcoin`, `linux/amd64` +
 `linux/arm64`) is those two musl pairs on `FROM scratch`. Each arch's image
 binaries must hash to that arch's `SHA256SUMS` before the Release
 (`scripts/docker-smoke.sh`). To check a pulled image yourself:
@@ -131,7 +131,7 @@ case "$arch" in
   amd64) sums=SHA256SUMS.linux-musl ;;
   arm64) sums=SHA256SUMS.linux-musl-aarch64 ;;
 esac
-docker create --platform "linux/$arch" --name rbtc-verify ghcr.io/reardencode/rbitcoin:X.Y.Z
+docker create --platform "linux/$arch" --name rbtc-verify ghcr.io/rbitcoin-org/rbitcoin:X.Y.Z
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-node .
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-cli .
 docker rm -v rbtc-verify   # -v: also the anonymous /data volume
