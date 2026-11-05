@@ -215,6 +215,41 @@ impl Query {
         Ok(())
     }
 
+    /// Delete a pack-complete head that has neither an include mark nor a
+    /// SEAL, so the next materialize scans Class A.
+    ///
+    /// Append only adds creates past each key's tail. Replaying every height
+    /// from 0 cannot fill a hole under a later append, and on a long chain it
+    /// is the slow path. A SEAL still names the prefix when the mark file is
+    /// missing. `--sh-index` off leaves the files in place.
+    pub fn discard_unproven_scripthash_head(&self) -> Result<(), QueryError> {
+        if !self.sh_index_enabled() || !self.store.scripthash.has_durable_index() {
+            return Ok(());
+        }
+        if self.store.txs.count() == 0 {
+            return Ok(());
+        }
+        self.sh_run.refresh_seal();
+        let floor = crate::sh_builder::durable_sh_inclusion_floor(
+            self.store.scripthash.include_hwm(),
+            self.sh_run.sealed_max_create_fk(),
+        );
+        if floor > 0 {
+            return Ok(());
+        }
+        rbitcoin_log::warn!(
+            "scripthash head has no include mark and no SEAL; deleting it so \
+             tip entry can materialize from Class A"
+        );
+        self.sh_run.prepare_force_full_rebuild(&self.store)?;
+        self.set_sh_indexed_through_height(None);
+        self.sh.applied_max_fk.store(0, Ordering::Release);
+        self.sh.pending.lock().unwrap().clear();
+        *self.sh.applying.lock().unwrap() = None;
+        self.sh.ram_head.lock().unwrap().clear();
+        Ok(())
+    }
+
     /// Cold bulk-load durable scripthash tables (tip entry).
     ///
     /// Direct IBD defers SH. Tip: two Class A scans (identity-map keys, then
@@ -231,6 +266,7 @@ impl Query {
         &self,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<u64, QueryError> {
+        self.discard_unproven_scripthash_head()?;
         if !self.sh_force_rebuild() && self.sh_use_writebehind() {
             if self.store.scripthash.unsealed_main_shards().is_empty() {
                 let residual = self.sh_run.on_disk_run_count();

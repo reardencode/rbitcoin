@@ -1160,6 +1160,17 @@ impl Query {
         let Some(tip) = self.tip_height() else {
             return Ok(());
         };
+        // No include mark and no SEAL: the head is not a prefix append can
+        // extend. Tip entry deletes it and materializes. Walking every
+        // height here is that rebuild on the per-block path.
+        self.sh_run.refresh_seal();
+        let floor = crate::sh_builder::durable_sh_inclusion_floor(
+            self.store.scripthash.include_hwm(),
+            self.sh_run.sealed_max_create_fk(),
+        );
+        if floor == 0 {
+            return Ok(());
+        }
         let from = recovered.map(|h| h.saturating_add(1)).unwrap_or(0);
         if from > tip.0 {
             return Ok(());
@@ -1204,11 +1215,12 @@ impl Query {
         let Some(tip) = self.tip_height() else {
             return Ok(None);
         };
-        let hwm = self.store.scripthash.include_hwm();
-        if hwm == 0 {
-            if self.store.scripthash.has_durable_index() {
-                return Ok(Some(tip.0));
-            }
+        self.sh_run.refresh_seal();
+        let floor = crate::sh_builder::durable_sh_inclusion_floor(
+            self.store.scripthash.include_hwm(),
+            self.sh_run.sealed_max_create_fk(),
+        );
+        if floor == 0 {
             return Ok(None);
         }
         let mut h = tip.0;
@@ -1236,7 +1248,7 @@ impl Query {
                 }
             };
             let max_fk = fks.iter().map(|f| f.0).max().unwrap_or(0);
-            if max_fk <= hwm {
+            if max_fk <= floor {
                 return Ok(Some(h));
             }
             if h == 0 {

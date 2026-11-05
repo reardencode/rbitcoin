@@ -186,7 +186,8 @@ to start over unless you intend a full Class A collect
 | No valid `DONE.keys` | Delete unsorted and restart pass 1. Seal rewrites the MPHF. |
 | `DONE.keys`, no `DONE.post` | Keep pass-1 MPHF; discard partial `post/` spills; pass 2 from fk 1; pack. Electrum stays down. |
 | `DONE.post`, some `.packed` | Pack only the unmarked shards. |
-| All `.packed` | Tip write-behind. A second start does not collect. Electrum stays down until `include_hwm` covers the tip, then this process binds it. |
+| All `.packed`, include mark or SEAL | Tip write-behind from that floor. A second start does not collect. Electrum stays down until the floor covers the tip, then this process binds it. |
+| All `.packed`, neither mark, Class A has creates | Delete the head and materialize from Class A. A block-by-block replay from height 0 is not the rebuild. |
 | Complete head, no marks, no extract | Soft-migrate: write `.packed`. Missing `include_hwm` is set from the create count. |
 | Kill-9 mid pack | Unfinished shard is redone. Open follows [`docs/crash-recovery.md`](../crash-recovery.md). |
 | Write-behind IO error (disk full) | The process exits non-zero after the shutdown flush. Restart the same datadir; write-behind continues. |

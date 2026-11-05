@@ -894,6 +894,87 @@ fn sh_writebehind_recover_requeues_unapplied_heights() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A head with no include mark and no SEAL proves nothing. Recovery must
+/// not walk the chain from height 0. Tip entry deletes that head and
+/// materializes from Class A. A mark written with the head still names the
+/// height it covers.
+#[test]
+fn unproven_scripthash_head_is_deleted_and_materialized() {
+    let (dir, q) = temp_query("sh-zero-include");
+    let (mut h0, t0) = coinbase_block(0, Fk::NULL, None);
+    h0.merkle_root = t0.tx.txid;
+    h0.hash = rbitcoin_store::block_header_hash(
+        h0.version,
+        &[0u8; 32],
+        &h0.merkle_root,
+        h0.timestamp,
+        h0.bits,
+        h0.nonce,
+    );
+    let hash0 = h0.hash;
+    q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    q.finalize_sh_runs().unwrap();
+    assert!(q.store().scripthash.has_durable_index());
+    assert!(
+        q.store().scripthash.include_hwm() > 0,
+        "creating the head persists the include mark"
+    );
+    assert_eq!(
+        q.recover_sh_indexed_through().unwrap(),
+        Some(0),
+        "a mark that covers the head is that height, not a rebuild"
+    );
+
+    let seal = rbitcoin_query::sh_builder::seal_path(&dir.path().join("scripthash.runs"));
+    assert!(seal.is_file(), "materialize publishes SEAL");
+    std::fs::remove_file(&seal).unwrap();
+    std::fs::remove_file(dir.path().join(rbitcoin_store::INCLUDE_HWM_NAME)).unwrap();
+    assert_eq!(q.store().scripthash.include_hwm(), 0);
+    let prev_fk = q.tip_header_fk().unwrap().unwrap();
+    let (mut h1, t1) = coinbase_block(1, prev_fk, Some(hash0));
+    h1.merkle_root = t1.tx.txid;
+    rehash_header(&mut h1, &hash0);
+    q.commit_class_a_only(&h1, &[t1]).unwrap();
+    q.confirm_block(Height(1), &h1.hash).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    drop(q);
+
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert!(
+        q.sh.pending.lock().unwrap().is_empty(),
+        "an unproven head is not re-queued from height 0"
+    );
+    assert_ne!(
+        q.sh_indexed_through_height(),
+        Some(1),
+        "a missing include mark must not report the tip as indexed"
+    );
+    assert!(
+        !q.sh_is_tip_ready(),
+        "wallet servers stay down until materialize covers the tip"
+    );
+    assert!(q.store().scripthash.has_durable_index());
+    q.set_sh_index_enabled(false);
+    q.discard_unproven_scripthash_head().unwrap();
+    assert!(
+        q.store().scripthash.has_durable_index(),
+        "shindex off leaves the head on disk"
+    );
+    q.set_sh_index_enabled(true);
+    let n = q.finalize_sh_runs().unwrap();
+    assert!(
+        n > 0,
+        "tip entry materializes Class A after deleting the head"
+    );
+    let sh = script_hash(&[0x51]);
+    assert_eq!(q.scripthash_history(&sh).unwrap().len(), 2);
+    assert_eq!(q.sh_indexed_through_height(), Some(1));
+    assert!(q.sh_is_tip_ready());
+    assert!(q.store().scripthash.include_hwm() > 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recover_sh_writebehind_fails_open_on_interior_missing_header_txs() {
     let (dir, q) = temp_query("sh-wb-recover-corrupt");
