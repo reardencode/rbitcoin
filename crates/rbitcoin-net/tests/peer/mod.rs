@@ -403,6 +403,79 @@ fn should_poll_peer_headers_skips_behind_and_weaker_fork() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A session that starts after the tip moved still announces that tip once.
+#[test]
+fn session_start_announces_unsent_tip_once() {
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unsent-tip");
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(3, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    assert_eq!(hub.tip_height(), Some(3));
+    let tip = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 7,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(
+        addr,
+        addr,
+        &ver,
+        false,
+        rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+    );
+    assert_eq!(session.header_marks().0, None);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    follow.wants_headers = true;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        announce_unsent_tip(&hub, &out_tx, &mut follow, Some(session.as_ref()))
+            .await
+            .unwrap();
+        match out_rx.try_recv().unwrap().expect_msg() {
+            NetworkMessage::Headers(hs) => {
+                assert_eq!(
+                    hs.last().map(|h| h.block_hash()),
+                    Some(tip),
+                    "session start queues the current tip"
+                );
+            }
+            NetworkMessage::Inv(inv) => {
+                assert!(
+                    inv.iter()
+                        .any(|i| matches!(i, Inventory::Block(h) if *h == tip)),
+                    "session start queues the current tip"
+                );
+            }
+            other => panic!("expected a tip announcement, got {other:?}"),
+        }
+        assert!(out_rx.try_recv().is_err(), "one announcement");
+        announce_unsent_tip(&hub, &out_tx, &mut follow, Some(session.as_ref()))
+            .await
+            .unwrap();
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a marked tip is not announced again"
+        );
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn live_follow_dec_on_drop() {
     let c = Arc::new(AtomicUsize::new(2));

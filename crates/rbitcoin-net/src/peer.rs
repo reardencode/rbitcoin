@@ -1842,6 +1842,28 @@ pub async fn on_heartbeat(
     Ok(())
 }
 
+/// Announce the hub tip when this session has not marked it sent.
+///
+/// `subscribe` does not replay a tip from before the outbound task existed.
+/// That tip takes the same path as a live [`on_tip_event`]. `Ok(true)` means
+/// the broadcast is closed and the session should exit.
+pub async fn announce_unsent_tip(
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<bool, NetError> {
+    let tip = hub.tip_hash();
+    let sent = session.and_then(|s| s.header_marks().0);
+    if tip.is_none() || sent == tip {
+        return Ok(false);
+    }
+    match current_tip_announce(hub) {
+        TipRecvAnnounce::Announce(ev) => on_tip_event(hub, out_tx, follow, session, Ok(ev)).await,
+        TipRecvAnnounce::Skip | TipRecvAnnounce::Closed => Ok(false),
+    }
+}
+
 /// `true` means the tip broadcast closed; the session should exit.
 pub async fn on_tip_event(
     hub: &ChainHub,
@@ -2242,6 +2264,11 @@ pub async fn peer_session_with(
     // cannot pass it and the request is not dropped.
     let mut hold_front = false;
     let result = async {
+        // Catch a tip that moved before this task subscribed. Later events
+        // still arrive on `tip_rx` inside the loop.
+        if announce_unsent_tip(hub.as_ref(), &out_tx, follow, session.as_deref()).await? {
+            return Ok(());
+        }
         loop {
             if session
                 .as_ref()
