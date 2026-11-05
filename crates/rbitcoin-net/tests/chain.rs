@@ -727,6 +727,41 @@ fn attach_mp(dir: &std::path::Path, hub: &ChainHub) -> Arc<rbitcoin_net::tx_rela
     mp
 }
 
+#[tokio::test]
+async fn confirmed_private_broadcast_is_not_sent_again_before_the_pool_is_maintained() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.set_blocks_only(true);
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.path().join("mp"), Arc::clone(&hub.query))
+            .unwrap();
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    mp.set_isolated_broadcast(true);
+    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let local = mature_spend_tx(&hub, 1);
+    let txid = local.compute_txid();
+    mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
+        .expect("local");
+    assert_eq!(mp.next_isolated().await.0, txid);
+    mp.isolated_sent(&txid);
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![local])
+        .unwrap();
+    assert!(!mp.pool_maintained());
+    assert!(
+        mp.is_local_origin(&txid),
+        "an unmaintained pool keeps the row"
+    );
+    mp.note_mock_now(mp.relay_now_secs() + 181);
+    assert_eq!(
+        mp.requeue_unreturned(),
+        0,
+        "a confirmed tx is not sent again"
+    );
+    assert!(mp.skip_standing_inv(&txid));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A tx spending the coinbase at `height`.
 fn mature_spend_tx(hub: &ChainHub, height: u32) -> Transaction {
     let cb = hub

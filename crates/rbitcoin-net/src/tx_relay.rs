@@ -6274,21 +6274,44 @@ impl MempoolHub {
 
     pub fn requeue_unreturned(&self) -> usize {
         let now = self.relay_now_secs();
+        let due = |turn: &IsolatedTurn| matches!(turn, IsolatedTurn::Sent { due, sends } if *due <= now && *sends < ISOLATED_SEND_CAP);
+        let candidates: Vec<Txid> = {
+            let origin = self.local_origin.lock().unwrap();
+            origin
+                .txs
+                .iter()
+                .filter(|(_, turn)| due(turn))
+                .map(|(txid, _)| *txid)
+                .collect()
+        };
+        let unconfirmed: Vec<Txid> = candidates
+            .into_iter()
+            .filter(|txid| {
+                !self
+                    .query
+                    .tx_fk_by_txid_tip(&txid.to_byte_array())
+                    .is_ok_and(|fk| fk.is_some())
+            })
+            .collect();
         let mut origin = self.local_origin.lock().unwrap();
-        let mut order = origin.next;
         let mut requeued = 0;
-        for turn in origin.txs.values_mut() {
-            let IsolatedTurn::Sent { due, sends } = *turn else {
+        for txid in unconfirmed {
+            let Some(turn) = origin.txs.get(&txid).copied() else {
                 continue;
             };
-            if due > now || sends >= ISOLATED_SEND_CAP {
+            let IsolatedTurn::Sent { sends, .. } = turn else {
+                continue;
+            };
+            if !due(&turn) {
                 continue;
             }
-            order += 1;
-            *turn = IsolatedTurn::Waiting { order, sends };
+            origin.next += 1;
+            let order = origin.next;
+            origin
+                .txs
+                .insert(txid, IsolatedTurn::Waiting { order, sends });
             requeued += 1;
         }
-        origin.next = order;
         drop(origin);
         if requeued > 0 {
             self.isolated_wake.notify_one();
