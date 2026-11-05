@@ -5,7 +5,7 @@
 //! u24 LE. `input.off` checkpoints the body file offset at each 1024-create
 //! window after the first.
 
-use crate::delta_loc::{loc_window, loc_within, LOC_WINDOW};
+use crate::delta_loc::{checkpoint_prefix, loc_window, loc_within, LOC_WINDOW};
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_primitives::{Fk, TableKind};
@@ -120,11 +120,11 @@ impl Input {
         if loc_data % LOC_SLOT != 0 {
             return Err(StoreError::Corrupt("invariant: input.loc size"));
         }
-        let count = loc_data / LOC_SLOT;
-        let n_win = count / LOC_WINDOW;
-        if off.data_len() != n_win * OFF_SLOT {
+        let full = loc_data / LOC_SLOT;
+        let Some(count) = checkpoint_prefix(full, off.data_len(), OFF_SLOT) else {
             return Err(StoreError::Corrupt("invariant: input.off size"));
-        }
+        };
+        let n_win = count / LOC_WINDOW;
         let body_len = body.logical_len();
         if body_len < FILE_HEADER_LEN as u64
             || !(body_len - FILE_HEADER_LEN as u64).is_multiple_of(REC_LEN)
@@ -139,14 +139,27 @@ impl Input {
                 checkpoints[i] = u64::from_le_bytes(chunk.try_into().unwrap());
             }
         }
-        Ok(Self {
+        let opened = Self {
             loc,
             off,
             body,
             checkpoints: RwLock::new(checkpoints),
-            count: AtomicU64::new(count),
+            count: AtomicU64::new(full),
             body_end: AtomicU64::new(body_len),
-        })
+        };
+        // Refuse a short body before any header write. A matching checkpoint
+        // still has to be checked: the body can move on its own.
+        let new_body = opened.body_end_if_durable(count)?;
+        if count < full {
+            opened.truncate_to_count(count)?;
+        } else {
+            let need = FILE_HEADER_LEN as u64 + n_win * OFF_SLOT;
+            if opened.off.logical_len() > need {
+                opened.off.set_logical_len(need)?;
+            }
+            opened.shrink_body_to(new_body)?;
+        }
+        Ok(opened)
     }
 
     pub fn count(&self) -> u64 {
@@ -270,11 +283,13 @@ impl Input {
             }
         }
         let loc_at = FILE_HEADER_LEN as u64 + base * LOC_SLOT;
-        self.loc.write_at(loc_at, &loc_bytes)?;
+        // Body before the locator. A failed body write leaves the previous
+        // prefix. Open cuts a body that ran ahead of a short locator.
         if !body_bytes.is_empty() {
             let body_start = self.body_end.load(Ordering::Acquire);
             self.body.write_at(body_start, &body_bytes)?;
         }
+        self.loc.write_at(loc_at, &loc_bytes)?;
         if !new_offs.is_empty() {
             {
                 let cps = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
@@ -309,32 +324,68 @@ impl Input {
         if new_count == cur {
             return Ok(());
         }
-        let dropped = (cur - new_count) as usize;
-        let mut raw = vec![0u8; dropped * LOC_SLOT as usize];
-        let at = FILE_HEADER_LEN as u64 + new_count * LOC_SLOT;
-        self.loc.read_at(at, &mut raw)?;
-        let mut n_drop = 0u64;
-        for chunk in raw.chunks_exact(LOC_SLOT as usize) {
-            n_drop += u64::from(u16::from_le_bytes([chunk[0], chunk[1]]));
-        }
-        let body_end = self.body_end.load(Ordering::Acquire);
-        let new_body = body_end - n_drop * REC_LEN;
-        if new_body < FILE_HEADER_LEN as u64 {
-            return Err(StoreError::Corrupt("invariant: input.body truncate"));
-        }
-        self.loc
-            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
-        self.body.set_logical_len(new_body)?;
+        // Off and the locator land before the body. A kill before the body
+        // header still has a long body, which open cuts back. A body that is
+        // already short of this count is not durable.
+        let new_body = self.body_end_if_durable(new_count)?;
         let n_win = new_count / LOC_WINDOW;
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
+        self.loc
+            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * LOC_SLOT)?;
+        self.shrink_body_to(new_body)?;
         {
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             cps.truncate(n_win as usize);
         }
-        self.body_end.store(new_body, Ordering::Release);
         self.count.store(new_count, Ordering::Release);
         Ok(())
+    }
+
+    /// `new_count`'s body end when that many inputs are already in the body.
+    fn body_end_if_durable(&self, new_count: u64) -> Result<u64, StoreError> {
+        let new_body = self.body_end_for_count(new_count)?;
+        if new_body > self.body.logical_len() {
+            return Err(StoreError::Corrupt("invariant: input.body truncate"));
+        }
+        Ok(new_body)
+    }
+
+    /// Cut a body that still holds inputs past `new_body`.
+    fn shrink_body_to(&self, new_body: u64) -> Result<(), StoreError> {
+        if new_body < self.body.logical_len() {
+            self.body.set_logical_len(new_body)?;
+        }
+        self.body_end.store(new_body, Ordering::Release);
+        Ok(())
+    }
+
+    /// Body offset after `new_count` creates.
+    ///
+    /// The checkpoint at window `n_win - 1` is the offset after
+    /// `n_win * 1024` creates. The partial window is at most 1023 slots.
+    fn body_end_for_count(&self, new_count: u64) -> Result<u64, StoreError> {
+        let n_win = new_count / LOC_WINDOW;
+        let base = if n_win == 0 {
+            FILE_HEADER_LEN as u64
+        } else {
+            let cps = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
+            *cps.get((n_win - 1) as usize)
+                .ok_or(StoreError::Corrupt("invariant: input.off checkpoint"))?
+        };
+        let first = n_win * LOC_WINDOW + 1;
+        if new_count < first {
+            return Ok(base);
+        }
+        let n = (new_count - first + 1) as usize;
+        let mut raw = vec![0u8; n * LOC_SLOT as usize];
+        self.loc
+            .read_at(FILE_HEADER_LEN as u64 + (first - 1) * LOC_SLOT, &mut raw)?;
+        let mut n_in = 0u64;
+        for chunk in raw.chunks_exact(LOC_SLOT as usize) {
+            n_in += u64::from(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        Ok(base + n_in * REC_LEN)
     }
 
     #[doc(hidden)]

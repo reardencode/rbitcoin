@@ -41,6 +41,24 @@ pub(crate) fn checkpoint_fit(loc_count: u64, off_len: u64, off_slot: u64) -> Opt
     )
 }
 
+/// Locator count to keep, including a checkpoint that is longer than the loc header.
+///
+/// A short checkpoint keeps the last create that does not need a missing
+/// window. An aligned surplus is a truncate that stored the short loc header
+/// before off: that header is the prefix. A torn size does not open.
+pub(crate) fn checkpoint_prefix(loc_count: u64, off_len: u64, off_slot: u64) -> Option<u64> {
+    if let Some(n) = checkpoint_fit(loc_count, off_len, off_slot) {
+        return Some(n);
+    }
+    if off_slot == 0 || !off_len.is_multiple_of(off_slot) {
+        return None;
+    }
+    // `checkpoint_fit` already returned Some whenever the checkpoint is not
+    // longer than the locator. A longer aligned file means the loc header
+    // is the prefix.
+    Some(loc_count)
+}
+
 /// Count to keep when the next overflow row was written and its header was not.
 ///
 /// That row sits at the ovf file's published end. The overflow row is 16
@@ -57,18 +75,83 @@ pub(crate) fn unresolved_ovf_cut(
     if last_ovf_fk >= count {
         return Ok(None);
     }
+    // A failed read of the bytes at the published end means that row was
+    // not written. The locator slot is inside the published count, so its
+    // read stays an error and open does not keep the create.
     let width = if pair { 16 } else { 12 };
     let mut row = [0u8; 16];
     if ovf.pread_all(ovf.logical_len(), &mut row[..width]).is_err() {
         return Ok(None);
     }
+    cut_for_ovf_row(loc, count, last_ovf_fk, &row[..width], pair)
+}
+
+/// Creates covered while the overflow header lags the RAM end.
+///
+/// `count` is the locator-header count. The first row at the durable end
+/// cuts before that create when the row is inside `count`. A row past
+/// `count`, or bytes that are not a row, leaves `count` in place: those
+/// creates are already named by the locator and the checkpoint header.
+/// A failed read of that row is an error, so the tip does not seal.
+pub(crate) fn withheld_ovf_limit(
+    loc: &TableFile,
+    ovf: &TableFile,
+    count: u64,
+    pair: bool,
+) -> Result<u64, StoreError> {
+    let durable_end = ovf.header_persist_len();
+    if durable_end >= ovf.logical_len() {
+        return Ok(count);
+    }
+    let width: u64 = if pair { CREATE_OVF_SLOT } else { 12 };
+    let durable_data = durable_end.saturating_sub(FILE_HEADER_LEN as u64);
+    if durable_end < FILE_HEADER_LEN as u64 || !durable_data.is_multiple_of(width) {
+        return Ok(0);
+    }
+    let last_ovf_fk = if durable_data >= width {
+        let mut row = [0u8; 16];
+        ovf.pread_all(durable_end - width, &mut row[..width as usize])?;
+        u64::from_le_bytes(row[0..8].try_into().unwrap())
+    } else {
+        0
+    };
+    match ovf_row_cut(loc, ovf, count, last_ovf_fk, durable_end, pair)? {
+        Some(cut) => Ok(cut.min(count)),
+        None => Ok(count),
+    }
+}
+
+fn ovf_row_cut(
+    loc: &TableFile,
+    ovf: &TableFile,
+    count: u64,
+    last_ovf_fk: u64,
+    row_at: u64,
+    pair: bool,
+) -> Result<Option<u64>, StoreError> {
+    if last_ovf_fk >= count {
+        return Ok(None);
+    }
+    let width = if pair { 16 } else { 12 };
+    let mut row = [0u8; 16];
+    ovf.pread_all(row_at, &mut row[..width])?;
+    cut_for_ovf_row(loc, count, last_ovf_fk, &row[..width], pair)
+}
+
+fn cut_for_ovf_row(
+    loc: &TableFile,
+    count: u64,
+    last_ovf_fk: u64,
+    row: &[u8],
+    pair: bool,
+) -> Result<Option<u64>, StoreError> {
     let fk = u64::from_le_bytes(row[0..8].try_into().unwrap());
     if fk == 0 || fk <= last_ovf_fk || fk > count {
         return Ok(None);
     }
     let mut slot = [0u8; 2];
     loc.read_at(loc_file_off(fk, 2), &mut slot)?;
-    if !ovf_row_matches_slot(&row, &slot, pair) {
+    if !ovf_row_matches_slot(row, &slot, pair) {
         return Ok(None);
     }
     Ok(Some(fk.saturating_sub(1)))
@@ -225,7 +308,7 @@ impl DeltaLoc {
             return Err(StoreError::Corrupt("invariant: loc size"));
         }
         let full = data / 2;
-        let Some(count) = checkpoint_fit(full, off.data_len(), 8) else {
+        let Some(count) = checkpoint_prefix(full, off.data_len(), 8) else {
             return Err(StoreError::Corrupt("invariant: loc checkpoint count"));
         };
         let n_win = count / LOC_WINDOW;
@@ -251,9 +334,7 @@ impl DeltaLoc {
                 CREATE_OVF_MISSING
             },
         };
-        if count < full {
-            opened.truncate_to_count(count)?;
-        }
+        opened.truncate_to_count(count)?;
         // A row past the overflow header belongs to a create this file does not name.
         let last_ovf = opened
             .ovf_rows
@@ -279,10 +360,25 @@ impl DeltaLoc {
         if new_count > cur {
             return Err(StoreError::Corrupt("seqsigwit.loc truncate past count"));
         }
+        // Off and the overflow file never outlive the loc header.
+        self.fit_off_and_ovf(new_count)?;
         if new_count == cur {
             return Ok(());
         }
+        self.loc
+            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * 2)?;
+        self.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate((new_count / LOC_WINDOW) as usize);
+        self.count.store(new_count, Ordering::Release);
+        Ok(())
+    }
+
+    /// Shorten the checkpoint and overflow files to the creates `new_count` names.
+    fn fit_off_and_ovf(&self, new_count: u64) -> Result<(), StoreError> {
         let n_win = new_count / LOC_WINDOW;
+        let off_end = FILE_HEADER_LEN as u64 + n_win * 8;
         let kept = self
             .ovf_rows
             .read()
@@ -290,22 +386,17 @@ impl DeltaLoc {
             .iter()
             .filter(|r| r.0 <= new_count)
             .count();
-        // Kept overflow rows are a prefix.
-        self.loc
-            .set_logical_len(FILE_HEADER_LEN as u64 + new_count * 2)?;
-        self.off
-            .set_logical_len(FILE_HEADER_LEN as u64 + n_win * 8)?;
-        self.ovf
-            .set_logical_len(FILE_HEADER_LEN as u64 + kept as u64 * 12)?;
-        self.checkpoints
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .truncate(n_win as usize);
+        let ovf_end = FILE_HEADER_LEN as u64 + kept as u64 * 12;
+        if self.off.logical_len() != off_end {
+            self.off.set_logical_len(off_end)?;
+        }
+        if self.ovf.logical_len() != ovf_end {
+            self.ovf.set_logical_len(ovf_end)?;
+        }
         self.ovf_rows
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|r| r.0 <= new_count);
-        self.count.store(new_count, Ordering::Release);
         Ok(())
     }
 

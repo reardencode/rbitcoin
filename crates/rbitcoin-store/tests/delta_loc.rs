@@ -110,6 +110,172 @@ fn delta_loc_checkpoint_enospc_drops_the_ovf_row() {
     );
 }
 
+/// The loc header names 1023 creates. The checkpoint and the overflow
+/// file still name the longer suffix. Open keeps the prefix.
+#[test]
+fn delta_loc_truncate_across_window_reopens_at_the_short_prefix() {
+    let dir = TempDir::labeled("delta-window-crash").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let mut starts = Vec::with_capacity(1025);
+    let mut lens = Vec::with_capacity(1025);
+    let mut cursor = FILE_HEADER_LEN as u64;
+    for i in 0..1025 {
+        let len = if i == 1023 || i == 1024 {
+            65536 * IDX_STRIDE
+        } else {
+            8
+        };
+        starts.push(cursor);
+        lens.push(len);
+        cursor = cursor.saturating_add(len);
+    }
+    loc.append(&starts, &lens).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let short = FILE_HEADER_LEN as u64 + 1023 * 2;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("seqsigwit.loc"))
+        .unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&short.to_le_bytes()).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("short prefix opens");
+    assert_eq!(loc.count(), 1023);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= loc.count()),
+        "overflow row past the prefix: {rows:?}"
+    );
+}
+
+/// The loc header names 7 creates inside one window. Overflow rows at 9 and
+/// 10 are still in the file. Open drops them, and the next overflow create
+/// appends.
+#[test]
+fn delta_loc_short_prefix_inside_a_window_drops_later_ovf_rows() {
+    let dir = TempDir::labeled("delta-ovf-inside-window").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let fat = 65536 * IDX_STRIDE;
+    let mut starts = Vec::with_capacity(10);
+    let mut lens = Vec::with_capacity(10);
+    let mut cursor = FILE_HEADER_LEN as u64;
+    for i in 0..10 {
+        let len = if i == 8 || i == 9 { fat } else { 8 };
+        starts.push(cursor);
+        lens.push(len);
+        cursor = cursor.saturating_add(len);
+    }
+    let _ = cursor;
+    loc.append(&starts, &lens).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let short = FILE_HEADER_LEN as u64 + 7 * 2;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("seqsigwit.loc"))
+        .unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&short.to_le_bytes()).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("short prefix opens");
+    assert_eq!(loc.count(), 7);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        rows.iter().all(|row| row.0 <= 7),
+        "overflow row past the prefix: {rows:?}"
+    );
+    let next = FILE_HEADER_LEN as u64 + 7 * 8;
+    loc.append(&[next], &[fat])
+        .expect("next overflow create appends");
+    assert_eq!(loc.count(), 8);
+    assert_eq!(loc.range_batch(&[Fk(8)]).unwrap()[0], Some((next, fat)));
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(rows.len(), 1, "later overflow rows stayed: {rows:?}");
+    assert_eq!(rows[0].0, 8);
+}
+
+/// The overflow row sits past its header. No bytes there is no row, and
+/// open keeps the locator count. A failed read of the locator slot stops
+/// open and leaves that count on disk. A later open cuts the create.
+#[test]
+fn delta_loc_unreadable_slot_for_a_row_past_the_header_does_not_open() {
+    let dir = TempDir::labeled("delta-loc-slot-read").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let fat = 65536 * IDX_STRIDE;
+    loc.append(
+        &[FILE_HEADER_LEN as u64, FILE_HEADER_LEN as u64 + 8],
+        &[8, fat],
+    )
+    .unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let ovf = path.join("seqsigwit.loc.ovf");
+    let saved = std::fs::read(&ovf).unwrap();
+    assert!(saved.len() as u64 > FILE_HEADER_LEN as u64 + 12);
+
+    let mut f = std::fs::OpenOptions::new().write(true).open(&ovf).unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&(FILE_HEADER_LEN as u64).to_le_bytes())
+        .unwrap();
+    f.set_len(FILE_HEADER_LEN as u64).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("a short overflow read is no row");
+    assert_eq!(loc.count(), 2);
+    drop(loc);
+
+    std::fs::write(&ovf, &saved).unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).open(&ovf).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&(FILE_HEADER_LEN as u64).to_le_bytes())
+        .unwrap();
+    drop(f);
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_fail_pread_len();
+        }
+    }
+    rbitcoin_store::io_handle::arm_fail_pread_len(2, 1);
+    let disarm = Disarm;
+    match DeltaLoc::open(&path, "seqsigwit") {
+        Err(StoreError::Io { .. }) => {}
+        Ok(_) => panic!("an unreadable locator slot opened"),
+        Err(other) => panic!("{other}"),
+    }
+    drop(disarm);
+    let logical = u64::from_le_bytes(
+        std::fs::read(path.join("seqsigwit.loc")).unwrap()[8..16]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(logical, FILE_HEADER_LEN as u64 + 4);
+
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("a readable slot cuts the create");
+    assert_eq!(loc.count(), 1);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(rows.is_empty(), "the withheld row stayed: {rows:?}");
+}
+
 #[test]
 fn delta_loc_append_and_batch_order() {
     let dir = TempDir::labeled("delta-loc").unwrap();
