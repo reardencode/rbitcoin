@@ -20,12 +20,12 @@ fn nonstandard_version_is_version() {
     tx.version = Version::non_standard(0xffff_ffffu32 as i32);
     let weight = tx.weight().to_wu();
     assert_eq!(
-        check_libre_admission_at(&tx, 50_000, weight, 0),
+        check_libre_admission_at(&tx, 50_000, 0, weight, 0),
         PolicyResult::Standard
     );
     tx.version = Version::ONE;
     assert_eq!(
-        check_libre_admission_at(&tx, 50_000, weight, 0),
+        check_libre_admission_at(&tx, 50_000, 0, weight, 0),
         PolicyResult::Standard
     );
 }
@@ -36,12 +36,12 @@ fn oversized_spk_is_scriptpubkey() {
     tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 10_001]);
     let weight = tx.weight().to_wu();
     assert_eq!(
-        check_libre_admission_at(&tx, 50_000, weight, 0),
+        check_libre_admission_at(&tx, 50_000, 0, weight, 0),
         PolicyResult::NonStandard("scriptpubkey")
     );
     tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 10_000]);
     assert_eq!(
-        check_libre_admission_at(&tx, 50_000, weight, 0),
+        check_libre_admission_at(&tx, 50_000, 0, weight, 0),
         PolicyResult::Standard
     );
     let mut opreturn = vec![0x6a];
@@ -49,7 +49,7 @@ fn oversized_spk_is_scriptpubkey() {
     tx.output[0].script_pubkey = ScriptBuf::from_bytes(opreturn);
     let weight = tx.weight().to_wu();
     assert_eq!(
-        check_libre_admission_at(&tx, 50_000, weight, 0),
+        check_libre_admission_at(&tx, 50_000, 0, weight, 0),
         PolicyResult::Standard
     );
 }
@@ -180,7 +180,7 @@ fn vsize_fee_zero_and_libre_gates() {
     let mut zero_exact = bare_tx(0);
     zero_exact.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 10_000]);
     assert_eq!(
-        check_libre_shape(&zero_exact, 100),
+        check_libre_admission(&zero_exact, 50_000, 100),
         PolicyResult::NonStandard("dust")
     );
 

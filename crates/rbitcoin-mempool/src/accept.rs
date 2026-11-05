@@ -1196,7 +1196,7 @@ impl ActiveMempool {
         let min_relay = min_relay.unwrap_or(floor);
         // Standardness on raw weight; the fee floor on sigop-adjusted vsize.
         if let PolicyResult::NonStandard(s) =
-            policy::check_libre_admission_at(tx, admit_fee, weight, 0)
+            policy::check_libre_admission_at(tx, fee_sat, fee_delta, weight, 0)
         {
             return Err(AcceptError::Policy(s));
         }
@@ -1644,6 +1644,30 @@ impl ActiveMempool {
         Ok(())
     }
 
+    /// A child of a parent with a dust output must spend that output (Core
+    /// `CheckEphemeralSpends`). Otherwise the 0-fee parent would sit in the
+    /// pool with nothing paying for it.
+    fn check_ephemeral_spends(
+        &self,
+        tx: &Transaction,
+        scan: &ConflictScan,
+    ) -> Result<(), AcceptError> {
+        for id in &scan.parent_txids {
+            let body = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("parent body missing".into()))?;
+            let unspent = policy::dust_vouts(body).any(|vout| {
+                let dust = OutPoint { txid: *id, vout };
+                !tx.input.iter().any(|i| i.previous_output == dust)
+            });
+            if unspent {
+                return Err(AcceptError::Policy("missing-ephemeral-spends"));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns (conflict set, fee, sigop-adjusted weight).
     #[doc(hidden)]
     pub fn plan_after_script(
@@ -1677,6 +1701,7 @@ impl ActiveMempool {
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
         self.check_truc(tx, weight.div_ceil(4), &scan)?;
+        self.check_ephemeral_spends(tx, &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 

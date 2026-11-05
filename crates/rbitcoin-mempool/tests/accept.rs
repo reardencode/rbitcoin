@@ -672,6 +672,74 @@ fn truc_child_limit_holds_across_staged_admits() {
     assert!(!mp.graph.contains(&b.compute_txid()));
 }
 
+fn anchor_out() -> TxOut {
+    TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+/// Core ephemeral dust: one 0-value output on a 0-fee tx, and a child that
+/// spends it. Alone, that tx is only a low-fee parent.
+#[test]
+fn zero_value_anchor_enters_with_the_child_that_spends_it() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+
+    let parent = ver_tx(&[op], 3, vec![pay(100_000), anchor_out()]);
+    let alone = mp.accept_tx(&parent, &utxos, TIP_OK).unwrap_err();
+    assert!(
+        matches!(alone, AcceptError::Policy("min relay fee")),
+        "{alone}"
+    );
+    let paying = ver_tx(&[op], 3, vec![pay(99_000), anchor_out()]);
+    let err = mp.accept_tx(&paying, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::Policy("dust")), "{err}");
+    let two = ver_tx(&[op], 3, vec![pay(100_000), anchor_out(), anchor_out()]);
+    let err = mp
+        .accept_package(
+            &[
+                two.clone(),
+                ver_tx(&[out_of(&two, 1), out_of(&two, 2)], 3, vec![pay(1)]),
+            ],
+            &utxos,
+            TIP_OK,
+        )
+        .unwrap_err();
+    assert!(matches!(err, AcceptError::Policy("dust")), "{err}");
+
+    let skips = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(99_000)]);
+    let err = mp
+        .accept_package(&[parent.clone(), skips], &utxos, TIP_OK)
+        .unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("missing-ephemeral-spends")),
+        "{err}"
+    );
+    assert!(
+        mp.graph.is_empty(),
+        "a failed package leaves nothing behind"
+    );
+
+    let child = ver_tx(
+        &[out_of(&parent, 0), out_of(&parent, 1)],
+        3,
+        vec![pay(99_000)],
+    );
+    mp.accept_package(&[parent.clone(), child.clone()], &utxos, TIP_OK)
+        .expect("the anchor enters with its spender");
+    assert!(mp.graph.contains(&parent.compute_txid()));
+    assert!(mp.graph.contains(&child.compute_txid()));
+
+    let replace_skips = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(90_000)]);
+    let err = mp.accept_tx(&replace_skips, &utxos, TIP_OK).unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("missing-ephemeral-spends")),
+        "{err}"
+    );
+}
+
 /// `n` bare `OP_CHECKMULTISIG` outputs: legacy cost `n × 20 × 4`.
 fn multisig_outputs_tx(op: OutPoint, n: usize) -> Transaction {
     let mut tx = spend_tx(op, 1);

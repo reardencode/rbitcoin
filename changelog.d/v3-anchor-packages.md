@@ -12,3 +12,12 @@ Added
   is allowed; a second child is `TRUC-violation` (there is no sibling
   eviction). The limit is checked again when the transaction commits, so
   two children admitted at the same time cannot both enter.
+- **A 0-fee transaction may carry one 0-value output (an anchor).** As in
+  Core's ephemeral dust rule, the output is allowed only when the
+  transaction pays no fee, and any child of it must spend that output or
+  is `missing-ephemeral-spends`. A fee-paying transaction with a 0-value
+  output, or two such outputs, is still `dust`. Alone the parent fails the
+  minimum relay fee like any low-fee parent, so `submitpackage` admits it
+  beside the child that pays for it. This is the shape of Bark's exit
+  package. A package that replaces such a pair and then fails puts the
+  pair back.

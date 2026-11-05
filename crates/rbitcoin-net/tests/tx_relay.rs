@@ -3213,6 +3213,143 @@ fn copy_store_tree(src: &std::path::Path, dst: &std::path::Path) {
     rbitcoin_store::testutil::copy_store_tree(src, dst);
 }
 
+fn pay_true(value: u64) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(value),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+fn v3_spend(prevs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
+    Transaction {
+        version: Version::non_standard(3),
+        lock_time: LockTime::ZERO,
+        input: prevs
+            .iter()
+            .map(|&previous_output| TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: outputs,
+    }
+}
+
+const COINBASE_SAT: u64 = 50_0000_0000;
+
+/// A Bark-style exit parent: 0 fee, its value out, and one 0-value anchor.
+fn zero_fee_anchor(coin: Txid) -> Transaction {
+    v3_spend(
+        &[OutPoint::new(coin, 0)],
+        vec![pay_true(COINBASE_SAT), pay_true(0)],
+    )
+}
+
+/// The CPFP child: spends the anchor and a confirmed coin, and pays `fee`.
+fn spend_anchor(parent: &Transaction, fund: Txid, fee: u64) -> Transaction {
+    v3_spend(
+        &[
+            OutPoint::new(parent.compute_txid(), 1),
+            OutPoint::new(fund, 0),
+        ],
+        vec![pay_true(COINBASE_SAT - fee)],
+    )
+}
+
+/// `submitpackage` admits a 0-fee anchor parent beside the child that spends
+/// the anchor. Alone it is a low-fee parent; a child that skips the anchor
+/// is `missing-ephemeral-spends` and the parent does not stay.
+#[test]
+fn submit_package_rpc_admits_zero_fee_anchor() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+
+    let parent = zero_fee_anchor(cbs[0]);
+    let err = hub.accept_tx(&parent).expect_err("a lone anchor parent");
+    assert!(
+        matches!(err, AcceptError::Policy("min relay fee")),
+        "{err:?}"
+    );
+    let alone = hub.submit_package_rpc(std::slice::from_ref(&parent));
+    assert!(alone[0].result.is_err(), "{alone:?}");
+
+    let skips = v3_spend(
+        &[OutPoint::new(parent.compute_txid(), 0)],
+        vec![pay_true(COINBASE_SAT - 50_000)],
+    );
+    let err = hub
+        .accept_package(&[parent.clone(), skips.clone()])
+        .expect_err("the child leaves the anchor unspent");
+    assert!(
+        matches!(err, AcceptError::Policy("missing-ephemeral-spends")),
+        "{err:?}"
+    );
+    let rows = hub.submit_package_rpc(&[parent.clone(), skips]);
+    assert!(rows.iter().all(|r| r.result.is_err()), "{rows:?}");
+    assert!(!hub.try_contains(&parent.compute_txid()));
+
+    // An unrelated member with a fee and a 0-value output is `dust` on its
+    // own and does not stop the CPFP pair beside it.
+    let child = spend_anchor(&parent, cbs[1], 50_000);
+    let stray = Transaction {
+        version: Version::TWO,
+        ..v3_spend(
+            &[OutPoint::new(cbs[2], 0)],
+            vec![pay_true(COINBASE_SAT - 10_000), pay_true(0)],
+        )
+    };
+    let rows = hub.submit_package_rpc(&[parent.clone(), child.clone(), stray]);
+    assert!(rows[0].result.is_ok(), "{rows:?}");
+    assert!(rows[1].result.is_ok(), "{rows:?}");
+    assert!(
+        matches!(rows[2].result, Err(AcceptError::Policy("dust"))),
+        "{rows:?}"
+    );
+    assert!(
+        rows[..2]
+            .iter()
+            .all(|r| r.fee_with.as_ref().is_some_and(|ids| ids.len() == 2)),
+        "the anchor clears inside the package remainder, got {rows:?}"
+    );
+    assert!(hub.try_contains(&parent.compute_txid()));
+    assert!(hub.try_contains(&child.compute_txid()));
+}
+
+/// A package that replaces an anchor pair and then fails puts the pair back.
+/// Restoring the 0-fee parent must not bounce it as dust.
+#[test]
+fn failed_package_restores_the_anchor_pair_it_replaced() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+
+    let parent = zero_fee_anchor(cbs[3]);
+    let child = spend_anchor(&parent, cbs[4], 50_000);
+    let rows = hub.submit_package_rpc(&[parent.clone(), child.clone()]);
+    assert!(rows.iter().all(|r| r.result.is_ok()), "{rows:?}");
+
+    let replacer = v3_spend(
+        &[OutPoint::new(cbs[3], 0)],
+        vec![pay_true(COINBASE_SAT - 200_000)],
+    );
+    let bad_child = v3_spend(
+        &[OutPoint::new(replacer.compute_txid(), 0)],
+        vec![pay_true(COINBASE_SAT - 300_000), pay_true(0)],
+    );
+    let err = hub
+        .accept_package(&[replacer.clone(), bad_child])
+        .expect_err("the second member is dust");
+    assert!(matches!(err, AcceptError::Policy("dust")), "{err:?}");
+    assert!(!hub.try_contains(&replacer.compute_txid()));
+    assert!(hub.try_contains(&parent.compute_txid()), "parent restored");
+    assert!(hub.try_contains(&child.compute_txid()), "child restored");
+}
+
 #[test]
 fn submit_package_rpc_admits_cpfp_below_minrelay() {
     let (_store, owned_q, owned_cbs) = pad_cbs(3);
