@@ -43,12 +43,6 @@ pub fn try_p2sh_nested_segwit(
     let redeem = items.last()?.as_slice();
     let (version, program) = classify::witness_program(Script::from_bytes(redeem))?;
 
-    // Core: scriptSig must be exactly CScript() << redeem (minimal single push).
-    let canonical = minimal_push_encoding(redeem);
-    if items.len() != 1 || script_sig.as_bytes() != canonical.as_slice() {
-        return Some(Err(ConsensusError::Script("WITNESS_MALLEATED_P2SH".into())));
-    }
-
     let outer = match job.prevout_script(input_index) {
         Ok(s) => s,
         Err(e) => return Some(Err(e)),
@@ -56,8 +50,19 @@ pub fn try_p2sh_nested_segwit(
     if let Err(e) = check_p2sh_redeem_hash(outer, redeem) {
         return Some(Err(e));
     }
+    // Core checks push-only after the P2SH scriptPubKey and before the
+    // exact-encoding malleation check.
+    if !script_sig.is_push_only() {
+        return Some(Err(ConsensusError::Script("p2sh scriptSig op".into())));
+    }
+    // The redeem script is `OP_0 <program>`. Its only result is whether
+    // `program` is true, and Core reports that before the malleation check.
     if !bitcoin::script::read_scriptbool(program) {
         return Some(Err(ConsensusError::Script("EVAL_FALSE".into())));
+    }
+    let canonical = minimal_push_encoding(redeem);
+    if items.len() != 1 || script_sig.as_bytes() != canonical.as_slice() {
+        return Some(Err(ConsensusError::Script("WITNESS_MALLEATED_P2SH".into())));
     }
 
     Some(match (version, program.len()) {
@@ -97,6 +102,9 @@ pub fn verify_p2sh_legacy(
         return Err(ConsensusError::Script("p2sh empty scriptSig".into()));
     };
     check_p2sh_redeem_hash(job.prevout_script(input_index)?, &redeem)?;
+    if !tx.input[input_index.get()].script_sig.is_push_only() {
+        return Err(ConsensusError::Script("p2sh scriptSig op".into()));
+    }
 
     let redeem_script = Script::from_bytes(&redeem);
     let ctx = EvalContext::from_job(job, tx, input_index, redeem_script, SigVersion::Base)?;
@@ -121,9 +129,6 @@ pub fn p2sh_script_sig_stack(
     let mut stack = Vec::new();
     let _ = interpreter::eval_script(script_sig, &mut stack, &ctx)?;
     require_room_for_p2sh_hash_push(&stack)?;
-    if !script_sig.is_push_only() {
-        return Err(ConsensusError::Script("p2sh scriptSig op".into()));
-    }
     Ok(stack)
 }
 

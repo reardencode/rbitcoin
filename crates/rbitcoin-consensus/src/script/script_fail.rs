@@ -1,8 +1,9 @@
 //! Consensus script failures whose numbers match Bitcoin Core v32.1
 //! `ScriptError` (`third_party/bitcoin` `f0de87f04062`, `script_error.h`).
 //!
-//! Policy-only Core codes stay strings at the call site. They are not in
-//! this enum, so a proof entry cannot report them as ordinals.
+//! `SigPushOnly` is BIP16's push-only rule. `CleanStack` is the witness
+//! rule that the final stack holds one value. Other policy-only Core codes
+//! stay strings at the call site, so a proof entry cannot report them.
 
 use crate::error::ConsensusError;
 
@@ -33,7 +34,9 @@ pub enum ScriptFail {
     NegativeLocktime = 21,
     UnsatisfiedLocktime = 22,
     SigDer = 24,
+    SigPushOnly = 26,
     SigNullDummy = 28,
+    CleanStack = 30,
     WitnessProgramWrongLength = 38,
     WitnessProgramWitnessEmpty = 39,
     WitnessProgramMismatch = 40,
@@ -82,7 +85,9 @@ impl ScriptFail {
             Self::NegativeLocktime => "CLTV negative",
             Self::UnsatisfiedLocktime => "CLTV",
             Self::SigDer => "SIG_DER",
+            Self::SigPushOnly => "p2sh scriptSig op",
             Self::SigNullDummy => "NULLDUMMY",
+            Self::CleanStack => "cleanstack",
             Self::WitnessProgramWrongLength => "WITNESS_PROGRAM_WRONG_LENGTH",
             Self::WitnessProgramWitnessEmpty => "WITNESS_PROGRAM_WITNESS_EMPTY",
             Self::WitnessProgramMismatch => "WITNESS_PROGRAM_MISMATCH",
@@ -112,40 +117,48 @@ impl From<ScriptFail> for ConsensusError {
 /// Map a shipped script message to a consensus ordinal.
 ///
 /// `txid=` / `vin=` suffixes are ignored. Policy tokens and typed-path
-/// strings (`p2wpkh ecdsa`) return `None`.
+/// strings (`p2wpkh ecdsa`, `p2wpkh witness len`) return `None`.
+/// `unknown opcode 0xNN` is `BAD_OPCODE` except `0x6a` (`OP_RETURN`).
+/// `disabled opcode 0xNN` is `DISABLED_OPCODE`.
 pub fn consensus_ordinal(message: &str) -> Option<i32> {
     let token = message.split(" txid=").next().unwrap_or(message);
     let fail = match token {
-        "EVAL_FALSE" | "script false" => ScriptFail::EvalFalse,
+        "EVAL_FALSE" | "script false" | "p2sh redeem hash" => ScriptFail::EvalFalse,
         "OP_RETURN" | "unknown opcode 0x6a" => ScriptFail::OpReturn,
         "scriptnum" | "SCRIPTNUM" | "scriptnum overflow" => ScriptFail::ScriptNum,
         "SCRIPT_SIZE" | "script too large" => ScriptFail::ScriptSize,
-        "PUSH_SIZE" => ScriptFail::PushSize,
+        "PUSH_SIZE" | "push too large" => ScriptFail::PushSize,
         "OP_COUNT" | "op count" => ScriptFail::OpCount,
         "stack size" => ScriptFail::StackSize,
-        "SIG_COUNT" => ScriptFail::SigCount,
-        "PUBKEY_COUNT" => ScriptFail::PubkeyCount,
-        "VERIFY" => ScriptFail::Verify,
+        "SIG_COUNT" | "multisig m" => ScriptFail::SigCount,
+        "PUBKEY_COUNT" | "multisig n" => ScriptFail::PubkeyCount,
+        "VERIFY" | "OP_VERIFY" => ScriptFail::Verify,
         "OP_EQUALVERIFY" => ScriptFail::EqualVerify,
         "CHECKMULTISIGVERIFY" => ScriptFail::CheckMultisigVerify,
-        "CHECKSIGVERIFY" => ScriptFail::CheckSigVerify,
-        "NUMEQUALVERIFY" => ScriptFail::NumEqualVerify,
-        "BAD_OPCODE" => ScriptFail::BadOpcode,
+        "CHECKSIGVERIFY" | "CHECKSIGVERIFY empty" => ScriptFail::CheckSigVerify,
+        "NUMEQUALVERIFY" | "OP_NUMEQUALVERIFY" => ScriptFail::NumEqualVerify,
+        "BAD_OPCODE" | "script parse" | "OP_VERIF" => ScriptFail::BadOpcode,
         "DISABLED_OPCODE" => ScriptFail::DisabledOpcode,
-        "stack empty" => ScriptFail::InvalidStackOperation,
+        "stack empty" | "OP_PICK" | "OP_ROLL" | "p2sh empty scriptSig" => {
+            ScriptFail::InvalidStackOperation
+        }
         "altstack empty" => ScriptFail::InvalidAltstackOperation,
-        "UNBALANCED_CONDITIONAL" => ScriptFail::UnbalancedConditional,
+        "UNBALANCED_CONDITIONAL" | "OP_ELSE" | "OP_ENDIF" | "unbalanced IF" => {
+            ScriptFail::UnbalancedConditional
+        }
         "CLTV negative" | "CSV negative" => ScriptFail::NegativeLocktime,
         "CLTV" | "CLTV type" | "CLTV final sequence" | "CSV" | "CSV version" => {
             ScriptFail::UnsatisfiedLocktime
         }
         "SIG_DER" => ScriptFail::SigDer,
+        "p2sh scriptSig op" => ScriptFail::SigPushOnly,
         "NULLDUMMY" => ScriptFail::SigNullDummy,
+        "cleanstack" => ScriptFail::CleanStack,
         "WITNESS_PROGRAM_WRONG_LENGTH" => ScriptFail::WitnessProgramWrongLength,
-        "WITNESS_PROGRAM_WITNESS_EMPTY" | "p2tr empty witness" => {
+        "WITNESS_PROGRAM_WITNESS_EMPTY" | "p2tr empty witness" | "p2wsh empty witness" => {
             ScriptFail::WitnessProgramWitnessEmpty
         }
-        "WITNESS_PROGRAM_MISMATCH" => ScriptFail::WitnessProgramMismatch,
+        "WITNESS_PROGRAM_MISMATCH" | "p2wsh script hash" => ScriptFail::WitnessProgramMismatch,
         "WITNESS_MALLEATED" => ScriptFail::WitnessMalleated,
         "WITNESS_MALLEATED_P2SH" => ScriptFail::WitnessMalleatedP2sh,
         "WITNESS_UNEXPECTED" => ScriptFail::WitnessUnexpected,
@@ -153,7 +166,11 @@ pub fn consensus_ordinal(message: &str) -> Option<i32> {
         "SCHNORR_SIG_HASHTYPE" | "tapscript sighash" | "p2tr sighash type" => {
             ScriptFail::SchnorrSigHashType
         }
-        "SCHNORR_SIG" | "p2tr schnorr" | "tapscript CHECKSIG failed" => ScriptFail::SchnorrSig,
+        "SCHNORR_SIG"
+        | "p2tr schnorr"
+        | "tapscript CHECKSIG failed"
+        | "tapscript xonly"
+        | "p2tr xonly" => ScriptFail::SchnorrSig,
         "TAPROOT_WRONG_CONTROL_SIZE" => ScriptFail::TaprootWrongControlSize,
         "TAPSCRIPT_VALIDATION_WEIGHT" | "tapscript validation weight" => {
             ScriptFail::TapscriptValidationWeight
@@ -165,7 +182,23 @@ pub fn consensus_ordinal(message: &str) -> Option<i32> {
         "TAPSCRIPT_EMPTY_PUBKEY" | "tapscript empty pubkey" => ScriptFail::TapscriptEmptyPubkey,
         "OP_CODESEPARATOR" => ScriptFail::OpCodeSeparator,
         "SIG_FINDANDDELETE" => ScriptFail::SigFindAndDelete,
-        _ => return None,
+        other => return opcode_ordinal(other),
     };
     Some(fail.ordinal())
+}
+
+/// Dynamic opcode strings. A fixed `0xNN` arm cannot list every byte.
+fn opcode_ordinal(token: &str) -> Option<i32> {
+    if let Some(hex) = token.strip_prefix("unknown opcode 0x") {
+        let fail = if hex == "6a" {
+            ScriptFail::OpReturn
+        } else {
+            ScriptFail::BadOpcode
+        };
+        return Some(fail.ordinal());
+    }
+    if token.starts_with("disabled opcode 0x") {
+        return Some(ScriptFail::DisabledOpcode.ordinal());
+    }
+    None
 }

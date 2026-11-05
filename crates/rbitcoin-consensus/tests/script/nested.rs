@@ -128,11 +128,11 @@ fn push_only_and_split_helpers() {
         stack_for(ScriptBuf::from_bytes(vec![0x00, 0x4f, 0x51, 0x01, 0xaa])).unwrap(),
         vec![vec![], vec![0x81], vec![0x01], vec![0xaa]]
     );
-    let err = stack_for(ScriptBuf::from_bytes(vec![0x61])).unwrap_err();
-    assert!(
-        format!("{err}").contains("p2sh scriptSig"),
-        "shipped BIP16 push-only: {err}"
-    );
+    // OP_NOP leaves an empty stack. Push-only is checked after the redeem
+    // hash, on the verify path, so the stack helper returns that empty stack.
+    assert!(stack_for(ScriptBuf::from_bytes(vec![0x61]))
+        .unwrap()
+        .is_empty());
     assert!(!Script::from_bytes(&[0xac]).is_push_only());
     assert!(Script::from_bytes(&[0x4f, 0x51]).is_push_only());
 

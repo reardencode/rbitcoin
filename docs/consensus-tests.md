@@ -54,7 +54,7 @@ refreshing; do not check copies into `tests/fixtures/`.
 
 `core_script_tests_all_rows_interpreter_only`, `script_corpus_rows_interpreter_only`,
 `core_tx_valid_all_rows_interpreter_only`, `core_tx_invalid_all_rows_interpreter_only`,
-and `core_bip341_wallet_vectors_interpreter_only` run those same rows again with
+and `core_bip341_wallet_vectors_all_rows_interpreter_only` run those same rows again with
 `ScriptCheckJob::interpreter_only` set. They are ordinary `#[test]`s on the `test`
 job. Sighash rows stay digest checks. The 16-flag subset and superset walks stay
 on the fast path.

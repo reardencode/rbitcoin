@@ -2,7 +2,7 @@
 //! Each case builds a real job and calls the shipped checker.
 
 use bitcoin::absolute::LockTime;
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::{Message, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
@@ -348,6 +348,156 @@ fn interpreter_only_p2wpkh_witness_count_is_mismatch() {
     assert_eq!(consensus_ordinal(&typed), None);
 }
 
+fn bare(script: &[u8]) -> String {
+    token(verify_job_all_inputs(&job(
+        ScriptBuf::from_bytes(script.to_vec()),
+        ScriptBuf::new(),
+        Witness::new(),
+    )))
+}
+
+fn expect_ordinal(got: &str, ordinal: i32) {
+    assert_eq!(consensus_ordinal(got), Some(ordinal), "{got}");
+}
+
+#[test]
+fn interpreter_tokens_keep_core_ordinals() {
+    let cases: &[(&[u8], &str, i32)] = &[
+        (&[0x00, 0x69], "OP_VERIFY", 11),
+        (&[0x67], "OP_ELSE", 20),
+        (&[0x68], "OP_ENDIF", 20),
+        (&[0x51, 0x63], "unbalanced IF", 20),
+        (&[0x01], "script parse", 16),
+        (&[0x65], "OP_VERIF", 16),
+        (&[0xba], "unknown opcode 0xba", 16),
+        (&[0xff], "unknown opcode 0xff", 16),
+        (&[0x7e], "disabled opcode 0x7e", 17),
+        (&[0x51, 0x79], "OP_PICK", 18),
+        (&[0x51, 0x7a], "OP_ROLL", 18),
+        (&[0x01, 0x15, 0xae], "multisig n", 10),
+        (&[0x00, 0x51, 0x00, 0xae], "multisig m", 9),
+        (&[0x51, 0x52, 0x9d], "OP_NUMEQUALVERIFY", 15),
+    ];
+    for (script, expect, ordinal) in cases {
+        let got = bare(script);
+        assert_eq!(&got, expect, "{got}");
+        expect_ordinal(&got, *ordinal);
+    }
+
+    let mut big = vec![0x4d, 0x09, 0x02];
+    big.extend(std::iter::repeat_n(0x11, 521));
+    let got = bare(&big);
+    assert_eq!(got, "push too large");
+    expect_ordinal(&got, 6);
+
+    let mut program = vec![0x00, 0x20];
+    program.extend_from_slice(&[0x11; 32]);
+    let got = token(verify_job_all_inputs(&job(
+        ScriptBuf::from_bytes(program.clone()),
+        ScriptBuf::new(),
+        Witness::new(),
+    )));
+    assert_eq!(got, "p2wsh empty witness");
+    expect_ordinal(&got, 39);
+    let got = token(verify_job_all_inputs(&job(
+        ScriptBuf::from_bytes(program),
+        ScriptBuf::new(),
+        Witness::from_slice(&[&[0x51][..]]),
+    )));
+    assert_eq!(got, "p2wsh script hash");
+    expect_ordinal(&got, 40);
+
+    let leaf = vec![0x51, 0x51];
+    let digest = sha256::Hash::hash(&leaf);
+    let mut spk = vec![0x00, 0x20];
+    spk.extend_from_slice(digest.as_byte_array());
+    let got = token(verify_job_all_inputs(&job(
+        ScriptBuf::from_bytes(spk),
+        ScriptBuf::new(),
+        Witness::from_slice(&[&leaf[..]]),
+    )));
+    assert_eq!(got, "cleanstack");
+    expect_ordinal(&got, 30);
+
+    let redeem = ScriptBuf::from_bytes(vec![0x51]);
+    let p2sh = ScriptBuf::new_p2sh(&redeem.script_hash());
+    let mismatch = token(verify_job_all_inputs(&job(
+        p2sh.clone(),
+        ScriptBuf::from_bytes(vec![0x61, 0x01, 0x52]),
+        Witness::new(),
+    )));
+    assert_eq!(mismatch, "p2sh redeem hash");
+    expect_ordinal(&mismatch, 2);
+    let push = token(verify_job_all_inputs(&job(
+        p2sh,
+        ScriptBuf::from_bytes(vec![0x61, 0x01, 0x51]),
+        Witness::new(),
+    )));
+    assert_eq!(push, "p2sh scriptSig op");
+    expect_ordinal(&push, 26);
+
+    // All-zero program is a false scriptPubKey (EVAL_FALSE) before key-path
+    // parsing. A non-zero invalid x-only reaches `p2tr xonly`.
+    let got = token(verify_job_all_inputs(&job(
+        p2tr_program(&[0xff; 32]),
+        ScriptBuf::new(),
+        Witness::from_slice(&[&[0u8; 64][..]]),
+    )));
+    assert_eq!(got, "p2tr xonly");
+    expect_ordinal(&got, 47);
+
+    let secp = Secp256k1::new();
+    let internal = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3u8; 32]).unwrap());
+    let (internal_xonly, _) = internal.x_only_public_key();
+    let leaf = ScriptBuf::from_bytes(vec![0xad]);
+    let spend = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal_xonly)
+        .unwrap();
+    let control = spend
+        .control_block(&(leaf.clone(), LeafVersion::TapScript))
+        .unwrap()
+        .serialize();
+    let witness = Witness::from_slice(&[
+        &[][..],
+        &[0x11; 32][..],
+        leaf.as_bytes(),
+        control.as_slice(),
+    ]);
+    let got = token(verify_job_all_inputs(&job(
+        p2tr_program(&spend.output_key().to_x_only_public_key().serialize()),
+        ScriptBuf::new(),
+        witness,
+    )));
+    assert_eq!(got, "CHECKSIGVERIFY empty");
+    expect_ordinal(&got, 14);
+
+    let leaf = ScriptBuf::from_bytes(vec![0xac]);
+    let spend = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal_xonly)
+        .unwrap();
+    let control = spend
+        .control_block(&(leaf.clone(), LeafVersion::TapScript))
+        .unwrap()
+        .serialize();
+    let witness = Witness::from_slice(&[
+        &[0u8; 64][..],
+        &[0xff; 32][..],
+        leaf.as_bytes(),
+        control.as_slice(),
+    ]);
+    let got = token(verify_job_all_inputs(&job(
+        p2tr_program(&spend.output_key().to_x_only_public_key().serialize()),
+        ScriptBuf::new(),
+        witness,
+    )));
+    assert_eq!(got, "tapscript xonly");
+    expect_ordinal(&got, 47);
+}
+
 #[test]
 fn script_fail_ordinals_match_core_v32() {
     assert_eq!(ScriptFail::EvalFalse.ordinal(), 2);
@@ -368,6 +518,59 @@ fn script_fail_ordinals_match_core_v32() {
     assert_eq!(consensus_ordinal("p2tr sig len"), Some(45));
     assert_eq!(consensus_ordinal("p2tr sighash type"), Some(46));
     assert_eq!(consensus_ordinal("SIG_HIGH_S"), None);
+}
+
+#[test]
+fn shipped_script_tokens_map_to_core_ordinals() {
+    assert_eq!(ScriptFail::SigPushOnly.ordinal(), 26);
+    assert_eq!(ScriptFail::CleanStack.ordinal(), 30);
+    assert_eq!(ScriptFail::SigPushOnly.token(), "p2sh scriptSig op");
+    assert_eq!(ScriptFail::CleanStack.token(), "cleanstack");
+    for token in [
+        "MINIMALIF",
+        "NULLFAIL",
+        "PUBKEYTYPE",
+        "WITNESS_PUBKEYTYPE",
+        "p2wpkh witness len",
+        "p2pkh ecdsa",
+        "p2tr schnorr parse",
+        "p2tr sig",
+        "p2tr script path short",
+        "p2wsh witness",
+        "p2sh spk",
+    ] {
+        assert_eq!(consensus_ordinal(token), None, "{token}");
+    }
+    for (token, ordinal) in [
+        ("OP_VERIFY", 11),
+        ("OP_ELSE", 20),
+        ("OP_ENDIF", 20),
+        ("unbalanced IF", 20),
+        ("push too large", 6),
+        ("script parse", 16),
+        ("OP_VERIF", 16),
+        ("unknown opcode 0xba", 16),
+        ("unknown opcode 0xff", 16),
+        ("unknown opcode 0x6a", 3),
+        ("disabled opcode 0x7e", 17),
+        ("disabled opcode 0x7f", 17),
+        ("OP_PICK", 18),
+        ("OP_ROLL", 18),
+        ("multisig n", 10),
+        ("multisig m", 9),
+        ("CHECKSIGVERIFY empty", 14),
+        ("OP_NUMEQUALVERIFY", 15),
+        ("p2wsh empty witness", 39),
+        ("p2wsh script hash", 40),
+        ("p2sh empty scriptSig", 18),
+        ("p2sh redeem hash", 2),
+        ("p2sh scriptSig op", 26),
+        ("cleanstack", 30),
+        ("tapscript xonly", 47),
+        ("p2tr xonly", 47),
+    ] {
+        assert_eq!(consensus_ordinal(token), Some(ordinal), "{token}");
+    }
 }
 
 #[test]
