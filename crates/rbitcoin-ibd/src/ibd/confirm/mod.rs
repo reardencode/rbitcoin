@@ -2487,6 +2487,7 @@ pub fn spawn_confirm_engine(
             );
             let mut lookup_ahead = LoadAheadState::new(&hub_load);
             let mut stamped_gen: Option<u32> = None;
+            let mut next_prefetch_ranges: Vec<(u64, u64)> = Vec::new();
             let stats = hub_load.query.confirm_stats_arc();
             loop {
                 if feed_load.stopped() || hub_load.query.confirm_cancelled() {
@@ -2511,6 +2512,12 @@ pub fn spawn_confirm_engine(
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 confirm_thr_stats::add_load_pack(&stats, t_recv.elapsed());
+                // true next-batch: fadvise N+1 parents while N in scripts
+                if !next_prefetch_ranges.is_empty() {
+                    for (off, len) in next_prefetch_ranges.drain(..) {
+                        hub_load.query.store().advise_tx_body_will_need(off, len);
+                    }
+                }
                 let drop_below = lb.drop_inflight_below;
                 let n = lb.items.len();
                 let wire: usize = lb
@@ -2758,6 +2765,7 @@ pub fn spawn_confirm_engine(
                     Vec::new(),
                     Vec::new(),
                 );
+                next_prefetch_ranges = stamped.prefetch_ranges.clone();
                 let plan_ns = stamped.work_ns;
                 let heights_hashes: Vec<(u32, BlockHash)> = wire_batch
                     .iter()

@@ -125,6 +125,10 @@ impl VarTable {
         self.body.advise_dont_need(offset, len);
     }
 
+    pub fn advise_body_will_need(&self, offset: u64, len: u64) {
+        self.body.advise_will_need(offset, len);
+    }
+
     pub fn pread_span(&self, offset: u64, len: u64) -> Result<Vec<u8>, StoreError> {
         if len == 0 {
             return Ok(Vec::new());

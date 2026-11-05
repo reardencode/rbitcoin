@@ -192,6 +192,8 @@ confirm_window! {
     pin_cache_body,
     pin_plan,
     pin_new,
+    prefetch_bytes,
+    prefetch_ns,
     pin_body_ns,
     plan_pin_ns,
     pin_range_fill_ns,
