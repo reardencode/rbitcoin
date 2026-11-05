@@ -183,11 +183,14 @@ pub async fn isolated_broadcast_known_tx(
     IsolatedBroadcast::Finished
 }
 
+pub const ISOLATED_RESEND_SWEEP: Duration = Duration::from_secs(30);
+
 pub fn spawn_isolated_broadcast_loop(
     mp: Arc<MempoolHub>,
     dialer: Dialer,
     addrman: Arc<Mutex<AddrMan>>,
     magic: Magic,
+    resend_sweep: Duration,
 ) -> JoinHandle<()> {
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
@@ -197,8 +200,16 @@ pub fn spawn_isolated_broadcast_loop(
     const BACKLOG_WARN: usize = 32;
     tokio::spawn(async move {
         let mut warned = false;
+        let mut sweep = tokio::time::interval(resend_sweep);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let (txid, behind) = mp.next_isolated().await;
+            let (txid, behind) = tokio::select! {
+                next = mp.next_isolated() => next,
+                _ = sweep.tick() => {
+                    mp.requeue_unreturned();
+                    continue;
+                }
+            };
             if behind < BACKLOG_WARN {
                 warned = false;
             } else {

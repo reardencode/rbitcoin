@@ -899,11 +899,18 @@ enum IsolatedTurn {
     /// isolated broadcast was off when its submit finished.
     Held,
     /// Waiting for the isolated loop. The number is submit order.
-    Waiting(u64),
+    Waiting {
+        order: u64,
+        sends: u32,
+    },
     Taken {
         returned: bool,
+        sends: u32,
     },
-    Sent,
+    Sent {
+        due: u64,
+        sends: u32,
+    },
 }
 
 impl LocalOrigin {
@@ -921,28 +928,47 @@ impl LocalOrigin {
             return false;
         }
         self.next += 1;
-        *turn = IsolatedTurn::Waiting(self.next);
+        *turn = IsolatedTurn::Waiting {
+            order: self.next,
+            sends: 0,
+        };
         true
     }
 
     /// The oldest waiting txid, now taken, and how many still wait.
     fn take(&mut self) -> Option<(Txid, usize)> {
-        let mut oldest: Option<(u64, Txid)> = None;
+        let mut oldest: Option<(u64, Txid, u32)> = None;
         let mut waiting = 0usize;
         for (txid, turn) in &self.txs {
-            let IsolatedTurn::Waiting(n) = *turn else {
+            let IsolatedTurn::Waiting { order, sends } = *turn else {
                 continue;
             };
             waiting += 1;
-            if oldest.is_none_or(|(m, _)| n < m) {
-                oldest = Some((n, *txid));
+            if oldest.is_none_or(|(m, _, _)| order < m) {
+                oldest = Some((order, *txid, sends));
             }
         }
-        let (_, txid) = oldest?;
-        self.txs
-            .insert(txid, IsolatedTurn::Taken { returned: false });
+        let (_, txid, sends) = oldest?;
+        self.txs.insert(
+            txid,
+            IsolatedTurn::Taken {
+                returned: false,
+                sends,
+            },
+        );
         Some((txid, waiting - 1))
     }
+}
+
+pub const ISOLATED_SEND_CAP: u32 = 1_000;
+
+const ENDING: IsolatedTurn = IsolatedTurn::Sent {
+    due: u64::MAX,
+    sends: 0,
+};
+
+fn isolated_resend_delay_secs() -> u64 {
+    120 + crate::peer::rand_nonce() % 61
 }
 
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
@@ -6227,7 +6253,7 @@ impl MempoolHub {
         let ended = {
             let mut origin = self.local_origin.lock().unwrap();
             match origin.txs.get_mut(txid) {
-                Some(IsolatedTurn::Taken { returned }) => {
+                Some(IsolatedTurn::Taken { returned, .. }) => {
                     *returned = true;
                     false
                 }
@@ -6235,7 +6261,7 @@ impl MempoolHub {
                 // stops the one-shot loop from taking it. The drop is after
                 // the age stamp.
                 Some(_) => {
-                    origin.txs.insert(*txid, IsolatedTurn::Sent);
+                    origin.txs.insert(*txid, ENDING);
                     true
                 }
                 None => false,
@@ -6246,15 +6272,47 @@ impl MempoolHub {
         }
     }
 
+    pub fn requeue_unreturned(&self) -> usize {
+        let now = self.relay_now_secs();
+        let mut origin = self.local_origin.lock().unwrap();
+        let mut order = origin.next;
+        let mut requeued = 0;
+        for turn in origin.txs.values_mut() {
+            let IsolatedTurn::Sent { due, sends } = *turn else {
+                continue;
+            };
+            if due > now || sends >= ISOLATED_SEND_CAP {
+                continue;
+            }
+            order += 1;
+            *turn = IsolatedTurn::Waiting { order, sends };
+            requeued += 1;
+        }
+        origin.next = order;
+        drop(origin);
+        if requeued > 0 {
+            self.isolated_wake.notify_one();
+        }
+        requeued
+    }
+
     pub fn isolated_sent(&self, txid: &Txid) {
         let ended = {
             let mut origin = self.local_origin.lock().unwrap();
             match origin.txs.get(txid) {
-                Some(IsolatedTurn::Taken { returned }) => {
+                Some(IsolatedTurn::Taken { returned, sends }) => {
                     let ended = *returned;
                     // `Sent` keeps the row through the age stamp when `ended`.
                     // The echo has not arrived yet when it is not.
-                    origin.txs.insert(*txid, IsolatedTurn::Sent);
+                    let next = if ended {
+                        ENDING
+                    } else {
+                        IsolatedTurn::Sent {
+                            due: self.relay_now_secs() + isolated_resend_delay_secs(),
+                            sends: sends.saturating_add(1),
+                        }
+                    };
+                    origin.txs.insert(*txid, next);
                     ended
                 }
                 _ => false,
@@ -6270,7 +6328,7 @@ impl MempoolHub {
     fn end_local_origin(&self, txid: &Txid) {
         self.restamp_relay_age(txid);
         let mut origin = self.local_origin.lock().unwrap();
-        if matches!(origin.txs.get(txid), Some(IsolatedTurn::Sent)) {
+        if matches!(origin.txs.get(txid), Some(IsolatedTurn::Sent { .. })) {
             origin.txs.remove(txid);
         }
     }

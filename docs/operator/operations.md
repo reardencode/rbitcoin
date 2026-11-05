@@ -188,7 +188,9 @@ node then announces the tx on its normal schedule, like any other,
 except to the peer who sent it back. An inbound peer still waits 30
 seconds, counted from the end of the private broadcast. Until that
 broadcast ends, the tx stays in the mempool and is not INV'd, even if
-the one-shot failed; confirmation can still arrive in a block.
+the one-shot failed; confirmation can still arrive in a block. A tx that
+has not come back 2 to 3 minutes after its last one-shot is sent again to
+fresh peers, up to 1,000 sends, as Core's private broadcast does.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
 `--only-net onion` (repeatable with `ipv4`/`ipv6`/`i2p`/`cjdns`) filters dial and learn;
 onion requires `--proxy` or `--onion`. `--connect foo.onion:8333` is a start

@@ -794,6 +794,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             config.listen.isolated_dialer(),
             std::sync::Arc::clone(&shared_peers),
             node.magic(),
+            rbitcoin_net::ephemeral::ISOLATED_RESEND_SWEEP,
         );
     }
     if proxy_seeds_queued && addrman.is_empty() {
