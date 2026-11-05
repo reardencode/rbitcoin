@@ -2164,7 +2164,7 @@ impl PeerHub {
 
     /// [`Self::advertise_local_socket`] limited to CJDNS (`fc00::/8`) or to
     /// clearnet addresses, so each link announces only its own network.
-    pub fn advertise_local_socket_on(&self, cjdns: bool) -> Option<SocketAddr> {
+    pub(crate) fn advertise_local_socket_on(&self, cjdns: bool) -> Option<SocketAddr> {
         self.local_socket_where(|ip| {
             matches!(ip, IpAddr::V6(v) if crate::netaddr::is_cjdns_ip(*v)) == cjdns
         })
