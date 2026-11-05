@@ -48,6 +48,46 @@ fn insert_create_pin_shares_script_bytes() {
     assert_eq!(got, expect, "CreatePin insert must not clone script bytes");
 }
 
+/// Two blocks in one write batch spend different vouts of one in-window create.
+/// The merged pin keeps that create's script allocation.
+#[test]
+fn extend_from_full_pins_keeps_script_bytes() {
+    use rbitcoin_query::CreatePinInner;
+    let pin = CreatePinInner::records(
+        TxRecord {
+            output_count: 2,
+            ..tx(9)
+        },
+        vec![
+            OutputRecord::unspent(1, vec![0x51u8; 64]),
+            OutputRecord::unspent(2, vec![0x52u8; 64]),
+        ],
+    );
+    let p0 = pin.out_parts(0).expect("vout 0").1.as_ptr();
+    let p1 = pin.out_parts(1).expect("vout 1").1.as_ptr();
+    let mut a = BatchParents::new();
+    a.insert_create_pin(
+        Fk(9),
+        Arc::clone(&pin),
+        vec![0],
+        Some(false),
+        None,
+        Vec::new(),
+    );
+    let mut b = BatchParents::new();
+    b.insert_create_pin(Fk(9), pin, vec![1], None, None, Vec::new());
+    a.extend_from(b);
+    assert!(a.pin_covered(Fk(9), &[0, 1]));
+    let got0 = a
+        .get_parent_txout_parts(Fk(9), 0, |_, script, _| script.as_ptr())
+        .expect("vout 0");
+    let got1 = a
+        .get_parent_txout_parts(Fk(9), 1, |_, script, _| script.as_ptr())
+        .expect("vout 1");
+    assert_eq!(got0, p0, "merged full pin must borrow vout 0");
+    assert_eq!(got1, p1, "merged full pin must borrow vout 1");
+}
+
 #[test]
 fn extend_from_merges_disjoint_and_same_fk() {
     let mut a = BatchParents::new();

@@ -197,6 +197,24 @@ impl PinOuts {
         self.covers_need(checked) && (live.is_empty() || self.has_all_live(live))
     }
 
+    /// Checked-list widen when every `extra` vout already lives in this create.
+    ///
+    /// `None` for a sparse pin, and for a vout this create does not have.
+    fn union_full_checked(&self, extra: &[u32]) -> Option<Self> {
+        match self {
+            Self::Full {
+                pin,
+                block,
+                checked,
+            } if extra.iter().all(|&v| pin.contains_vout(v)) => Some(Self::Full {
+                pin: std::sync::Arc::clone(pin),
+                block: block.clone(),
+                checked: union_vouts(checked, extra),
+            }),
+            _ => None,
+        }
+    }
+
     #[doc(hidden)]
     pub fn sparse_live(&self) -> Vec<(u32, OutputRecord)> {
         match self {
@@ -226,23 +244,15 @@ impl PinOuts {
                         }
                     }
                     outs.sort_unstable_by_key(|(v, _)| *v);
-                    let mut next_ch = ch.clone();
-                    next_ch.extend_from_slice(checked);
-                    next_ch.sort_unstable();
-                    next_ch.dedup();
                     Self::Sparse {
                         outs,
-                        checked: next_ch,
+                        checked: union_vouts(ch, checked),
                     }
                 } else {
-                    let mut next_ch = ch.clone();
-                    next_ch.extend_from_slice(checked);
-                    next_ch.sort_unstable();
-                    next_ch.dedup();
                     Self::Full {
                         pin: std::sync::Arc::clone(pin),
                         block: block.clone(),
-                        checked: next_ch,
+                        checked: union_vouts(ch, checked),
                     }
                 }
             }
@@ -254,13 +264,9 @@ impl PinOuts {
                     }
                 }
                 next_outs.sort_unstable_by_key(|(v, _)| *v);
-                let mut next_ch = ch.clone();
-                next_ch.extend_from_slice(checked);
-                next_ch.sort_unstable();
-                next_ch.dedup();
                 Self::Sparse {
                     outs: next_outs,
-                    checked: next_ch,
+                    checked: union_vouts(ch, checked),
                 }
             }
         }
@@ -476,6 +482,27 @@ impl SharedParentPin {
     #[doc(hidden)]
     pub fn covers_need(&self, need: &[u32]) -> bool {
         self.load_outs().covers_need(need)
+    }
+
+    /// Union `src` into this pin.
+    ///
+    /// An in-window pin already holds every output of its create, so a wider
+    /// checked list does not copy those scripts. A sparse pin that is missing
+    /// a vout still copies that record.
+    fn absorb_outs(&self, src: &PinOuts) {
+        let extra = src.checked();
+        if extra.is_empty() || self.load_outs().covers_need(extra) {
+            return;
+        }
+        self.outs.rcu(|cur| {
+            if cur.covers_need(extra) {
+                Arc::clone(cur)
+            } else if let Some(next) = cur.union_full_checked(extra) {
+                Arc::new(next)
+            } else {
+                Arc::new(cur.compose(&src.sparse_live(), extra))
+            }
+        });
     }
 
     /// No-op (empty / already-covered `checked`+`live`) keeps the outs Arc.
@@ -1115,8 +1142,7 @@ impl BatchParents {
                     if !Arc::ptr_eq(o.get(), &src) {
                         let src_outs = src.load_outs();
                         let src_lay = src.load_layout();
-                        o.get()
-                            .merge_outs(src_outs.sparse_live(), src_outs.checked());
+                        o.get().absorb_outs(src_outs.as_ref());
                         o.get().set_coinbase_if_known(src.coinbase_opt());
                         o.get()
                             .maybe_merge_layout(src_lay.body_range, &src_lay.spender_rels);
@@ -1157,6 +1183,15 @@ impl BatchParents {
         }
         None
     }
+}
+
+fn union_vouts(checked: &[u32], extra: &[u32]) -> Vec<u32> {
+    let mut next = Vec::with_capacity(checked.len().saturating_add(extra.len()));
+    next.extend_from_slice(checked);
+    next.extend_from_slice(extra);
+    next.sort_unstable();
+    next.dedup();
+    next
 }
 
 #[inline]
