@@ -115,14 +115,18 @@ pub fn labeled_spend_key(
     spend_pk.add_exp_tweak(secp(), &Scalar::from(tweak))
 }
 
-/// BIP-352 `P_k = B_spend + t_k·G` for tweak `A` and integer `k`.
+/// Match BIP-352 outputs against spend keys at counters 0 through 7.
+/// Compute ECDH once per transaction and `t_k·G` once per counter, then
+/// reuse those points across all spend keys and output comparisons.
 pub fn taproot_matches_scan(
     tweak_compressed: &[u8; 33],
-    output_xonly: &[u8; 32],
+    outputs: &[TaprootOut],
     scan_sk: &SecretKey,
-    spend_pk: &PublicKey,
-    k: u32,
+    spend_keys: &[PublicKey],
 ) -> bool {
+    if outputs.is_empty() || spend_keys.is_empty() {
+        return false;
+    }
     let Ok(a) = PublicKey::from_slice(tweak_compressed) else {
         return false;
     };
@@ -134,16 +138,24 @@ pub fn taproot_matches_scan(
     };
     let mut payload = [0u8; 37];
     payload[..33].copy_from_slice(&shared.serialize());
-    payload[33..].copy_from_slice(&k.to_be_bytes());
-    let t = tagged_hash(b"BIP0352/SharedSecret", &payload);
-    let Ok(tk) = SecretKey::from_slice(&t) else {
-        return false;
-    };
-    let tg = PublicKey::from_secret_key(secp(), &tk);
-    let Ok(p) = PublicKey::combine_keys(&[spend_pk, &tg]) else {
-        return false;
-    };
-    p.x_only_public_key().0.serialize() == *output_xonly
+    for k in 0u32..8 {
+        payload[33..].copy_from_slice(&k.to_be_bytes());
+        let t = tagged_hash(b"BIP0352/SharedSecret", &payload);
+        let Ok(tk) = SecretKey::from_slice(&t) else {
+            continue;
+        };
+        let tg = PublicKey::from_secret_key(secp(), &tk);
+        for spend in spend_keys {
+            let Ok(p) = spend.combine(&tg) else {
+                continue;
+            };
+            let xonly = p.x_only_public_key().0.serialize();
+            if outputs.iter().any(|output| output.xonly == xonly) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[doc(hidden)]

@@ -99,8 +99,15 @@ fn classifier_edges() {
 fn taproot_matches_scan_rejects_invalid_tweak() {
     let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
     let pk = PublicKey::from_secret_key(secp(), &sk);
-    assert!(!taproot_matches_scan(&[0u8; 33], &[0u8; 32], &sk, &pk, 0));
-    assert!(!taproot_matches_scan(&[2u8; 33], &[0u8; 32], &sk, &pk, 7));
+    let outputs = [TaprootOut {
+        vout: 0,
+        xonly: [0u8; 32],
+        value: 1,
+    }];
+    assert!(!taproot_matches_scan(&[0u8; 33], &outputs, &sk, &[pk]));
+    assert!(!taproot_matches_scan(&[2u8; 33], &outputs, &sk, &[pk]));
+    assert!(!taproot_matches_scan(&pk.serialize(), &[], &sk, &[pk]));
+    assert!(!taproot_matches_scan(&pk.serialize(), &outputs, &sk, &[]));
 }
 
 fn hex_bytes(s: &str) -> Vec<u8> {
@@ -238,9 +245,16 @@ fn official_vectors_receiving_tweaks() {
                                 let mut x = [0u8; 32];
                                 x.copy_from_slice(&hex_bytes(pk));
                                 assert!(
-                                    (0u32..8).any(|k| {
-                                        taproot_matches_scan(&tw, &x, &scan, &spend_pk, k)
-                                    }),
+                                    taproot_matches_scan(
+                                        &tw,
+                                        &[TaprootOut {
+                                            vout: 0,
+                                            xonly: x,
+                                            value: 1
+                                        }],
+                                        &scan,
+                                        &[spend_pk],
+                                    ),
                                     "scan miss {comment}"
                                 );
                                 n += 1;

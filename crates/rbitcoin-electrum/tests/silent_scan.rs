@@ -47,10 +47,22 @@ fn official_vectors_labeled_receiving() {
                 Some(0),
             )
             .unwrap();
+            let max_labels_sub = parse_sub(
+                &json!([
+                    given["key_material"]["scan_priv_key"],
+                    spend,
+                    0,
+                    [0, 1, 2, 3, 4, 5, 6, 7, 1337, 1001337]
+                ]),
+                Network::Regtest,
+                Some(0),
+            )
+            .unwrap();
             let tweak = hex_decode(rec["expected"]["tweak"].as_str().unwrap())
                 .unwrap()
                 .try_into()
                 .unwrap();
+            let mut outputs = Vec::new();
             for output in given["outputs"].as_array().unwrap() {
                 let wanted = expected.iter().any(|o| o["pub_key"] == *output);
                 let tw = TxTweak {
@@ -67,6 +79,12 @@ fn official_vectors_labeled_receiving() {
                 if tx_matches(&sub, &tw) != wanted {
                     misses.push(format!("{}: {output} expected {wanted}", case["comment"]));
                 }
+                assert_eq!(
+                    tx_matches(&max_labels_sub, &tw),
+                    wanted,
+                    "ten labels: {}: {output}",
+                    case["comment"]
+                );
                 if case["comment"]
                     .as_str()
                     .unwrap()
@@ -78,7 +96,23 @@ fn official_vectors_labeled_receiving() {
                     misses.push(format!("implicit change label: {output} expected {wanted}"));
                 }
                 checked += 1;
+                outputs.extend(tw.output_pubkeys);
             }
+            let mut tx = TxTweak {
+                tweak,
+                output_pubkeys: outputs,
+            };
+            assert!(
+                tx_matches(&sub, &tx),
+                "whole transaction: {}",
+                case["comment"]
+            );
+            tx.output_pubkeys.reverse();
+            assert!(
+                tx_matches(&max_labels_sub, &tx),
+                "reversed outputs with ten labels: {}",
+                case["comment"]
+            );
         }
     }
     assert_eq!(checked, 13);
