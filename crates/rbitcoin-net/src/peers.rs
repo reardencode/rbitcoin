@@ -4189,11 +4189,14 @@ mod discover_from_peers {
         for n in 1..=MAX_DISCOVERED_IPS as u8 + 1 {
             assert!(hub.peer_reported_socket(ip(n)).is_some());
         }
-        assert!(hub.peer_reported_socket(ip(2)).is_some(), "a repeat is not re-added");
         assert!(!own(&hub, 1), "the oldest report is evicted at the cap");
         for n in 2..=MAX_DISCOVERED_IPS as u8 + 1 {
             assert!(own(&hub, n), "report {n} is an own address");
         }
+        // A repeat keeps its place, so the next new report evicts it.
+        assert!(hub.peer_reported_socket(ip(2)).is_some());
+        assert!(hub.peer_reported_socket(ip(100)).is_some());
+        assert!(!own(&hub, 2) && own(&hub, 3), "a repeat is not re-added");
         hub.set_discover_from_peers(false);
         assert!(!own(&hub, 2), "turning the flag off forgets the reports");
         assert!(hub.peer_reported_socket(ip(2)).is_none());
