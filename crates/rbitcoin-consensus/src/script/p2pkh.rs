@@ -50,7 +50,8 @@ pub fn verify(
 
 #[doc(hidden)]
 pub fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), ConsensusError> {
-    let mut items = Vec::with_capacity(2);
+    let mut sig = None;
+    let mut pubkey = None;
     for ins in script.instructions() {
         match ins.map_err(|_| ConsensusError::Script("p2pkh scriptSig".into()))? {
             // Over-size pushes are a shape error so the interpreter reports
@@ -59,7 +60,11 @@ pub fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), Consensus
             Instruction::PushBytes(b) if b.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE => {
                 return Err(ConsensusError::Script("p2pkh scriptSig".into()));
             }
-            Instruction::PushBytes(b) => items.push(b.as_bytes().to_vec()),
+            Instruction::PushBytes(b) if sig.is_none() => sig = Some(b.as_bytes().to_vec()),
+            Instruction::PushBytes(b) if pubkey.is_none() => pubkey = Some(b.as_bytes().to_vec()),
+            Instruction::PushBytes(_) => {
+                return Err(ConsensusError::Script("p2pkh scriptSig len".into()));
+            }
             // OP_1..=OP_16 and every other opcode are the same shape error.
             Instruction::Op(_) => {
                 return Err(ConsensusError::Script(
@@ -68,10 +73,10 @@ pub fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), Consensus
             }
         }
     }
-    if items.len() != 2 {
-        return Err(ConsensusError::Script("p2pkh scriptSig len".into()));
+    match (sig, pubkey) {
+        (Some(sig), Some(pubkey)) => Ok((sig, pubkey)),
+        _ => Err(ConsensusError::Script("p2pkh scriptSig len".into())),
     }
-    Ok((items[0].clone(), items[1].clone()))
 }
 
 /// ScriptCode left after `FindAndDelete` on the P2PKH template.
