@@ -867,3 +867,21 @@ fn conf_unknown_key_is_an_error() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn network_names_are_recognized_and_false_is_unset() {
+    for (name, expected) in [
+        ("regtest", Network::Regtest),
+        ("signet", Network::Signet),
+        ("testnet", Network::Testnet),
+        ("testnet4", Network::Testnet4),
+    ] {
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv(name, "1").unwrap(), ConfApply::Applied);
+        assert_eq!(c.network, expected);
+
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv(name, "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.network, Network::Mainnet);
+    }
+}

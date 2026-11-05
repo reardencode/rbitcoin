@@ -1885,10 +1885,26 @@ impl NodeConfig {
                 }
             }
             "no_seeds" => self.listen.use_seeds = !is_conf_true(val),
-            "regtest" if is_conf_true(val) => self.network = Network::Regtest,
-            "signet" if is_conf_true(val) => self.network = Network::Signet,
-            "testnet" if is_conf_true(val) => self.network = Network::Testnet,
-            "testnet4" if is_conf_true(val) => self.network = Network::Testnet4,
+            "regtest" => {
+                if is_conf_true(val) {
+                    self.network = Network::Regtest
+                }
+            }
+            "signet" => {
+                if is_conf_true(val) {
+                    self.network = Network::Signet
+                }
+            }
+            "testnet" => {
+                if is_conf_true(val) {
+                    self.network = Network::Testnet
+                }
+            }
+            "testnet4" => {
+                if is_conf_true(val) {
+                    self.network = Network::Testnet4
+                }
+            }
             _ => return Ok(ConfApply::Unknown(key.to_string())),
         }
         Ok(ConfApply::Applied)
