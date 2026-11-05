@@ -70,7 +70,7 @@ Clean smoke:
 | `--no-listen` / `--listen=0` | `listen=0` / `no_listen=` | bind a loopback default; **off** = no clearnet P2P socket |
 | `--listen-onion` | `listen_onion=` | **off** — loopback P2P + `ADD_ONION` (`{datadir}/onion/p2p.priv`); needs `--tor-control` and `--max-inbound` > 0 |
 | `--no-discover` | `no_discover=` | discover **on**; flag off = no home-IP self-announce; P2P/wallet onions still listed |
-| `--discover-from-peers` | `discover_from_peers=` | **off** — with no clearnet `--external-ip`, announce to clearnet peers the IP each one reports reaching us at, at the listen port; never over Tor, I2P, CJDNS or `--proxy`; needs discover on and a clearnet listener |
+| `--discover-from-peers` | `discover_from_peers=` | **off** — with no clearnet `--external-ip`, announce to outbound clearnet peers the IP each one reports reaching us at, at the listen port; never to inbound peers, never over Tor, I2P, CJDNS or `--proxy`; needs discover on and a non-loopback `--listen` (ignored with a warning otherwise) |
 | `--only-net NET` | `only_net=` | all nets; repeatable `ipv4` / `ipv6` / `onion` / `i2p` / `cjdns` |
 | `--cjdns-reachable` | `cjdns_reachable=` | **off** — `fc00::/8` is unroutable until set; `--only-net=cjdns` requires it |
 | `--connect ADDR` | `connect=` (repeatable) | seeds; `IP:port`, Tor v3 `.onion:port`, or `{52}.b32.i2p:port` |
@@ -220,11 +220,14 @@ loopback inbound when `--listen-onion` is the only overlay listener. The I2P
 destination goes to I2P peers, and to loopback inbound when
 `--i2p-accept-incoming` is the only one. A public `--external-ip` goes
 to direct clearnet peers, and an `fc00::/8` address (`--external-ip` or the
-CJDNS listen) only to CJDNS peers. Tor and I2P inbound both arrive on
+CJDNS listen) only to CJDNS peers. With `--discover-from-peers` and no
+clearnet `--external-ip`, a direct outbound clearnet peer is told the IP
+it reports reaching us at, with the listen port. Tor and I2P inbound both arrive on
 loopback, so with both listeners a loopback inbound peer gets no
 self-announce. Neither a `getaddr` reply nor `addrv2` relay passes on the
 node's own onions (P2P and wallet), I2P, CJDNS or `--external-ip`
-addresses when a peer gossips them back.
+addresses when a peer gossips them back, nor the last eight peer-reported
+addresses it announced (each at the listen port only).
 
 `--tor-control [HOST:PORT]` talks to **system tor** (SAFECOOKIE/COOKIE or password). Omit
 ADDR for `127.0.0.1:9051`. Failed AUTH is a start error. Unset: no control

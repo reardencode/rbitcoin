@@ -734,6 +734,20 @@ fn relay_requires_min_chain_work_even_when_following() {
 }
 
 #[test]
+fn discover_from_peers_needs_a_reachable_bind() {
+    let on = |bind: &str| discover_from_peers_on(true, bind.parse().unwrap());
+    assert!(!on("127.0.0.1:8333"), "the default bind is loopback");
+    assert!(!on("127.0.0.1:0"), "the onion listener alone is loopback");
+    assert!(!on("[::1]:8333"));
+    assert!(!on("[::ffff:127.0.0.1]:8333"));
+    assert!(on("0.0.0.0:8333"));
+    assert!(on("[::]:8333"));
+    assert!(on("192.168.1.5:8333"), "behind NAT, forwarded");
+    let any: SocketAddr = "0.0.0.0:8333".parse().unwrap();
+    assert!(!discover_from_peers_on(false, any));
+}
+
+#[test]
 fn cjdns_listen_is_advertised_without_external_ip() {
     use std::net::{IpAddr, Ipv6Addr};
     let fc = Ipv6Addr::new(0xfc00, 1, 2, 3, 4, 5, 6, 7);

@@ -595,8 +595,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         node.peers.set_peer_timeout_secs(secs);
     }
     node.peers.set_discover(config.listen.discover);
-    node.peers
-        .set_discover_from_peers(config.listen.discover_from_peers);
+    let from_peers = discover_from_peers_on(config.listen.discover_from_peers, node.local_addr);
+    if config.listen.discover_from_peers && !from_peers {
+        warn!(
+            "--discover-from-peers ignored: the P2P bind {} is loopback, so peers could not reach the address it would announce (set --listen)",
+            node.local_addr
+        );
+    }
+    node.peers.set_discover_from_peers(from_peers);
     node.peers
         .set_clearnet_listen(!matches!(config.listen.p2p, crate::config::P2pListen::Off));
     if node.local_addr.port() != 0 {
@@ -3236,6 +3242,14 @@ fn queue_outbound_full_relay(
     for addr in queued {
         book.note_attempt_addr(addr);
     }
+}
+
+/// Whether `--discover-from-peers` takes effect on P2P bind `bind`. A
+/// loopback bind (the default, or the onion listener alone) accepts nothing
+/// from the address a peer reports, so announcing it would mislead.
+#[doc(hidden)]
+pub fn discover_from_peers_on(flag: bool, bind: SocketAddr) -> bool {
+    flag && !bind.ip().to_canonical().is_loopback()
 }
 
 /// A CJDNS listen bind is the address peers should learn. `--external-ip`

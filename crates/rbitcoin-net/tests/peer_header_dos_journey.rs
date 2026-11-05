@@ -1620,10 +1620,11 @@ fn announced_ips(peer: &rbitcoin_net::peers::LivePeer) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// `--discover-from-peers` announces, at our listen port, the IP a clearnet
-/// peer reports reaching us at. Off by default; never on an overlay or
-/// proxied link; an unroutable or CJDNS report is ignored; a clearnet
-/// `--external-ip` wins; `--no-discover` and no clearnet listener stop it.
+/// `--discover-from-peers` announces, at our listen port, the IP an outbound
+/// clearnet peer reports reaching us at. Off by default; never to an inbound
+/// peer, which anyone can be; never on an overlay or proxied link; an
+/// unroutable or CJDNS report is ignored; a clearnet `--external-ip` wins;
+/// `--no-discover` and no clearnet listener stop it.
 #[test]
 fn discover_from_peers_announces_the_reported_address() {
     use rbitcoin_net::peers::PeerConnType::{Inbound, OutboundFullRelay as Out};
@@ -1640,7 +1641,7 @@ fn discover_from_peers_announces_the_reported_address() {
     };
 
     assert!(
-        &reporting_peer(&hub(false), clearnet, Out, seen).take_self_announce_msg().is_none(),
+        reporting_peer(&hub(false), clearnet, Out, seen).take_self_announce_msg().is_none(),
         "off by default: a peer's report is never announced"
     );
     let on = hub(true);
@@ -1649,9 +1650,15 @@ fn discover_from_peers_announces_the_reported_address() {
         [SocketAddr::new(seen, 8333)],
         "the reported IP goes out at our listen port, not the peer-seen port"
     );
-    assert_eq!(
-        announced_ips(&reporting_peer(&on, clearnet, Inbound, seen)),
-        [SocketAddr::new(seen, 8333)]
+    let inbound = reporting_peer(&on, clearnet, Inbound, seen);
+    assert_eq!(inbound.reported_local_ip, None);
+    assert!(
+        inbound.take_self_announce_msg().is_none(),
+        "an inbound peer's report is not taken"
+    );
+    assert!(
+        !on.is_own_address(rbitcoin_net::NetAddr::Ip(SocketAddr::from(([81, 2, 69, 161], 8333)))),
+        "nor recorded"
     );
     for bad in [
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -1670,7 +1677,7 @@ fn discover_from_peers_announces_the_reported_address() {
             .parse()
             .unwrap();
     assert!(
-        &reporting_peer(&on, onion, Out, seen).take_self_announce_msg().is_none(),
+        reporting_peer(&on, onion, Out, seen).take_self_announce_msg().is_none(),
         "an onion peer never gets a clearnet IP"
     );
     let proxied = hub(true);
@@ -1679,7 +1686,7 @@ fn discover_from_peers_announces_the_reported_address() {
         i2p_sam: None,
     });
     assert!(
-        &reporting_peer(&proxied, clearnet, Out, seen).take_self_announce_msg().is_none(),
+        reporting_peer(&proxied, clearnet, Out, seen).take_self_announce_msg().is_none(),
         "a peer dialled through the proxy sees the exit, and gets nothing"
     );
 
@@ -1701,10 +1708,96 @@ fn discover_from_peers_announces_the_reported_address() {
 
     let no_discover = hub(true);
     no_discover.set_discover(false);
-    assert!(&reporting_peer(&no_discover, clearnet, Out, seen).take_self_announce_msg().is_none());
+    assert!(reporting_peer(&no_discover, clearnet, Out, seen).take_self_announce_msg().is_none());
     let no_listen = hub(true);
     no_listen.set_clearnet_listen(false);
-    assert!(&reporting_peer(&no_listen, clearnet, Out, seen).take_self_announce_msg().is_none());
+    assert!(reporting_peer(&no_listen, clearnet, Out, seen).take_self_announce_msg().is_none());
+}
+
+/// `ip(n)` for the reports in `discovered_reports_are_own_addresses_at_our_port`.
+fn reported(n: u8) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(81, 2, 70, n))
+}
+
+/// An outbound session from its own address whose VERSION reports `reported(n)`.
+fn outbound_reporting(
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    n: u8,
+    v2: bool,
+) -> std::sync::Arc<rbitcoin_net::peers::LivePeer> {
+    let addr = SocketAddr::from(([93, 184, 217, n], 8333));
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&SocketAddr::new(reported(n), 50_123), ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 0,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register(addr, addr, &ver, false, rbitcoin_net::peers::PeerConnType::OutboundFullRelay);
+    if v2 {
+        peer.set_wants_addrv2();
+    }
+    peer
+}
+
+/// A report becomes one of this node's own addresses once it is announced,
+/// and only at the listen port: the peer picks the IP, so matching by IP
+/// would let it hide another node's address at every port. A report the
+/// daily timer holds back is not recorded. The newest
+/// `MAX_DISCOVERED_IPS` are kept, a repeat keeps its place, and turning the
+/// flag off forgets them. The connecting placeholder, whose `receiver` is
+/// the peer's own socket, reports nothing.
+#[test]
+fn discovered_reports_are_own_addresses_at_our_port() {
+    use rbitcoin_net::peers::{PeerConnType, MAX_DISCOVERED_IPS};
+    let own_at = |peers: &rbitcoin_net::peers::PeerHub, n: u8, port: u16| {
+        peers.is_own_address(rbitcoin_net::NetAddr::Ip(SocketAddr::new(reported(n), port)))
+    };
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    peers.set_discover(true);
+    peers.set_clearnet_listen(true);
+    peers.set_listen_port(8333);
+    peers.set_discover_from_peers(true);
+
+    let first = outbound_reporting(&peers, 1, true);
+    assert!(!own_at(&peers, 1, 8333));
+    assert!(first.take_self_announce_msg().is_some());
+    assert!(own_at(&peers, 1, 8333), "an announced report is ours");
+    assert!(!own_at(&peers, 1, 18333), "the reported IP at another port is not ours");
+
+    let v1 = outbound_reporting(&peers, 2, false);
+    assert!(matches!(v1.take_self_announce_msg(), Some(NetworkMessage::Addr(_))));
+    assert!(own_at(&peers, 2, 8333), "a v1 addr announce records too");
+
+    peers.set_discover_from_peers(false);
+    assert!(!own_at(&peers, 1, 8333), "turning the flag off forgets the reports");
+    peers.set_discover_from_peers(true);
+    assert!(
+        first.take_self_announce_msg().is_none(),
+        "the daily timer holds the repeat back"
+    );
+    assert!(!own_at(&peers, 1, 8333), "evaluated but never sent, so not recorded");
+
+    let cap = MAX_DISCOVERED_IPS as u8;
+    for n in 10..=10 + cap {
+        assert!(outbound_reporting(&peers, n, true).take_self_announce_msg().is_some());
+    }
+    assert!(!own_at(&peers, 10, 8333), "the oldest report is evicted at the cap");
+    for n in 11..=10 + cap {
+        assert!(own_at(&peers, n, 8333), "report {n} is ours");
+    }
+    // A repeat keeps its place, so the next new report evicts it.
+    assert!(outbound_reporting(&peers, 11, true).take_self_announce_msg().is_some());
+    assert!(outbound_reporting(&peers, 100, true).take_self_announce_msg().is_some());
+    assert!(!own_at(&peers, 11, 8333) && own_at(&peers, 12, 8333), "a repeat is not re-added");
+
+    let addr = SocketAddr::new(reported(7), 8333);
+    let row = peers.register_connecting(addr, addr, false, PeerConnType::OutboundFullRelay);
+    assert_eq!(row.reported_local_ip, None);
 }
 
 /// A peer gossips this node's own onion, I2P and external addresses back.

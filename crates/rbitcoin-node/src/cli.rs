@@ -390,7 +390,7 @@ Trust-peer: --trust-peer ADDR (conf trustpeer=) dials only that address, the sam
   --i2p-accept-incoming persist {{datadir}}/i2p/p2p.priv and STREAM FORWARD to the P2P bind. Needs --listen.\n\
   --listen-onion ADD_ONION the P2P port (loopback bind even with --no-listen). Needs --tor-control and --max-inbound > 0.\n\
   --cjdns-reachable treat fc00::/8 as CJDNS (dial and advertise). --only-net=cjdns requires it.\n\
-  --discover-from-peers (default off) announce the IP clearnet peers report reaching us at.\n\
+  --discover-from-peers (default off) announce the IP outbound clearnet peers report reaching us at; needs a non-loopback --listen.\n\
   A clearnet --external-ip wins. Never sent over Tor, I2P or CJDNS. --no-discover turns it off.\n\
   --trusted / --always-relay / --relay are inbound permission knobs.\n\
   --net-permission / --net-permission-bind are CIDR or bind grants (noban, relay, …; IPv4 and IPv6).\n\
