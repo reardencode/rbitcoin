@@ -33,7 +33,7 @@ pub fn verify(
     let (sig, sighash_ty) = crypto::parse_der_sig(&sig_raw, job.bip66_active)?;
     let pubkey = crypto::parse_pubkey(&pubkey_raw)?;
 
-    let script_code_bytes = sighash_script_code(spk, &sig_raw)?;
+    let script_code_bytes = sighash_script_code(spk, &sig_raw);
     let script_code = Script::from_bytes(&script_code_bytes);
     // Raw hashtype byte (may be 0 — must not normalize to SIGHASH_ALL).
     let sighash = cache
@@ -72,13 +72,22 @@ pub fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), Consensus
     Ok((items[0].clone(), items[1].clone()))
 }
 
-/// scriptCode the fast path hashes.
+/// ScriptCode left after `FindAndDelete` on the P2PKH template.
 ///
-/// Base `FindAndDelete` of this signature, then drop bare
-/// `OP_CODESEPARATOR`. That is the bytes the interpreter hashes.
-fn sighash_script_code<'a>(spk: &'a [u8], sig: &[u8]) -> Result<Cow<'a, [u8]>, ConsensusError> {
-    Ok(interpreter::legacy_script_code(spk, &[sig])?.0)
+/// `is_p2pkh` is `OP_DUP OP_HASH160 PUSH20 <keyhash> OP_EQUALVERIFY OP_CHECKSIG`.
+/// The signature push matches an instruction boundary only when it is those
+/// 20 keyhash bytes. The template has no bare `OP_CODESEPARATOR`. Any other
+/// signature hashes `spk` unchanged, with no script walk and no allocation.
+fn sighash_script_code<'a>(spk: &'a [u8], sig: &[u8]) -> Cow<'a, [u8]> {
+    if spk.len() == 25 && sig.len() == 20 && sig == &spk[3..23] {
+        Cow::Borrowed(P2PKH_SCRIPT_CODE_KEYHASH_REMOVED)
+    } else {
+        Cow::Borrowed(spk)
+    }
 }
+
+/// `OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG`.
+const P2PKH_SCRIPT_CODE_KEYHASH_REMOVED: &[u8] = &[0x76, 0xa9, 0x88, 0xac];
 
 #[cfg(test)]
 mod tests {
@@ -93,9 +102,28 @@ mod tests {
         let pk = PublicKey::new(sk.public_key(&secp));
         let spk = bitcoin::ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::hash(&pk.to_bytes()));
         let keyhash = bitcoin::PubkeyHash::hash(&pk.to_bytes());
-        let code = super::sighash_script_code(spk.as_bytes(), keyhash.as_byte_array()).unwrap();
+        let code = super::sighash_script_code(spk.as_bytes(), keyhash.as_byte_array());
         // OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG. The 20-byte push is gone.
+        // Borrowed: the fast path must not allocate a scriptCode for this hit.
+        assert!(matches!(code, std::borrow::Cow::Borrowed(_)));
         assert_eq!(code.as_ref(), &[0x76, 0xa9, 0x88, 0xac]);
         assert_ne!(code.as_ref(), spk.as_bytes());
+    }
+
+    #[test]
+    fn other_signatures_hash_the_template_in_place() {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+        let pk = PublicKey::new(sk.public_key(&secp));
+        let spk = bitcoin::ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::hash(&pk.to_bytes()));
+        let raw = spk.as_bytes();
+        let ordinary = [0x30u8; 71];
+        let same = super::sighash_script_code(raw, &ordinary);
+        assert!(matches!(same, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(same.as_ref(), raw));
+        let mut miss = [0u8; 20];
+        miss[0] = 0x30;
+        let untouched = super::sighash_script_code(raw, &miss);
+        assert!(std::ptr::eq(untouched.as_ref(), raw));
     }
 }
