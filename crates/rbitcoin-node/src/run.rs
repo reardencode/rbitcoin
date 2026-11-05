@@ -2066,6 +2066,11 @@ pub fn apply_startup_index_mode(
     } else if config.sptweaks {
         info!("sp_tweaks: enabled origin={taproot_height}");
     }
+    // Before write-behind starts. An unproven head must not catch up by
+    // appending from height 0; delete it and stay Direct until materialize.
+    query
+        .discard_unproven_scripthash_head()
+        .map_err(|e| NodeError::Config(format!("scripthash index: {e}")))?;
     if config.shindex && query.sh_use_writebehind() {
         let _ = query.sync_sh_seal_from_include_hwm();
         query.enter_tip_index_mode();

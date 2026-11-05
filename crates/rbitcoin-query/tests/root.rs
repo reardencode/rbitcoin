@@ -894,11 +894,12 @@ fn sh_writebehind_recover_requeues_unapplied_heights() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A zero include mark proves nothing. Recovery re-queues from the start,
-/// and applying that queue is what makes the index tip-ready. A mark written
-/// with the head still names the height it covers.
+/// A head with no include mark and no SEAL proves nothing. Recovery must
+/// not walk the chain from height 0. Tip entry deletes that head and
+/// materializes from Class A. A mark written with the head still names the
+/// height it covers.
 #[test]
-fn zero_include_mark_requeues_from_the_start() {
+fn unproven_scripthash_head_is_deleted_and_materialized() {
     let (dir, q) = temp_query("sh-zero-include");
     let (mut h0, t0) = coinbase_block(0, Fk::NULL, None);
     h0.merkle_root = t0.tx.txid;
@@ -924,6 +925,9 @@ fn zero_include_mark_requeues_from_the_start() {
         "a mark that covers the head is that height, not a rebuild"
     );
 
+    let seal = rbitcoin_query::sh_builder::seal_path(&dir.path().join("scripthash.runs"));
+    assert!(seal.is_file(), "materialize publishes SEAL");
+    std::fs::remove_file(&seal).unwrap();
     std::fs::remove_file(dir.path().join(rbitcoin_store::INCLUDE_HWM_NAME)).unwrap();
     assert_eq!(q.store().scripthash.include_hwm(), 0);
     let prev_fk = q.tip_header_fk().unwrap().unwrap();
@@ -936,29 +940,37 @@ fn zero_include_mark_requeues_from_the_start() {
     drop(q);
 
     let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert!(
+        q.sh.pending.lock().unwrap().is_empty(),
+        "an unproven head is not re-queued from height 0"
+    );
     assert_ne!(
         q.sh_indexed_through_height(),
         Some(1),
-        "a zero include mark must not report the tip as indexed"
+        "a missing include mark must not report the tip as indexed"
     );
     assert!(
         !q.sh_is_tip_ready(),
-        "wallet servers stay down while the gap is not durable"
+        "wallet servers stay down until materialize covers the tip"
+    );
+    assert!(q.store().scripthash.has_durable_index());
+    q.set_sh_index_enabled(false);
+    q.discard_unproven_scripthash_head().unwrap();
+    assert!(
+        q.store().scripthash.has_durable_index(),
+        "shindex off leaves the head on disk"
+    );
+    q.set_sh_index_enabled(true);
+    let n = q.finalize_sh_runs().unwrap();
+    assert!(
+        n > 0,
+        "tip entry materializes Class A after deleting the head"
     );
     let sh = script_hash(&[0x51]);
-    assert_eq!(
-        q.scripthash_history(&sh).unwrap().len(),
-        2,
-        "recovery re-queues from the start, so the unapplied height is visible"
-    );
-    q.apply_sh_pending().unwrap();
-    assert_eq!(q.sh_indexed_through_height(), Some(1));
-    assert!(
-        q.sh_is_tip_ready(),
-        "applying the recovered queue makes the index tip-ready without another block"
-    );
-    assert!(q.store().scripthash.include_hwm() > 0);
     assert_eq!(q.scripthash_history(&sh).unwrap().len(), 2);
+    assert_eq!(q.sh_indexed_through_height(), Some(1));
+    assert!(q.sh_is_tip_ready());
+    assert!(q.store().scripthash.include_hwm() > 0);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
