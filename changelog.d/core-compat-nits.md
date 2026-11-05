@@ -35,14 +35,13 @@ Fixed
   `submitblock` and proposals ignore bytes after the last transaction,
   decode errors carry Core's text, and a base58 address may have whitespace
   around it.
-- **A deprioritised parent is mined with the child that pays for it.** A
-  negative `prioritisetransaction` delta let a cheap sibling go first, so
-  parent, child and sibling shared one diluted chunk that `-blockmintxfee`
-  could drop from `getblocktemplate` and `generate`. Clusters are now
-  linearized by ancestor-set feerate, as in Core.
-- **Chunk feerates match Core's linearization.** Clusters run Core's
-  `PostLinearize` and chunking rule, and equal-feerate transactions stay
-  separate chunks. The remaining gap is in COMPAT.md.
+- **Clusters are linearized by ancestor-set feerate, as in Core.** A
+  negative `prioritisetransaction` on a parent let a cheap sibling go
+  first, so parent, child, and sibling shared one diluted chunk that
+  `-blockmintxfee` could drop from `getblocktemplate` and `generate`.
+  Clusters run Core's `PostLinearize` and chunking rule, and equal-feerate
+  transactions stay separate chunks. The parent is mined with the child
+  that pays for it. The remaining gap is in COMPAT.md.
 - **`savemempool` and `importmempool`.** `savemempool` writes Core's version
   2 `{datadir}/mempool.dat`. `importmempool` loads a Core version 1 or 2
   file through normal admission and honors `use_current_time`,

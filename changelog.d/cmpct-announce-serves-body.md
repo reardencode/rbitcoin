@@ -8,7 +8,8 @@ Fixed
   loser is more than ten blocks below the tip, the answer is the full
   block. A side body whose confirmed ancestor is more than ten headers
   away keeps an unknown height, so the reply stays the transactions
-  rather than a stand-in at height 0. A side body a month behind the best header is not served. The
+  rather than a stand-in at height 0. A side body a month behind the best
+  header is not served. The
   staged copy is dropped once the block is connected. A block that is
   not valid yet because its timestamp is too new, or whose parent was
   invalidated, stays servable. A mutated body does not.
