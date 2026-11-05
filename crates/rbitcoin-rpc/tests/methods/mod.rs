@@ -4443,6 +4443,20 @@ fn rpc_submit_nonstandard_version_is_version() {
             .contains(&parent.compute_txid()),
         "parent must admit: {pkg}"
     );
+    let (_, mut v3) = spend_generated_coinbase(
+        &ctx,
+        2,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    v3.version = TxVersion::non_standard(3);
+    let v3_hex = rbitcoin_primitives::hex_encode(serialize(&v3));
+    let sent = dispatch(&ctx, "sendrawtransaction", vec![json!(v3_hex)]).unwrap();
+    assert_eq!(sent, json!(v3.compute_txid().to_string()));
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&v3.compute_txid()),
+        "version 3 must enter the mempool"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn one_sat_spend(prev: bitcoin::OutPoint) -> String {
@@ -8204,12 +8218,12 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     let child_out = dispatch(&ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
     assert_eq!(child_out["confirmations"], 0, "{child_out}");
 
-    let v3a = loose_tx(3, 0x31, marker_outpoint(0x31), 1);
-    let v3b = loose_tx(3, 0x32, marker_outpoint(0x32), 1);
+    let v4a = loose_tx(4, 0x31, marker_outpoint(0x31), 1);
+    let v4b = loose_tx(4, 0x32, marker_outpoint(0x32), 1);
     let versions = dispatch(
         &ctx,
         "testmempoolaccept",
-        vec![json!([serialize_hex(&v3a), serialize_hex(&v3b)])],
+        vec![json!([serialize_hex(&v4a), serialize_hex(&v4b)])],
     )
     .unwrap();
     assert_eq!(versions[0]["reject-reason"], "version", "{versions}");
@@ -8240,7 +8254,7 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
         &ctx,
         "testmempoolaccept",
         vec![
-            json!([serialize_hex(&fat), serialize_hex(&v3a)]),
+            json!([serialize_hex(&fat), serialize_hex(&v4a)]),
             json!("0.00001"),
         ],
     )
