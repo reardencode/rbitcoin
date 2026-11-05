@@ -602,7 +602,12 @@ impl LivePeer {
     pub fn take_local_addr_due(&self, now: u64) -> Option<SocketAddr> {
         const DAY: u64 = 24 * 60 * 60;
         let hub = self.owner.upgrade()?;
-        let sock = hub.advertise_local_socket()?;
+        // A socket, as v1 ADDR carries it: clearnet only, since a CJDNS
+        // address would re-encode as plain IPv6.
+        if self.self_announce_link(&hub) != SelfAnnounceLink::Clearnet {
+            return None;
+        }
+        let sock = SelfAnnounceLink::Clearnet.local_socket(&hub)?;
         let prev = self.next_local_addr_send.load(Ordering::Relaxed);
         if prev != 0 && now < prev {
             return None;
@@ -622,9 +627,10 @@ impl LivePeer {
             return None;
         }
         let hub = self.owner.upgrade()?;
-        let onion = hub.p2p_onion();
-        let i2p = hub.p2p_i2p();
-        let sock = hub.advertise_local_socket();
+        let link = self.self_announce_link(&hub);
+        let onion = hub.p2p_onion().filter(|_| link == SelfAnnounceLink::Tor);
+        let i2p = hub.p2p_i2p().filter(|_| link == SelfAnnounceLink::I2p);
+        let sock = link.local_socket(&hub);
         if onion.is_none() && i2p.is_none() && sock.is_none() {
             return None;
         }
@@ -684,6 +690,39 @@ impl LivePeer {
                 t,
                 Address::new(&sock, services),
             )]))
+        }
+    }
+
+    /// The network this link carries, which decides the one local address
+    /// it may announce. Tor and I2P inbound both arrive on the loopback
+    /// listener, so with both overlays accepting, a loopback inbound link
+    /// cannot be told apart and announces nothing.
+    fn self_announce_link(&self, hub: &PeerHub) -> SelfAnnounceLink {
+        let sock = match self.net {
+            crate::NetAddr::Onion { .. } => return SelfAnnounceLink::Tor,
+            crate::NetAddr::I2p { .. } => return SelfAnnounceLink::I2p,
+            crate::NetAddr::Cjdns { .. } => return SelfAnnounceLink::Cjdns,
+            crate::NetAddr::Ip(sock) => sock,
+        };
+        if !self.inbound {
+            let proxied = hub
+                .proxies()
+                .proxy_for(crate::OnlyNet::of(self.net))
+                .is_some();
+            return if proxied {
+                SelfAnnounceLink::Tor
+            } else {
+                SelfAnnounceLink::Clearnet
+            };
+        }
+        if !sock.ip().to_canonical().is_loopback() {
+            return SelfAnnounceLink::Clearnet;
+        }
+        match (hub.p2p_onion().is_some(), hub.p2p_i2p().is_some()) {
+            (false, false) => SelfAnnounceLink::Clearnet,
+            (true, false) => SelfAnnounceLink::Tor,
+            (false, true) => SelfAnnounceLink::I2p,
+            (true, true) => SelfAnnounceLink::Unknown,
         }
     }
 
@@ -1829,6 +1868,55 @@ pub fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
     s
 }
 
+/// This node's own announced addresses. A peer can gossip one back into
+/// addrman or relay it in `addrv2`; neither a `getaddr` reply nor the relay
+/// fan-out passes one on, so it never crosses to a link of another network.
+pub(crate) struct OwnAddrs {
+    onions: Vec<[u8; 32]>,
+    i2p: Option<crate::NetAddr>,
+    ips: Vec<IpAddr>,
+}
+
+impl OwnAddrs {
+    pub(crate) fn contains(&self, addr: crate::NetAddr) -> bool {
+        match addr {
+            crate::NetAddr::Onion { pk, .. } => self.onions.contains(&pk),
+            crate::NetAddr::I2p { dest, .. } => {
+                matches!(self.i2p, Some(crate::NetAddr::I2p { dest: own, .. }) if own == dest)
+            }
+            crate::NetAddr::Ip(sock) => self.has_ip(sock.ip()),
+            crate::NetAddr::Cjdns { ip, .. } => self.has_ip(IpAddr::V6(ip)),
+        }
+    }
+
+    fn has_ip(&self, ip: IpAddr) -> bool {
+        self.ips
+            .iter()
+            .any(|own| own.to_canonical() == ip.to_canonical())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfAnnounceLink {
+    Clearnet,
+    Cjdns,
+    Tor,
+    I2p,
+    Unknown,
+}
+
+impl SelfAnnounceLink {
+    /// The listen address this link may announce: a public IP on clearnet,
+    /// an `fc00::/8` address on CJDNS, none on an overlay.
+    fn local_socket(self, hub: &PeerHub) -> Option<SocketAddr> {
+        match self {
+            Self::Clearnet => hub.advertise_local_socket_on(false),
+            Self::Cjdns => hub.advertise_local_socket_on(true),
+            Self::Tor | Self::I2p | Self::Unknown => None,
+        }
+    }
+}
+
 #[doc(hidden)]
 pub fn ip_is_advertisable(ip: &IpAddr, cjdns_reachable: bool) -> bool {
     if let IpAddr::V6(v) = ip {
@@ -2081,6 +2169,18 @@ impl PeerHub {
     }
 
     pub fn advertise_local_socket(&self) -> Option<SocketAddr> {
+        self.local_socket_where(|_| true)
+    }
+
+    /// [`Self::advertise_local_socket`] limited to CJDNS (`fc00::/8`) or to
+    /// clearnet addresses, so each link announces only its own network.
+    pub(crate) fn advertise_local_socket_on(&self, cjdns: bool) -> Option<SocketAddr> {
+        self.local_socket_where(|ip| {
+            matches!(ip, IpAddr::V6(v) if crate::netaddr::is_cjdns_ip(*v)) == cjdns
+        })
+    }
+
+    fn local_socket_where(&self, keep: impl Fn(&IpAddr) -> bool) -> Option<SocketAddr> {
         if !self.discover.load(Ordering::Relaxed) {
             return None;
         }
@@ -2093,7 +2193,10 @@ impl PeerHub {
         }
         let g = self.external_ips.lock().unwrap_or_else(|e| e.into_inner());
         let cjdns = self.cjdns_reachable.load(Ordering::Relaxed);
-        let ip = g.iter().copied().find(|ip| ip_is_advertisable(ip, cjdns))?;
+        let ip = g
+            .iter()
+            .copied()
+            .find(|ip| keep(ip) && ip_is_advertisable(ip, cjdns))?;
         Some(SocketAddr::new(ip, port))
     }
 
@@ -2161,6 +2264,32 @@ impl PeerHub {
         }
     }
 
+    pub(crate) fn own_addrs(&self) -> OwnAddrs {
+        let wallet = self
+            .wallet_onions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let onions = wallet
+            .iter()
+            .filter_map(|(host, port)| format!("{host}:{port}").parse().ok())
+            .chain(self.p2p_onion())
+            .filter_map(|addr| match addr {
+                crate::NetAddr::Onion { pk, .. } => Some(pk),
+                _ => None,
+            })
+            .collect();
+        OwnAddrs {
+            onions,
+            i2p: self.p2p_i2p(),
+            ips: self
+                .external_ips
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
+    }
+
     /// Core GetAddr reply: per-listen cache (24h) of
     /// [`crate::peer::MAX_ADDR_TO_SEND`] / [`crate::peer::MAX_PCT_ADDR_TO_SEND`]
     /// of addrman. `v2` includes onion / i2p / CJDNS; v1 ADDR is clearnet `Ip`.
@@ -2168,13 +2297,18 @@ impl PeerHub {
         const CACHE_SECS: u64 = 24 * 60 * 60;
         let key = (canonical_bind(bind), v2);
         let now = self.now_secs();
+        let own = self.own_addrs();
         let mut cache = self
             .addr_response_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some((cached_at, addrs)) = cache.get(&key) {
             if now.saturating_sub(*cached_at) < CACHE_SECS {
-                return addrs.clone();
+                return addrs
+                    .iter()
+                    .copied()
+                    .filter(|(_, a)| !own.contains(*a))
+                    .collect();
             }
         }
         let am = {
@@ -2193,6 +2327,7 @@ impl PeerHub {
             .map(|e| e.addr)
             .filter(|a| v2 || matches!(a, crate::NetAddr::Ip(_)))
             .filter(|a| !crate::netaddr::netaddr_unroutable_gossip(*a))
+            .filter(|a| !own.contains(*a))
             .collect();
         let n = addrs.len();
         let pct_cap = (n * crate::peer::MAX_PCT_ADDR_TO_SEND / 100).max(1);
