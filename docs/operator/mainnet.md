@@ -19,8 +19,9 @@ hot and about **730 GiB** with the cold files
 ([`SCHEMA.md`](../../SCHEMA.md) census). That count is not a quota. The tip
 has moved.
 
-The default mainnet milestone is block **840000**, anchored to
-`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`.
+The default mainnet milestone is block **966143**, anchored to
+`00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3`
+(Bitcoin Core 32.1 `defaultAssumeValid`).
 Script and signature checks at or below that height are skipped only when
 that hash and the block being connected are the header-path occupants at
 their heights. The check is two height lookups. It does not walk parent

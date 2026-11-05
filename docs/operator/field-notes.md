@@ -57,7 +57,7 @@ from `std::thread::available_parallelism()` (fallback: 4). There is no node
 worker-count option, and `RAYON_NUM_THREADS` does not configure this pool.
 
 ```bash
-# The omitted --milestone uses the anchored mainnet checkpoint at 840000.
+# The omitted --milestone uses the anchored mainnet checkpoint at 966143.
 # Use --milestone 0 for full historical script validation.
 nice -n 10 ionice -c 3 ./target/release/rbitcoin-node \
   --datadir /mnt/dedicated/datadir-mainnet \

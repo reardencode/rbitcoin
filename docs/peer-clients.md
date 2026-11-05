@@ -32,7 +32,7 @@ Sources at write time:
 | Thesis | Relational **archive** (no UTXO), pure-Rust scripts, in-process Electrum/Esplora, map-free Linux IO | **Spec-first** C++ consensus + custom UTXO LSM; IBD as a demo of the spec | **Core drop-in** (UTXO + `blocks/` + `bitcoin.conf`) with extra APIs in one process |
 | Consensus | Independent Rust; Core JSON corpora + [`consensus-tests.md`](./consensus-tests.md); **no** `libbitcoinconsensus` | Named declarative rules in `spec.h` / DSL (published [spec.html](https://hornetnode.org/spec.html) H01–S09; unreleased `spec.h` merges S02 into S03); isolated from storage | Rust engine **plus** C++ `libbitcoinconsensus` shadow |
 | Store | Class A/B/C tables, spent annotations ([`SCHEMA.md`](../SCHEMA.md)) | Age-stratified UTXO LSM, `ChainTree` + sidecars | RocksDB coins + Core-shaped flat files |
-| IBD | Multi-peer, lookup→load→scripts→write ([`concurrency.md`](./concurrency.md)); default mainnet milestone anchored at block 840000 | Single-peer concurrent UTXO pipeline; claims ~15 min assumevalid on 32 cores | “Swarm” parallel download + speculative verify |
+| IBD | Multi-peer, lookup→load→scripts→write ([`concurrency.md`](./concurrency.md)); default mainnet milestone anchored at block 966143 | Single-peer concurrent UTXO pipeline; claims ~15 min assumevalid on 32 cores | “Swarm” parallel download + speculative verify |
 | Wallet APIs | Native Electrum + Esplora; SH optional and can **lag** tip ([`COMPAT.md`](../COMPAT.md)) | None yet | Native Electrum + Esplora + BIP 157; indexes **atomic** with `connect_block` |
 | Maturity | Experimental 0.x; Core functional `run` set is **Q-41** | Spec + IBD node; mempool/multi-peer still future | Operator-facing 0.3–0.4, Docker signet demo |
 
