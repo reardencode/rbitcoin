@@ -5635,3 +5635,283 @@ fn get_coin_decodes_only_the_spent_output_of_a_wide_parent() {
     drop(hub);
     let _ = std::fs::remove_dir_all(mp);
 }
+
+/// A 1 sat/vB parent and a child that pays the package up are one mining
+/// chunk. Fee flow moves that chunk's bucket once, not each member's own rate.
+#[test]
+fn cpfp_package_meters_the_chunk_once() {
+    fn member_rate(fee_sat: u64, weight: u64) -> u64 {
+        rbitcoin_mempool::Chunk {
+            txids: Vec::new(),
+            fee_sat,
+            weight,
+        }
+        .fee_rate_sat_per_kvb()
+    }
+    fn positive_buckets(flow: &[f64]) -> Vec<usize> {
+        flow.iter()
+            .enumerate()
+            .filter(|(_, v)| **v > 0.0)
+            .map(|(i, _)| i)
+            .collect()
+    }
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (_store, q, cbs) = pad_cbs(12);
+    let mut parent = spend_true(cbs[0], 1, spk);
+    let parent_fee = parent.weight().to_wu().div_ceil(4);
+    parent.output[0].value = Amount::from_sat(50_0000_0000 - parent_fee);
+    let parent_id = parent.compute_txid();
+    let mut child = spend_vout(
+        OutPoint {
+            txid: parent_id,
+            vout: 0,
+        },
+        1,
+    );
+    let child_vsize = child.weight().to_wu().div_ceil(4);
+    let pkg_fee = parent_fee.saturating_add(child_vsize).saturating_mul(20);
+    let child_fee = pkg_fee - parent_fee;
+    let parent_value = 50_0000_0000 - parent_fee;
+    child.output[0].value = Amount::from_sat(parent_value - child_fee);
+
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    let accepted = hub
+        .accept_package(&[parent.clone(), child.clone()])
+        .expect("package");
+    assert_eq!(accepted.len(), 2);
+    let child_id = child.compute_txid();
+    let parent_res = accepted
+        .iter()
+        .find(|r| r.txid == parent_id)
+        .expect("parent result");
+    let child_res = accepted
+        .iter()
+        .find(|r| r.txid == child_id)
+        .expect("child result");
+    let (chunk_rate, parent_rate, child_rate) = {
+        let g = hub.lock_read();
+        let cluster = g
+            .graph
+            .cluster_of(&parent_id)
+            .expect("parent is in a cluster");
+        let chunk = cluster
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&parent_id) && ch.txids.contains(&child_id))
+            .expect("parent and child are one chunk");
+        (
+            chunk.fee_rate_sat_per_kvb(),
+            member_rate(parent_res.fee_sat, parent_res.weight),
+            member_rate(child_res.fee_sat, child_res.weight),
+        )
+    };
+    let chunk_i = rbitcoin_mempool::fee_est::bucket_index(chunk_rate);
+    let parent_i = rbitcoin_mempool::fee_est::bucket_index(parent_rate);
+    let child_i = rbitcoin_mempool::fee_est::bucket_index(child_rate);
+    assert_ne!(
+        chunk_i, parent_i,
+        "chunk rate {chunk_rate} vs parent {parent_rate}"
+    );
+    assert_ne!(
+        chunk_i, child_i,
+        "chunk rate {chunk_rate} vs child {child_rate}"
+    );
+    let flow = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    assert_eq!(
+        positive_buckets(&flow),
+        vec![chunk_i],
+        "package must move the chunk bucket once, flow={flow:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.accept_tx(&parent).expect("parent");
+    let (after_parent, admitted_before_child) = {
+        let flow = hub.fee_flow.lock().unwrap();
+        (flow.admit_wu_s.clone(), flow.admitted_wu)
+    };
+    assert_eq!(
+        positive_buckets(&after_parent),
+        vec![parent_i],
+        "a lone parent is its own chunk"
+    );
+    hub.accept_tx(&child).expect("child");
+    let (after_child, admitted_after_child) = {
+        let flow = hub.fee_flow.lock().unwrap();
+        (flow.admit_wu_s.clone(), flow.admitted_wu)
+    };
+    let (chunk_weight, child_weight) = {
+        let g = hub.lock_read();
+        let chunk_weight = g
+            .graph
+            .cluster_of(&parent_id)
+            .expect("cluster")
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&parent_id) && ch.txids.contains(&child_id))
+            .expect("chunk")
+            .weight;
+        (chunk_weight, g.graph.adjusted_weight_of(&child_id))
+    };
+    let added = admitted_after_child - admitted_before_child;
+    assert!(
+        (added - child_weight as f64).abs() < (added - chunk_weight as f64).abs(),
+        "the child sample must be its own weight {child_weight}, not the chunk {chunk_weight}, added={added}"
+    );
+    let moved = positive_buckets(&after_child);
+    assert!(
+        moved.contains(&chunk_i),
+        "the child must move the chunk bucket, buckets={moved:?}"
+    );
+    assert!(
+        !moved.contains(&child_i),
+        "the child must not move its own feerate bucket, buckets={moved:?}"
+    );
+    assert!(
+        after_child[parent_i] <= after_parent[parent_i],
+        "the child must not add another sample in the parent bucket"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sync 1p1c meters the parent and child once, before it promotes orphans.
+///
+/// A paying sibling parked on the parent is admitted during that promotion.
+/// Its higher feerate pulls the parent into a new chunk and leaves the child
+/// at the child's own rate. The 1p1c sample must stay on the pre-sibling
+/// chunk rate. Noting the child after the sibling has moved the chunk records
+/// the child at that later rate.
+#[test]
+fn admit_1p1c_meters_the_chunk_before_orphan_promotion() {
+    fn rate(fee_sat: u64, weight: u64) -> u64 {
+        rbitcoin_mempool::Chunk {
+            txids: Vec::new(),
+            fee_sat,
+            weight,
+        }
+        .fee_rate_sat_per_kvb()
+    }
+    fn positive_buckets(flow: &[f64]) -> Vec<usize> {
+        flow.iter()
+            .enumerate()
+            .filter(|(_, v)| **v > 0.0)
+            .map(|(i, _)| i)
+            .collect()
+    }
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (_store, q, cbs) = pad_cbs(4);
+    let mut parent = spend_true(cbs[0], 0, spk.clone());
+    parent.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: spk.clone(),
+    });
+    let parent_vsize = parent.weight().to_wu().div_ceil(4);
+    let parent_fee = parent_vsize;
+    let total = 50_0000_0000 - parent_fee;
+    let v0 = total / 2;
+    let v1 = total - v0;
+    parent.output[0].value = Amount::from_sat(v0);
+    parent.output[1].value = Amount::from_sat(v1);
+    let parent_id = parent.compute_txid();
+
+    let mut child = spend_vout(OutPoint::new(parent_id, 1), 1);
+    let child_vsize = child.weight().to_wu().div_ceil(4);
+    let pkg_fee = parent_vsize.saturating_add(child_vsize).saturating_mul(80);
+    let child_fee = pkg_fee - parent_fee;
+    child.output[0].value = Amount::from_sat(v1 - child_fee);
+    let child_id = child.compute_txid();
+
+    let mut sibling = spend_vout(OutPoint::new(parent_id, 0), 1);
+    let sibling_vsize = sibling.weight().to_wu().div_ceil(4);
+    let sibling_fee = sibling_vsize.saturating_mul(500);
+    sibling.output[0].value = Amount::from_sat(v0 - sibling_fee);
+    let sibling_id = sibling.compute_txid();
+
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.set_min_relay_sat_kvb(50_000);
+    assert!(
+        matches!(
+            hub.accept_tx(&parent),
+            Err(AcceptError::Policy("min relay fee"))
+        ),
+        "the parent stays out of the pool so the sibling can park"
+    );
+    let parked = hub
+        .accept_tx_from(&sibling, TxOrigin::Relay(Some(1)))
+        .unwrap_err();
+    assert!(
+        matches!(parked, AcceptError::Orphaned { .. }),
+        "the paying sibling waits on the parent, got {parked:?}"
+    );
+    hub.accept_tx_from(&child, TxOrigin::Local)
+        .expect("local 1p1c admits the parent with the child");
+    assert!(hub.contains(&parent_id));
+    assert!(hub.contains(&child_id));
+    assert!(
+        hub.contains(&sibling_id),
+        "the paying sibling is promoted with the parent"
+    );
+
+    let (pkg_rate, child_later_rate, sibling_rate) = {
+        let g = hub.lock_read();
+        let cluster = g.graph.cluster_of(&child_id).expect("child cluster");
+        let child_chunk = cluster
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&child_id))
+            .expect("child chunk");
+        assert!(
+            !child_chunk.txids.contains(&parent_id),
+            "the sibling must pull the parent out of the child's chunk, chunks={:?}",
+            cluster.chunks
+        );
+        let sibling_chunk = cluster
+            .chunks
+            .iter()
+            .find(|ch| ch.txids.contains(&sibling_id))
+            .expect("sibling chunk");
+        let parent_fee = g.graph.get(&parent_id).expect("parent").fee_sat;
+        let child_fee = g.graph.get(&child_id).expect("child").fee_sat;
+        let pkg_weight = g
+            .graph
+            .adjusted_weight_of(&parent_id)
+            .saturating_add(g.graph.adjusted_weight_of(&child_id));
+        (
+            rate(parent_fee.saturating_add(child_fee), pkg_weight),
+            child_chunk.fee_rate_sat_per_kvb(),
+            sibling_chunk.fee_rate_sat_per_kvb(),
+        )
+    };
+    let pkg_i = rbitcoin_mempool::fee_est::bucket_index(pkg_rate);
+    let child_i = rbitcoin_mempool::fee_est::bucket_index(child_later_rate);
+    let sibling_i = rbitcoin_mempool::fee_est::bucket_index(sibling_rate);
+    assert_ne!(
+        pkg_i, child_i,
+        "pre-sibling chunk {pkg_rate} and the child's later chunk {child_later_rate} share a bucket"
+    );
+    assert_ne!(
+        pkg_i, sibling_i,
+        "pre-sibling chunk {pkg_rate} and the sibling chunk {sibling_rate} share a bucket"
+    );
+    assert_ne!(
+        child_i, sibling_i,
+        "the child's later chunk {child_later_rate} and the sibling chunk {sibling_rate} share a bucket"
+    );
+    let flow = hub.fee_flow.lock().unwrap().admit_wu_s.clone();
+    let moved = positive_buckets(&flow);
+    assert!(
+        moved.contains(&pkg_i),
+        "1p1c must move the pre-sibling chunk bucket {pkg_i}, buckets={moved:?}"
+    );
+    assert!(
+        !moved.contains(&child_i),
+        "1p1c must not meter the child at the rate it has after the sibling moves the chunk, buckets={moved:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
