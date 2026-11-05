@@ -6209,15 +6209,18 @@ impl MempoolHub {
                     *returned = true;
                     false
                 }
+                // `Sent` keeps the row visible to `skip_standing_inv` and
+                // stops the one-shot loop from taking it. The drop is after
+                // the age stamp.
                 Some(_) => {
-                    origin.txs.remove(txid);
+                    origin.txs.insert(*txid, IsolatedTurn::Sent);
                     true
                 }
                 None => false,
             }
         };
         if ended {
-            self.restamp_relay_age(txid);
+            self.end_local_origin(txid);
         }
     }
 
@@ -6225,19 +6228,28 @@ impl MempoolHub {
         let ended = {
             let mut origin = self.local_origin.lock().unwrap();
             match origin.txs.get(txid) {
-                Some(IsolatedTurn::Taken { returned: true }) => {
-                    origin.txs.remove(txid);
-                    true
-                }
-                Some(IsolatedTurn::Taken { returned: false }) => {
+                Some(IsolatedTurn::Taken { returned }) => {
+                    let ended = *returned;
+                    // `Sent` keeps the row through the age stamp when `ended`.
+                    // The echo has not arrived yet when it is not.
                     origin.txs.insert(*txid, IsolatedTurn::Sent);
-                    false
+                    ended
                 }
                 _ => false,
             }
         };
         if ended {
-            self.restamp_relay_age(txid);
+            self.end_local_origin(txid);
+        }
+    }
+
+    /// Move relay age to now, then drop the row. An inv tick that sees the
+    /// row already gone still reads the submit time and can INV an inbound peer.
+    fn end_local_origin(&self, txid: &Txid) {
+        self.restamp_relay_age(txid);
+        let mut origin = self.local_origin.lock().unwrap();
+        if matches!(origin.txs.get(txid), Some(IsolatedTurn::Sent)) {
+            origin.txs.remove(txid);
         }
     }
 
