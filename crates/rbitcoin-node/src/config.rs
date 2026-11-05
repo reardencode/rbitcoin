@@ -1221,11 +1221,11 @@ impl NodeConfig {
             match applied {
                 ConfApply::Applied => {}
                 ConfApply::Unknown(other) => {
-                    rbitcoin_log::warn!(
-                        "node: conf {}:{}: unknown key `{other}` ignored",
+                    return Err(NodeError::Config(format!(
+                        "conf {}:{}: unknown key `{other}`",
                         path.display(),
                         lineno + 1
-                    );
+                    )));
                 }
             }
         }
