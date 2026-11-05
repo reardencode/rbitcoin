@@ -1326,7 +1326,7 @@ pub fn strip_op_codeseparator(script: &[u8]) -> Cow<'_, [u8]> {
 /// and drops a bare `OP_CODESEPARATOR` when `drop_sep` is set. Push payloads
 /// are not opcodes. The original bytes are returned when the walk drops nothing.
 /// The bool is true when a signature push was dropped.
-fn legacy_script_code<'a>(
+pub(crate) fn legacy_script_code<'a>(
     script: &'a [u8],
     sigs: &[&[u8]],
 ) -> Result<(Cow<'a, [u8]>, bool), ConsensusError> {

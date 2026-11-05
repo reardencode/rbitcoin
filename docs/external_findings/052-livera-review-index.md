@@ -37,7 +37,7 @@ steps.
 | L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` ([059](./059-rate-window-boundary.md)) |
 | L14 | low | Mempool expiry runs only on admission | fixed | `expire_stale_drops_old_tx_without_a_new_accept`, `hub_live_journey` ([083](./083-mempool-expiry-cursor.md)) |
 | L15 | low | Write jobs form a mutable slice over a shared buffer | fixed | `io_session_pool` write arm (`from_raw_parts`) ([072](./072-pool-write-slice.md)) |
-| L2 | — | P2PKH fast path skips FindAndDelete | rejected | The fast path is the 25-byte template. A DER signature does not fit in that scriptCode, so FindAndDelete cannot change it. |
+| L2 | low | P2PKH fast path skips FindAndDelete | fixed | `p2pkh_fast_path_matches_interpreter_including_hash_collision` |
 | L3 | — | Witness-v0 strict DER independent of BIP66 | rejected | BIP141 witness verification is strict DER. Mainnet, testnet, signet, and regtest are unaffected. |
 | L7 | low | Rewind deeper than 1024 is refused | won't-fix | `REWIND_MAX_DEPTH` is a deliberate denial-of-service cap. Removing it needs an operator decision. No new knob. |
 | L16 | — | Warnet image is pinned by tag | won't-fix | `scripts/core-functional/warnet/Dockerfile` is a lab image, not a Release. |
