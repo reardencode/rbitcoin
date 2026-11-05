@@ -202,6 +202,9 @@ pub struct ConfirmFeed {
     /// Lookup selects nothing until this IBD mono ms (0: no hold): a block
     /// was too far ahead of the clock to connect.
     pub hold_until_ms: AtomicU64,
+    /// Lone consensus-invalid bodies that were not offered back. Assign must
+    /// not getdata them before the IBD thread applies the verdict.
+    dropped_bodies: std::sync::Mutex<std::collections::HashSet<BlockHash>>,
 }
 
 pub struct ConfirmFeedInner {
@@ -232,7 +235,24 @@ impl ConfirmFeed {
             epoch: AtomicU64::new(0),
             force_single_until: AtomicU32::new(u32::MAX),
             hold_until_ms: AtomicU64::new(0),
+            dropped_bodies: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// `hash` left the queue as a lone consensus-invalid body and was not
+    /// offered back. [`Self::clear`] does not drop this.
+    pub fn note_dropped_body(&self, hash: BlockHash) {
+        self.dropped_bodies.lock().unwrap().insert(hash);
+    }
+
+    /// Assign skips getdata for a hash noted by [`Self::note_dropped_body`].
+    pub fn dropped_body(&self, hash: &BlockHash) -> bool {
+        self.dropped_bodies.lock().unwrap().contains(hash)
+    }
+
+    /// The IBD thread has applied the verdict.
+    pub fn release_dropped_body(&self, hash: &BlockHash) {
+        self.dropped_bodies.lock().unwrap().remove(hash);
     }
 
     /// Lookup waits `for_` before it selects a body again.
@@ -644,12 +664,15 @@ pub fn rearm_script_reject(
     } else {
         class
     };
-    rearm_after_reject(
-        hub,
-        feed,
-        rearm,
-        script_reject_wave(retried, session_fault, class, wave),
-    );
+    let back = script_reject_wave(retried, session_fault, class, wave);
+    // First hash is the reject event. Later hashes are the inflight tail:
+    // apply releases only the event, so holding the tail stalls densify.
+    if rearm == ConfirmRejectClass::ConsensusInvalid && back.is_empty() {
+        if let Some(&(_, hash, _)) = wave.first() {
+            feed.note_dropped_body(hash);
+        }
+    }
+    rearm_after_reject(hub, feed, rearm, back);
 }
 
 /// A write or scripts reject: lookup took the wave's bodies off the body
@@ -667,7 +690,8 @@ pub fn rearm_script_reject(
 /// the old generation and isolation off, and its take would still match.
 /// Between the re-arm and the insert assign sees these heights neither
 /// taken nor queued and may fetch them again, so the serialize runs first
-/// and only the queue inserts are left in that window.
+/// and only the queue inserts are left in that window. A lone
+/// consensus-invalid wave is noted on the feed before that re-arm.
 #[doc(hidden)]
 pub fn rearm_after_reject(
     hub: &ChainHub,
@@ -688,6 +712,13 @@ pub fn rearm_after_reject(
     if let Some(&(first_h, _, _)) = wave.first() {
         if retried && wave.len() > 1 {
             feed.request_single_block(first_h.saturating_add(wave.len() as u32 - 1));
+        }
+    }
+    // Before lookup_taken falls back to the tip. An unreoffered body is
+    // otherwise a fetch hole until the IBD thread applies the verdict.
+    if !requeue && class == ConfirmRejectClass::ConsensusInvalid {
+        for &(_, hash, _) in wave {
+            feed.note_dropped_body(hash);
         }
     }
     hub.query.set_lookup_taken_hi(hub.tip_height());
@@ -751,8 +782,10 @@ pub fn load_reject_class(
 /// [`load_reject_class`]) goes back for a retry. A batched reject names the
 /// first hash but may be any block's fault, so every block goes back and
 /// the retry runs one block at a time. An engine fault is no block's fault:
-/// every block goes back and the retry is not isolated. Same order as
-/// [`rearm_after_reject`]: serialize, isolate, re-arm, insert.
+/// every block goes back and the retry is not isolated. A dropped lone
+/// consensus-invalid hash is noted on the feed before lookup is re-armed,
+/// so assign does not getdata it. Same order as [`rearm_after_reject`]:
+/// serialize, isolate, re-arm, insert.
 #[doc(hidden)]
 pub fn load_fail_rewind_wave(
     feed: &ConfirmFeed,
@@ -772,6 +805,9 @@ pub fn load_fail_rewind_wave(
     // lookup cannot rebuild the same wave.
     if wave.len() > 1 && !fault {
         feed.request_single_block(first_h.saturating_add(wave.len() as u32 - 1));
+    }
+    if drop_head && class == ConfirmRejectClass::ConsensusInvalid {
+        feed.note_dropped_body(wave[0].1);
     }
     hub.query.set_lookup_taken_hi(hub.tip_height());
     hub.query.set_lookup_started_hi(hub.tip_height());

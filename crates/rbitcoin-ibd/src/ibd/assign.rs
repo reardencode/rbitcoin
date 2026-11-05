@@ -92,6 +92,13 @@ pub fn need_body_dead(st: &IbdWorkState, h: &BlockHash) -> bool {
     st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(h)
 }
 
+/// Load dropped this lone consensus-invalid body and has not been applied yet.
+fn dropped_verdict(st: &IbdWorkState, hash: &BlockHash) -> bool {
+    st.confirm_feed
+        .as_ref()
+        .is_some_and(|feed| feed.dropped_body(hash))
+}
+
 #[doc(hidden)]
 pub fn need_body_in_hand(st: &IbdWorkState, hub: &ChainHub, h: &BlockHash) -> bool {
     hub.has_block(h)
@@ -725,6 +732,7 @@ pub fn need_hash_at(
     if live_getdata_cover(st, &h)
         || st.body.is_rejected(&h)
         || st.reorg.invalid.contains(h.to_byte_array())
+        || dropped_verdict(st, &h)
     {
         return None;
     }
@@ -928,7 +936,7 @@ pub fn contiguous_tip_holes(st: &mut IbdWorkState, hub: &ChainHub, max: usize) -
         let Some(&hash) = st.height_to_hash.get(&ht) else {
             break;
         };
-        if st.body.is_rejected(&hash) {
+        if st.body.is_rejected(&hash) || dropped_verdict(st, &hash) {
             break;
         }
         if claim_ready(hub, &mut st.body, ht, &hash) {
@@ -949,7 +957,7 @@ pub fn first_pre_hole(st: &mut IbdWorkState, hub: &ChainHub, max: usize) -> Opti
     let hi = path_lo.saturating_add(max.saturating_sub(1) as u32);
     for ht in path_lo..=hi {
         let &hash = st.height_to_hash.get(&ht)?;
-        if st.body.is_rejected(&hash) {
+        if st.body.is_rejected(&hash) || dropped_verdict(st, &hash) {
             continue;
         }
         if claim_ready(hub, &mut st.body, ht, &hash) {
@@ -1520,6 +1528,9 @@ pub fn cover_tip_holes(
     let mut issued = 0u64;
 
     for &h in holes {
+        if dropped_verdict(st, &h) {
+            continue;
+        }
         let ht = st.hash_height.get(&h).copied();
         if let Some(ht) = ht {
             if super::progress::claim_ready(hub, &mut st.body, ht, &h) {
