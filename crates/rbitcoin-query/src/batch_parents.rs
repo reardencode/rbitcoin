@@ -187,6 +187,13 @@ impl PinOuts {
         need.iter().all(|v| checked_contains(checked, *v))
     }
 
+    /// `covers_need` plus a stored script for every vout.
+    ///
+    /// The checked list can name a vout this pin never stored.
+    fn holds_checked_scripts(&self, vouts: &[u32]) -> bool {
+        self.covers_need(vouts) && vouts.iter().all(|&v| self.get_parts(v).is_some())
+    }
+
     #[doc(hidden)]
     pub fn has_all_live(&self, live: &[(u32, OutputRecord)]) -> bool {
         live.iter().all(|(v, _)| self.get_parts(*v).is_some())
@@ -487,15 +494,15 @@ impl SharedParentPin {
     /// Union `src` into this pin.
     ///
     /// An in-window pin already holds every output of its create, so a wider
-    /// checked list does not copy those scripts. A sparse pin that is missing
-    /// a vout still copies that record.
+    /// checked list does not copy those scripts. A checked vout with no stored
+    /// script still takes the source record.
     fn absorb_outs(&self, src: &PinOuts) {
         let extra = src.checked();
-        if extra.is_empty() || self.load_outs().covers_need(extra) {
+        if self.load_outs().holds_checked_scripts(extra) {
             return;
         }
         self.outs.rcu(|cur| {
-            if cur.covers_need(extra) {
+            if cur.holds_checked_scripts(extra) {
                 Arc::clone(cur)
             } else if let Some(next) = cur.union_full_checked(extra) {
                 Arc::new(next)
