@@ -613,6 +613,18 @@ fn package_hash(parent: &Transaction, child: &Transaction) -> Wtxid {
     Wtxid::from_byte_array(sha256::Hash::from_engine(engine).to_byte_array())
 }
 
+/// What [`MempoolHub::admit_1p1c`] found for a child.
+enum PairLookup {
+    /// Try this parent with the child. A failed peer pair is remembered
+    /// under the key.
+    Try(Transaction, Option<Wtxid>),
+    /// A peer pair that cannot be tried this block. Remember the key once
+    /// the mempool guard drops.
+    Remember(Wtxid),
+    /// Nothing to try.
+    Skip,
+}
+
 #[doc(hidden)]
 pub fn package_rpc_retry(e: &AcceptError) -> bool {
     // A parent under the dynamic mempool floor is still package-eligible:
@@ -3012,9 +3024,17 @@ impl MempoolHub {
         missing: &std::collections::BTreeSet<Txid>,
         origin: TxOrigin,
     ) -> Option<AcceptResult> {
-        let (parent, key) = {
+        let lookup = {
             let g = self.lock_read();
-            self.untried_pair_parent(&g, child, missing, utxo, origin)?
+            self.untried_pair_parent(&g, child, missing, utxo, origin)
+        };
+        let (parent, key) = match lookup {
+            PairLookup::Try(parent, key) => (parent, key),
+            PairLookup::Remember(key) => {
+                self.note_recent_reject(key);
+                return None;
+            }
+            PairLookup::Skip => return None,
         };
         let admitted = self.admit_pair(&parent, child, utxo, origin);
         if let (None, Some(key)) = (&admitted, key) {
@@ -3024,7 +3044,9 @@ impl MempoolHub {
     }
 
     /// The extra-pool parent that `child` completes as 1p1c, and the key a
-    /// failed peer pair is remembered under.
+    /// failed peer pair is remembered under. Runs under the mempool read
+    /// guard, so it only reads the recent rejects; the caller records a key
+    /// after the guard drops.
     ///
     /// A peer's child pairs only with a parent whose dust output it spends.
     /// A peer's child of any other low-fee parent waits in the orphanage
@@ -3039,25 +3061,29 @@ impl MempoolHub {
         missing: &std::collections::BTreeSet<Txid>,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         origin: TxOrigin,
-    ) -> Option<(Transaction, Option<Wtxid>)> {
+    ) -> PairLookup {
         if origin.peer().is_none() {
-            return Some((g.try_one_parent_package(child, missing, utxo)?, None));
+            return match g.try_one_parent_package(child, missing, utxo) {
+                Some(parent) => PairLookup::Try(parent, None),
+                None => PairLookup::Skip,
+            };
         }
         // The key and the dust check come before the coin reads in
         // `try_one_parent_package`, so a remembered pair costs no store read.
-        let parent = g.extra_by_txid(*missing.first()?)?;
+        let Some(parent) = missing.first().and_then(|p| g.extra_by_txid(*p)) else {
+            return PairLookup::Skip;
+        };
         if !rbitcoin_consensus::policy::spends_dust_of(parent, child) {
-            return None;
+            return PairLookup::Skip;
         }
         let key = package_hash(parent, child);
         if self.try_recent_reject(&key) {
-            return None;
+            return PairLookup::Skip;
         }
-        let Some(parent) = g.try_one_parent_package(child, missing, utxo) else {
-            self.note_recent_reject(key);
-            return None;
-        };
-        Some((parent, Some(key)))
+        match g.try_one_parent_package(child, missing, utxo) {
+            Some(parent) => PairLookup::Try(parent, Some(key)),
+            None => PairLookup::Remember(key),
+        }
     }
 
     /// A peer's 0-fee parent whose child arrived first and waits in the
@@ -4120,13 +4146,22 @@ impl MempoolHub {
         let hub = Arc::clone(self);
         let child_c = child.clone();
         let missing_c = missing.clone();
-        let (parent, key) = crate::reactor::off_pool_budgeted(move || {
+        let lookup = crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&child_c);
             let g = hub.lock_read();
             hub.untried_pair_parent(&g, &child_c, &missing_c, &utxo, origin)
         })
-        .await?;
+        .await;
+        let (parent, key) = match lookup {
+            PairLookup::Try(parent, key) => (parent, key),
+            PairLookup::Remember(key) => {
+                let hub = Arc::clone(self);
+                crate::reactor::off_pool(move || hub.note_recent_reject(key)).await;
+                return None;
+            }
+            PairLookup::Skip => return None,
+        };
         let admitted = self.admit_pair_work(parent, child, origin).await;
         if let (None, Some(key)) = (&admitted, key) {
             let hub = Arc::clone(self);
