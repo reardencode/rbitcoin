@@ -215,6 +215,61 @@ fn create_loc_short_prefix_inside_a_window_drops_later_ovf_rows() {
     assert_eq!(loc.range_batch(&[Fk(8)]).unwrap()[0].unwrap().n_out, 256);
 }
 
+/// The overflow row sits past its header. No bytes there is no row, and
+/// open keeps the locator count. A failed read of the locator slot stops
+/// open and leaves that count on disk. A later open cuts the create.
+#[test]
+fn create_loc_unreadable_slot_for_a_row_past_the_header_does_not_open() {
+    let dir = TempDir::labeled("create-loc-slot-read").unwrap();
+    let loc = CreateLoc::create(dir.path()).unwrap();
+    loc.append(&chain(&[1, 256], &[8, 8])).unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let ovf = path.join("create.loc.ovf");
+    let saved = std::fs::read(&ovf).unwrap();
+    assert!(saved.len() as u64 > FILE_HEADER_LEN as u64 + 16);
+
+    write_loc_hwm(&ovf, FILE_HEADER_LEN as u64);
+    let f = std::fs::OpenOptions::new().write(true).open(&ovf).unwrap();
+    f.set_len(FILE_HEADER_LEN as u64).unwrap();
+    drop(f);
+    let loc = CreateLoc::open(&path).expect("a short overflow read is no row");
+    assert_eq!(loc.count(), 2);
+    drop(loc);
+
+    std::fs::write(&ovf, &saved).unwrap();
+    write_loc_hwm(&ovf, FILE_HEADER_LEN as u64);
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_fail_pread_len();
+        }
+    }
+    rbitcoin_store::io_handle::arm_fail_pread_len(2, 1);
+    let disarm = Disarm;
+    match CreateLoc::open(&path) {
+        Err(StoreError::Io { .. }) => {}
+        Ok(_) => panic!("an unreadable locator slot opened"),
+        Err(other) => panic!("{other}"),
+    }
+    drop(disarm);
+    let logical = u64::from_le_bytes(
+        std::fs::read(path.join("create.loc")).unwrap()[8..16]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(logical, FILE_HEADER_LEN as u64 + 2 * SLOT);
+
+    let loc = CreateLoc::open(&path).expect("a readable slot cuts the create");
+    assert_eq!(loc.count(), 1);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(rows.is_empty(), "the withheld row stayed: {rows:?}");
+}
+
 /// The window pread compares the end `plan_range_batch` paired with
 /// `count`. A later publish must not change that integer.
 #[test]

@@ -209,6 +209,73 @@ fn delta_loc_short_prefix_inside_a_window_drops_later_ovf_rows() {
     assert_eq!(rows[0].0, 8);
 }
 
+/// The overflow row sits past its header. No bytes there is no row, and
+/// open keeps the locator count. A failed read of the locator slot stops
+/// open and leaves that count on disk. A later open cuts the create.
+#[test]
+fn delta_loc_unreadable_slot_for_a_row_past_the_header_does_not_open() {
+    let dir = TempDir::labeled("delta-loc-slot-read").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let fat = 65536 * IDX_STRIDE;
+    loc.append(
+        &[FILE_HEADER_LEN as u64, FILE_HEADER_LEN as u64 + 8],
+        &[8, fat],
+    )
+    .unwrap();
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let ovf = path.join("seqsigwit.loc.ovf");
+    let saved = std::fs::read(&ovf).unwrap();
+    assert!(saved.len() as u64 > FILE_HEADER_LEN as u64 + 12);
+
+    let mut f = std::fs::OpenOptions::new().write(true).open(&ovf).unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&(FILE_HEADER_LEN as u64).to_le_bytes())
+        .unwrap();
+    f.set_len(FILE_HEADER_LEN as u64).unwrap();
+    drop(f);
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("a short overflow read is no row");
+    assert_eq!(loc.count(), 2);
+    drop(loc);
+
+    std::fs::write(&ovf, &saved).unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).open(&ovf).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&(FILE_HEADER_LEN as u64).to_le_bytes())
+        .unwrap();
+    drop(f);
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_fail_pread_len();
+        }
+    }
+    rbitcoin_store::io_handle::arm_fail_pread_len(2, 1);
+    let disarm = Disarm;
+    match DeltaLoc::open(&path, "seqsigwit") {
+        Err(StoreError::Io { .. }) => {}
+        Ok(_) => panic!("an unreadable locator slot opened"),
+        Err(other) => panic!("{other}"),
+    }
+    drop(disarm);
+    let logical = u64::from_le_bytes(
+        std::fs::read(path.join("seqsigwit.loc")).unwrap()[8..16]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(logical, FILE_HEADER_LEN as u64 + 4);
+
+    let loc = DeltaLoc::open(&path, "seqsigwit").expect("a readable slot cuts the create");
+    assert_eq!(loc.count(), 1);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(rows.is_empty(), "the withheld row stayed: {rows:?}");
+}
+
 #[test]
 fn delta_loc_append_and_batch_order() {
     let dir = TempDir::labeled("delta-loc").unwrap();

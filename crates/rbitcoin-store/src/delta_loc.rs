@@ -72,11 +72,18 @@ pub(crate) fn unresolved_ovf_cut(
     last_ovf_fk: u64,
     pair: bool,
 ) -> Result<Option<u64>, StoreError> {
-    // A short read at the published end means that row was not written.
-    match ovf_row_cut(loc, ovf, count, last_ovf_fk, ovf.logical_len(), pair) {
-        Err(StoreError::Io { .. }) => Ok(None),
-        other => other,
+    if last_ovf_fk >= count {
+        return Ok(None);
     }
+    // A failed read of the bytes at the published end means that row was
+    // not written. The locator slot is inside the published count, so its
+    // read stays an error and open does not keep the create.
+    let width = if pair { 16 } else { 12 };
+    let mut row = [0u8; 16];
+    if ovf.pread_all(ovf.logical_len(), &mut row[..width]).is_err() {
+        return Ok(None);
+    }
+    cut_for_ovf_row(loc, count, last_ovf_fk, &row[..width], pair)
 }
 
 /// Creates covered while the overflow header lags the RAM end.
@@ -128,13 +135,23 @@ fn ovf_row_cut(
     let width = if pair { 16 } else { 12 };
     let mut row = [0u8; 16];
     ovf.pread_all(row_at, &mut row[..width])?;
+    cut_for_ovf_row(loc, count, last_ovf_fk, &row[..width], pair)
+}
+
+fn cut_for_ovf_row(
+    loc: &TableFile,
+    count: u64,
+    last_ovf_fk: u64,
+    row: &[u8],
+    pair: bool,
+) -> Result<Option<u64>, StoreError> {
     let fk = u64::from_le_bytes(row[0..8].try_into().unwrap());
     if fk == 0 || fk <= last_ovf_fk || fk > count {
         return Ok(None);
     }
     let mut slot = [0u8; 2];
     loc.read_at(loc_file_off(fk, 2), &mut slot)?;
-    if !ovf_row_matches_slot(&row, &slot, pair) {
+    if !ovf_row_matches_slot(row, &slot, pair) {
         return Ok(None);
     }
     Ok(Some(fk.saturating_sub(1)))

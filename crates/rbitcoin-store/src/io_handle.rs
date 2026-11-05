@@ -56,7 +56,7 @@ impl IoHandle {
             return 0;
         }
         #[cfg(debug_assertions)]
-        if take_fail_pread(self) {
+        if take_fail_pread(self) || take_fail_pread_len(buf.len()) {
             return -disk_full_errno();
         }
         #[cfg(unix)]
@@ -181,6 +181,7 @@ pub fn disarm_short_pwrite() {
     FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner()).clear();
     FAIL_SYNC.lock().unwrap_or_else(|e| e.into_inner()).clear();
     FAIL_PREAD.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    disarm_fail_pread_len();
 }
 
 /// Drop one fd's arms. A process-wide clear races another test in this binary.
@@ -218,6 +219,40 @@ pub fn arm_fail_sync(handle: IoHandle, n: u32) {
     } else {
         slots.push((handle, n));
     }
+}
+
+/// Fail the next `n` preads of `len` bytes on this thread.
+///
+/// Open reads a locator slot as two bytes. The test does not have that fd
+/// until open returns.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_fail_pread_len(len: usize, n: u32) {
+    FAIL_PREAD_LEN.with(|slot| slot.set((len, n)));
+}
+
+/// Clear [`arm_fail_pread_len`] on this thread.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn disarm_fail_pread_len() {
+    FAIL_PREAD_LEN.with(|slot| slot.set((0, 0)));
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static FAIL_PREAD_LEN: std::cell::Cell<(usize, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(debug_assertions)]
+fn take_fail_pread_len(len: usize) -> bool {
+    FAIL_PREAD_LEN.with(|slot| {
+        let (want, n) = slot.get();
+        if n == 0 || want != len {
+            return false;
+        }
+        slot.set((want, n - 1));
+        true
+    })
 }
 
 /// Fail the next `n` preads on `handle` before any byte is returned.
