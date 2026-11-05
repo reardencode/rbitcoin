@@ -665,8 +665,10 @@ pub fn rearm_script_reject(
         class
     };
     let back = script_reject_wave(retried, session_fault, class, wave);
+    // First hash is the reject event. Later hashes are the inflight tail:
+    // apply releases only the event, so holding the tail stalls densify.
     if rearm == ConfirmRejectClass::ConsensusInvalid && back.is_empty() {
-        for &(_, hash, _) in wave {
+        if let Some(&(_, hash, _)) = wave.first() {
             feed.note_dropped_body(hash);
         }
     }

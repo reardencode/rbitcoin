@@ -2437,6 +2437,82 @@ fn dropped_lone_stamp_reject_is_not_a_fetch_hole() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Scripts drops the failing block and every batch still in flight behind
+/// it. The hold is the event hash. The tail was not judged, so densify
+/// still asks for it after the verdict is applied.
+#[test]
+fn script_reject_hold_leaves_the_inflight_tail() {
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_ibd::ibd::assign::{contiguous_tip_holes, need_hash_at};
+    use rbitcoin_ibd::ibd::confirm::rearm_script_reject;
+    use rbitcoin_ibd::ibd::state::IbdWorkState;
+
+    let (dir, hub0) = rbitcoin_net::chain::tiny_regtest_hub_labeled("script-drop-tail");
+    let hub = Arc::new(hub0);
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let head_blk = mine_empty_regtest(tip, time + 600, 1);
+    let tail_blk = mine_empty_regtest(head_blk.block_hash(), time + 1200, 2);
+    let head = head_blk.block_hash();
+    let tail = tail_blk.block_hash();
+    let wave = [(1, head, &head_blk), (2, tail, &tail_blk)];
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(0));
+    st.record_height(head, 1);
+    st.record_height(tail, 2);
+    st.max_ordered_height = 2;
+    let feed = Arc::new(ConfirmFeed::new());
+    st.confirm_feed = Some(Arc::clone(&feed));
+    hub.query.set_lookup_taken_hi(Some(2));
+    rearm_script_reject(
+        &hub,
+        &feed,
+        false,
+        false,
+        ConfirmRejectClass::ConsensusInvalid,
+        &wave,
+    );
+    assert!(feed.dropped_body(&head), "the event hash stays unfetched");
+    assert!(
+        !feed.dropped_body(&tail),
+        "the inflight tail is not a dropped verdict"
+    );
+    assert!(need_hash_at(&mut st, &hub, 1, 1).is_none());
+    assert_eq!(
+        need_hash_at(&mut st, &hub, 2, 1),
+        Some(tail),
+        "densify still asks for the tail"
+    );
+    rbitcoin_ibd::ibd::events::apply_confirm_reject(
+        &mut st,
+        1,
+        head,
+        ConfirmRejectClass::ConsensusInvalid,
+        "mandatory-script-verify-flag-failed",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        1,
+        Some(feed.as_ref()),
+        None,
+        RejectParent {
+            hash: Some(tail),
+            unreadable: false,
+        },
+    );
+    assert!(!feed.dropped_body(&head), "apply releases the event hash");
+    assert!(!feed.dropped_body(&tail));
+    assert_eq!(need_hash_at(&mut st, &hub, 1, 1), Some(head));
+    assert_eq!(need_hash_at(&mut st, &hub, 2, 1), Some(tail));
+    let holes = contiguous_tip_holes(&mut st, &hub, 4);
+    assert!(
+        holes.contains(&tail),
+        "the tip walk stops on a held tail: {holes:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A cancelled write drops the load plan. A retried or engine-fault script
 /// wave goes back on the body queue. A peer's invalid block is a one-block
 /// consensus reject and does not take these arms. The confirm thread does.
