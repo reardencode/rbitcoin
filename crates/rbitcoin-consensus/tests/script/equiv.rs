@@ -259,3 +259,49 @@ fn sighash_single_past_outputs_is_schnorr_hashtype() {
         Err(EquivFail::Script(46))
     );
 }
+
+/// Core finishes scriptSig and scriptPubKey before `WITNESS_MALLEATED` (41)
+/// and `WITNESS_UNEXPECTED` (43).
+#[test]
+fn witness_ordinals_follow_the_script_result() {
+    let mut zeros = vec![0x00, 0x14];
+    zeros.extend([0u8; 20]);
+    let prev = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: ScriptBuf::from_bytes(zeros),
+    };
+    let tx = shell(vec![one_in(
+        ScriptBuf::from_bytes(vec![0x51]),
+        Witness::new(),
+    )]);
+    assert_eq!(
+        equiv_verify(&tx, std::slice::from_ref(&prev), 0, EQUIV_ALLOWED),
+        Err(EquivFail::Script(2))
+    );
+
+    let prev = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x60, 0x02, 0x00, 0x01]),
+    };
+    let tx = shell(vec![one_in(
+        ScriptBuf::from_bytes(vec![0x67]),
+        Witness::new(),
+    )]);
+    assert_eq!(
+        equiv_verify(&tx, std::slice::from_ref(&prev), 0, EQUIV_ALLOWED),
+        Err(EquivFail::Script(20))
+    );
+
+    let prev = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x00]),
+    };
+    let tx = shell(vec![one_in(
+        ScriptBuf::new(),
+        Witness::from_slice(&[&[0x01][..]]),
+    )]);
+    assert_eq!(
+        equiv_verify(&tx, std::slice::from_ref(&prev), 0, EQUIV_ALLOWED),
+        Err(EquivFail::Script(2))
+    );
+}

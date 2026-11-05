@@ -299,6 +299,37 @@ fn p2sh_nested_false_program_extra_push_is_eval_false() {
     );
 }
 
+/// A witness on a redeem that is not a witness program is unexpected only
+/// after the redeem has succeeded. A false redeem is that script result.
+#[test]
+fn p2sh_witness_unexpected_follows_the_redeem() {
+    let redeem = vec![0x00];
+    let mut tx = dummy_tx();
+    tx.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01, 0x00]);
+    tx.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let job = job_for(tx, p2sh_spk(&redeem), true);
+    let err = rbitcoin_consensus::script::verify_job_all_inputs(&job)
+        .expect_err("false redeem with witness");
+    let ConsensusError::Script(msg) = err else {
+        panic!("expected a script error, got {err}");
+    };
+    let token = msg.split(" txid=").next().unwrap_or(&msg);
+    assert_eq!(token, "script false");
+
+    let redeem = vec![0x51];
+    let mut tx = dummy_tx();
+    tx.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01, 0x51]);
+    tx.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let job = job_for(tx, p2sh_spk(&redeem), true);
+    let err = rbitcoin_consensus::script::verify_job_all_inputs(&job)
+        .expect_err("true redeem with witness");
+    let ConsensusError::Script(msg) = err else {
+        panic!("expected a script error, got {err}");
+    };
+    let token = msg.split(" txid=").next().unwrap_or(&msg);
+    assert_eq!(token, "WITNESS_UNEXPECTED");
+}
+
 /// Finding 007 (c): v0 wrong-length program → WITNESS_PROGRAM_WRONG_LENGTH.
 #[test]
 fn p2sh_nested_v0_wrong_length_program_rejected() {
