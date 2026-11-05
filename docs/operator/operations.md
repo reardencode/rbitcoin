@@ -179,8 +179,16 @@ never used. That handshake sends Bitcoin Core's private-broadcast VERSION,
 the same from every sender: no service bits, time 0, no addresses, user
 agent `/pynode:0.0.1/`, height 0, and relay off. It sends no `wtxidrelay`
 or `sendaddrv2`, and it skips a peer whose own VERSION has relay off. This
-is **not** Dandelion++. If that one-shot fails, the tx stays in the
-mempool and is still not INV'd; confirmation can still arrive in a block.
+is **not** Dandelion++. When a standing peer announces the tx, the node asks
+for it, and once that peer sends the tx back the private broadcast is
+done. Any one-shot sends still running finish first. If that peer
+sends notfound, disconnects, or lets the ask expire, the next standing
+peer who announced the tx is asked without waiting out the minute. The
+node then announces the tx on its normal schedule, like any other,
+except to the peer who sent it back. An inbound peer still waits 30
+seconds, counted from the end of the private broadcast. Until that
+broadcast ends, the tx stays in the mempool and is not INV'd, even if
+the one-shot failed; confirmation can still arrive in a block.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
 `--only-net onion` (repeatable with `ipv4`/`ipv6`/`i2p`/`cjdns`) filters dial and learn;
 onion requires `--proxy` or `--onion`. `--connect foo.onion:8333` is a start

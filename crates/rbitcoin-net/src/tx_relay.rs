@@ -887,8 +887,10 @@ enum IsolatedTurn {
     Held,
     /// Waiting for the isolated loop. The number is submit order.
     Waiting(u64),
-    /// The loop took it.
-    Taken,
+    Taken {
+        returned: bool,
+    },
+    Sent,
 }
 
 impl LocalOrigin {
@@ -924,7 +926,8 @@ impl LocalOrigin {
             }
         }
         let (_, txid) = oldest?;
-        self.txs.insert(txid, IsolatedTurn::Taken);
+        self.txs
+            .insert(txid, IsolatedTurn::Taken { returned: false });
         Some((txid, waiting - 1))
     }
 }
@@ -2385,6 +2388,10 @@ impl MempoolHub {
     /// True if a live mempool entry has this wtxid (BIP339 inv filter).
     pub fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
         self.lock_read().graph.contains_wtxid(wtxid)
+    }
+
+    pub fn try_txid_for_wtxid(&self, wtxid: &Wtxid) -> Option<Txid> {
+        self.inner.try_read().ok()?.graph.txid_for_wtxid(wtxid)
     }
 
     pub fn try_contains_wtxid(&self, wtxid: &Wtxid) -> bool {
@@ -5123,11 +5130,24 @@ impl MempoolHub {
     pub fn take_due_parent_getdata(&self, peer: u64, now: u64) -> Vec<DueParent> {
         let mut g = self.parent_req.lock().unwrap();
         g.take_due(peer, now, |hash, wtxid| {
+            // A local-origin tx is in the pool, but the private broadcast is
+            // still asking peers who announced it. Dropping the row here
+            // leaves the next announcer unasked after a notfound or a drop.
             if wtxid {
                 let w = Wtxid::from_byte_array(*hash);
+                if self
+                    .try_txid_for_wtxid(&w)
+                    .is_some_and(|txid| self.skip_standing_inv(&txid))
+                {
+                    return false;
+                }
                 self.try_contains_wtxid(&w) || self.try_recent_reject(&w)
             } else {
-                self.parent_already_have(&Txid::from_byte_array(*hash))
+                let txid = Txid::from_byte_array(*hash);
+                if self.skip_standing_inv(&txid) {
+                    return false;
+                }
+                self.parent_already_have(&txid)
             }
         })
     }
@@ -6175,6 +6195,95 @@ impl MempoolHub {
             // A `notify_one` with no waiter leaves a permit, so a queue
             // between `take` and here still wakes this await.
             self.isolated_wake.notified().await;
+        }
+    }
+
+    pub fn note_returned(&self, txid: &Txid) {
+        if !self.isolated_broadcast() {
+            return;
+        }
+        let ended = {
+            let mut origin = self.local_origin.lock().unwrap();
+            match origin.txs.get_mut(txid) {
+                Some(IsolatedTurn::Taken { returned }) => {
+                    *returned = true;
+                    false
+                }
+                // `Sent` keeps the row visible to `skip_standing_inv` and
+                // stops the one-shot loop from taking it. The drop is after
+                // the age stamp.
+                Some(_) => {
+                    origin.txs.insert(*txid, IsolatedTurn::Sent);
+                    true
+                }
+                None => false,
+            }
+        };
+        if ended {
+            self.end_local_origin(txid);
+        }
+    }
+
+    pub fn isolated_sent(&self, txid: &Txid) {
+        let ended = {
+            let mut origin = self.local_origin.lock().unwrap();
+            match origin.txs.get(txid) {
+                Some(IsolatedTurn::Taken { returned }) => {
+                    let ended = *returned;
+                    // `Sent` keeps the row through the age stamp when `ended`.
+                    // The echo has not arrived yet when it is not.
+                    origin.txs.insert(*txid, IsolatedTurn::Sent);
+                    ended
+                }
+                _ => false,
+            }
+        };
+        if ended {
+            self.end_local_origin(txid);
+        }
+    }
+
+    /// Move relay age to now, then drop the row. An inv tick that sees the
+    /// row already gone still reads the submit time and can INV an inbound peer.
+    fn end_local_origin(&self, txid: &Txid) {
+        self.restamp_relay_age(txid);
+        let mut origin = self.local_origin.lock().unwrap();
+        if matches!(origin.txs.get(txid), Some(IsolatedTurn::Sent)) {
+            origin.txs.remove(txid);
+        }
+    }
+
+    /// The private broadcast is over. Inbound inv age counts from now, not
+    /// from submit, and the expiry order follows that same stamp.
+    fn restamp_relay_age(&self, txid: &Txid) {
+        let now = self.relay_now_secs();
+        let by_tx = self.wtxid_by_txid.lock().unwrap();
+        let Some(wtxid) = by_tx.get(txid).copied() else {
+            return;
+        };
+        // Same order as `insert_relay_maps`: wtxid, seq, accept, gen, age, expiry.
+        let _seqs = self.relay_seq.lock().unwrap();
+        let mut ats = self.accept_at.lock().unwrap();
+        let gens = self.accept_gen.lock().unwrap();
+        let mut age = self.age_inv.lock().unwrap();
+        let mut order = self.expiry_order.lock().unwrap();
+        let Some(old) = ats.get(&wtxid).copied() else {
+            return;
+        };
+        if old == now {
+            return;
+        }
+        ats.insert(wtxid, now);
+        if let Some(gen) = gens.get(&wtxid).copied() {
+            let pair = (*txid, wtxid);
+            age.remove(&(old.saturating_add(30), gen));
+            age.insert((now.saturating_add(30), gen), pair);
+        }
+        order.remove(&(old, wtxid));
+        order.insert((now, wtxid), *txid);
+        if old == self.min_live_accept_at.load(Ordering::Relaxed) {
+            let min = ats.values().copied().min().unwrap_or(u64::MAX);
+            self.min_live_accept_at.store(min, Ordering::Relaxed);
         }
     }
 

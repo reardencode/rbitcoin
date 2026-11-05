@@ -492,6 +492,119 @@ fn reorg_reaccept_then_unindex_drops_relay() {
     let _ = std::fs::remove_dir_all(&mp);
 }
 
+#[tokio::test]
+async fn returned_tx_waits_for_in_flight_isolated_sends() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let hub = MempoolHub::open(tmp(), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.set_isolated_broadcast(true);
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+
+    hub.note_mock_now(1_000);
+    let sending = spend_true(cbs[1], 1_000, spk.clone());
+    let txid = sending.compute_txid();
+    hub.accept_tx_from(&sending, TxOrigin::Local)
+        .expect("accept");
+    assert_eq!(hub.accept_time_txid(&txid), Some(1_000));
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.note_mock_now(2_000);
+    hub.note_returned(&txid);
+    assert!(
+        hub.is_local_origin(&txid),
+        "a tx back mid-send keeps its entry so the other dials still run"
+    );
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(1_000),
+        "the relay age stays put until the in-flight sends finish"
+    );
+    hub.isolated_sent(&txid);
+    assert!(!hub.is_local_origin(&txid));
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(2_000),
+        "the inbound gate starts when the private broadcast ends"
+    );
+
+    hub.note_mock_now(3_000);
+    let sent = spend_true(cbs[2], 1_000, spk);
+    let txid = sent.compute_txid();
+    hub.accept_tx_from(&sent, TxOrigin::Local).expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.isolated_sent(&txid);
+    assert!(hub.is_local_origin(&txid), "sent but not back yet");
+    hub.note_mock_now(4_000);
+    hub.note_returned(&txid);
+    assert!(!hub.is_local_origin(&txid));
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(4_000),
+        "an echo after the one-shots restarts the relay age"
+    );
+}
+
+/// The row is still local origin at the moment the age stamp takes the
+/// wtxid map. Dropping it first lets an inbound inv tick read the submit time.
+fn row_stays_until_age_stamp(
+    hub: &Arc<MempoolHub>,
+    txid: Txid,
+    now: u64,
+    end: impl FnOnce(&MempoolHub, Txid) + Send + 'static,
+) {
+    let accept = hub.accept_at.lock().unwrap();
+    let hub_b = Arc::clone(hub);
+    let worker = std::thread::spawn(move || end(&hub_b, txid));
+    let mut spins = 0u32;
+    loop {
+        if hub.wtxid_by_txid.try_lock().is_err() {
+            break;
+        }
+        std::thread::yield_now();
+        spins += 1;
+        assert!(
+            spins < 5_000_000,
+            "ending the broadcast never reached the age stamp"
+        );
+    }
+    let still = hub.is_local_origin(&txid);
+    drop(accept);
+    worker.join().expect("end");
+    assert!(
+        still,
+        "the local-origin row dropped before the relay age moved"
+    );
+    assert!(!hub.is_local_origin(&txid));
+    assert_eq!(hub.accept_time_txid(&txid), Some(now));
+}
+
+#[tokio::test]
+async fn ending_the_broadcast_keeps_the_row_until_the_age_moves() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let hub = MempoolHub::open(tmp(), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.set_isolated_broadcast(true);
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+
+    hub.note_mock_now(1_000);
+    let sending = spend_true(cbs[1], 1_000, spk.clone());
+    let txid = sending.compute_txid();
+    hub.accept_tx_from(&sending, TxOrigin::Local)
+        .expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.note_returned(&txid);
+    hub.note_mock_now(2_000);
+    row_stays_until_age_stamp(&hub, txid, 2_000, |hub, txid| hub.isolated_sent(&txid));
+
+    hub.note_mock_now(3_000);
+    let sent = spend_true(cbs[2], 1_000, spk);
+    let txid = sent.compute_txid();
+    hub.accept_tx_from(&sent, TxOrigin::Local).expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.isolated_sent(&txid);
+    hub.note_mock_now(4_000);
+    row_stays_until_age_stamp(&hub, txid, 4_000, |hub, txid| hub.note_returned(&txid));
+}
+
 #[test]
 fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     use rbitcoin_store::script_hash;

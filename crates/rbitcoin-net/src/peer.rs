@@ -4821,6 +4821,13 @@ pub fn on_inv(
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(txid.to_string());
                 }
+                // A wtxid-relay peer announces by wtxid. Ignoring only a txid
+                // we already have, and fetching one we lack, is the same
+                // answer as a node that already has the tx. The inv is still
+                // noted so a block-relay peer is disconnected for it.
+                if session.is_some_and(|s| s.wtxid_relay()) {
+                    continue;
+                }
                 if !seen_txids.insert(*txid) {
                     continue;
                 }
@@ -4940,7 +4947,9 @@ pub fn on_inv_txid(
         if let Some(s) = session {
             let _ = mp.add_orphan_announcer(txid, s.id);
         }
-        return None;
+        if !asks_back_local_tx(mp, session, txid) {
+            return None;
+        }
     }
     if let Some(s) = session {
         match mp.note_inv_tx_requested(s.id, txid.to_byte_array(), s.inbound, s.clock_now(), false)
@@ -4958,6 +4967,15 @@ pub fn on_inv_txid(
     Some(Inventory::WitnessTransaction(*txid))
 }
 
+fn asks_back_local_tx(
+    mp: &crate::tx_relay::MempoolHub,
+    session: Option<&crate::peers::LivePeer>,
+    txid: &bitcoin::Txid,
+) -> bool {
+    session.is_some_and(|s| s.conn_type != crate::peers::PeerConnType::BlockRelay)
+        && mp.skip_standing_inv(txid)
+}
+
 #[doc(hidden)]
 pub fn on_inv_wtxid(
     hub: &ChainHub,
@@ -4970,7 +4988,10 @@ pub fn on_inv_wtxid(
         return None;
     }
     let mp = hub.mempool()?;
-    if !mp.try_contains_wtxid(wtxid) {
+    let ask_back = mp
+        .try_txid_for_wtxid(wtxid)
+        .is_some_and(|txid| asks_back_local_tx(mp, session, &txid));
+    if ask_back || !mp.try_contains_wtxid(wtxid) {
         if let Some(s) = session {
             match mp.note_inv_tx_requested(
                 s.id,
@@ -6117,6 +6138,9 @@ pub async fn on_tx(
                     match tx_accept_log(&e) {
                         TxAcceptLog::Silent => {
                             if let rbitcoin_mempool::AcceptError::Duplicate(tid) = &e {
+                                if mp.try_contains_wtxid(&wtxid) {
+                                    mp.note_returned(tid);
+                                }
                                 maybe_force_relay_duplicate(hub, session, tx, *tid);
                             }
                         }

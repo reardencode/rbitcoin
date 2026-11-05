@@ -228,9 +228,10 @@ pub fn spawn_isolated_broadcast_loop(
             // `unindex_txid` drops the local-origin entry on every removal,
             // and this check never waits on the mempool lock.
             let in_pool = || mp.is_local_origin(&txid);
-            if isolated_broadcast_known_tx(&dialer, &addrman, magic, txid, tx, in_pool).await
-                == IsolatedBroadcast::NoTargets
-            {
+            let outcome =
+                isolated_broadcast_known_tx(&dialer, &addrman, magic, txid, tx, in_pool).await;
+            mp.isolated_sent(&txid);
+            if outcome == IsolatedBroadcast::NoTargets {
                 mp.note_isolated_lap(IsolatedLap::NoTargets);
             }
         }
