@@ -3305,13 +3305,13 @@ async fn node_run_p2p_short() {
             );
             assert_eq!(
                 rows[0]["synced_headers"].as_i64(),
-                Some(-1),
-                "empty getheaders at tip does not set best_known: {peers}"
+                Some(3),
+                "the seeder announces its tip when the session starts, so the inv sets best_known: {peers}"
             );
             assert_eq!(
                 rows[0]["synced_blocks"].as_i64(),
-                Some(-1),
-                "synced_blocks follows best_known, not startingheight: {peers}"
+                Some(3),
+                "synced_blocks follows that best_known header once the block is connected: {peers}"
             );
             assert!(
                 rows[0]["servicesnames"]
