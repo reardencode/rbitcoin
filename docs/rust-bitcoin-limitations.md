@@ -74,6 +74,7 @@ Core, **fix the engine** before commit.
 | RB-019 | Taproot key-spend helper | `taproot_key_spend_signature_hash` hardcodes `annex = None`. A key-path spend with an annex is consensus-valid; that helper hashes the wrong message. `taproot_script_spend_signature_hash` also drops the annex and pins the codeseparator at `0xFFFFFFFF`. `TapSighashType::from_consensus_u8(0x00)` is `Default`, so a 65-byte signature ending in `0x00` must be rejected before the parser | Key path and script path call in-tree `tap_signature_hash` (annex included; `leaf` absent on key path). They do not call the two wrappers. An explicit `0x00` type byte is rejected. The `0x00 → Default` mapping itself is correct | `script/p2tr.rs` `verify_key_path`, `verify_script_path`; tapscript `checksig_schnorr` | mitigated | Finding [008](./external_findings/008-p2tr-keypath-sighash-zero.md). Mainnet annex key-path example: block 896078. Filed [rust-bitcoin#7019](https://github.com/rust-bitcoin/rust-bitcoin/issues/7019) |
 | RB-020 | Witness decode allocation | `Witness::consensus_decode` allows a stack count up to `MAX_VEC_SIZE` (4_000_000), then allocates `count * 4 + 128` bytes before reading any element length. A short `tx`, `block`, `cmpctblock`, or `blocktxn` whose count is 4_000_000 zeros about 16 MB and then fails | Allocation-free pre-walk in `try_decode`. A count that cannot fit in the remaining bytes (an element is at least one byte) is `MessageTooLarge`, which the peer loop scores. Relay `tx`, `block`, `cmpctblock`, and `blocktxn` then walk inputs, outputs, and witnesses a second time inside `consensus_decode`. IBD block frames skip the pre-walk | `net/src/codec.rs` `walk_witness` | mitigated | `short_tx_witness_count_is_message_too_large` and the `block`, `cmpctblock`, and `blocktxn` siblings. A real witness payload still decodes. Fixed on `master` (`WitnessDecoder` grows from bytes received). Not filed. 0.32.102 still allocates up front |
 | RB-021 | `merkleblock` bit vector | `PartialMerkleTree::consensus_decode` reads a flag-byte compact-size capped at 4_000_000, then allocates `vec![false; n * 8]` before reading those bytes. At the cap that is 32 MB of bools. This node never asks for or handles a merkle block | The command is `Unknown` before `consensus_decode`. An unrecognized command stays `Unknown` | `net/src/codec.rs` `decode_cmd_payload` | mitigated | `short_merkleblock_is_unknown_without_decoding`. Esplora still builds a `MerkleBlock` itself for `/tx/:txid/merkleblock-proof`. Fixed on `master` (`ByteVecDecoder` reserves as bytes arrive; the bit vector is built from bytes read). Not filed. 0.32.102 still allocates first |
+| RB-022 | Taproot tweak scalar | `TapTweakHash::to_scalar` panics when the 32 bytes are at or above the curve order. Core's tweak-add returns 0 | `Scalar::from_be_bytes`; out of range is a commitment failure | `script/p2tr.rs` `output_key_matches_tweak` | mitigated | `script_path_tweak_at_or_above_curve_order_is_not_a_commitment`. 0.32.102 still `expect`s |
 
 ## Upstream queue
 
@@ -155,6 +156,17 @@ regtest harnesses included.
   codeseparator). Do not change `from_consensus_u8(0)`. **Title:**
   "`taproot_key_spend_signature_hash` ignores the annex." **Filed:**
   [rust-bitcoin#7019](https://github.com/rust-bitcoin/rust-bitcoin/issues/7019).
+
+- **RB-022. `TapTweakHash::to_scalar` panics above the curve order.**
+  `Scalar::from_be_bytes(...).expect(...)` aborts when the hash is at or
+  above the secp256k1 order. Core `CheckTapTweak` passes those bytes to
+  `secp256k1_xonly_pubkey_tweak_add_check`, and
+  `secp256k1_ec_pubkey_tweak_add_helper` returns 0 on overflow, so the
+  script-path commitment fails. Reaching it from a real tweak hash takes
+  about 2^128 attempts.
+  **Ask:** return `Result` instead of panicking, matching
+  `Scalar::from_be_bytes`. **Title:** "`TapTweakHash::to_scalar` panics
+  when the tweak is out of range." Not filed.
 
 - **RB-020. Witness decode allocates from the element count.**
   `Witness::consensus_decode` accepts a stack count up to `MAX_VEC_SIZE`

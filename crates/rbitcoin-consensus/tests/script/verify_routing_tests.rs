@@ -666,8 +666,8 @@ fn bip16_inactive_treats_p2sh_as_bare() {
 
 /// Fast path and interpreter agree on a real P2PKH signature, and both
 /// reject the only push that `FindAndDelete` could remove from the
-/// 25-byte template (the 20-byte pubkey hash). That stack item is not a
-/// verifying signature, so the different sighash is not a chain split.
+/// 25-byte template (the 20-byte pubkey hash). After that delete both
+/// hash `OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG`.
 #[test]
 fn p2pkh_fast_path_matches_interpreter_including_hash_collision() {
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
@@ -735,6 +735,12 @@ fn p2pkh_fast_path_matches_interpreter_including_hash_collision() {
         verify_bare(&job, i, &job.tx)
     }
     .is_err());
+    // Interpreter FindAndDelete of that push leaves the four opcodes.
+    let deleted = rbitcoin_consensus::script::interpreter::find_and_delete(
+        spk.as_bytes(),
+        rbitcoin_consensus::script::interpreter::ScriptElem::new(keyhash.as_byte_array()).unwrap(),
+    );
+    assert_eq!(deleted.as_ref(), &[0x76, 0xa9, 0x88, 0xac]);
 }
 
 /// A wire slot past the parent output count fails when the job is built.
