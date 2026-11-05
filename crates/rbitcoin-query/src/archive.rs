@@ -679,12 +679,43 @@ impl ArchiveWritePlan {
         false
     }
 
+    /// Ids in [`Self::planned_fks`]. One build per plan, then O(1) probes.
+    pub(crate) fn planned_create_ids(&self) -> crate::U64Set {
+        let mut ids = crate::U64Set::with_capacity_and_hasher(
+            self.planned_fks.len(),
+            std::hash::BuildHasherDefault::default(),
+        );
+        for fk in &self.planned_fks {
+            if let Some(id) = fk.get() {
+                ids.insert(id);
+            }
+        }
+        ids
+    }
+
     #[inline]
     pub fn create_in_spend_header(&self, spend: Fk, create_id: u64) -> bool {
+        let ids = if self.per_header_ranges.is_empty() {
+            self.planned_create_ids()
+        } else {
+            crate::U64Set::default()
+        };
+        self.create_in_planned_or_header(spend, create_id, &ids)
+    }
+
+    /// Empty ranges: `create_id` is in `planned_ids`. Otherwise the header range.
+    #[inline]
+    pub(crate) fn create_in_planned_or_header(
+        &self,
+        spend: Fk,
+        create_id: u64,
+        planned_ids: &crate::U64Set,
+    ) -> bool {
         if self.per_header_ranges.is_empty() {
-            return self.planned_fks.iter().any(|f| f.get() == Some(create_id));
+            planned_ids.contains(&create_id)
+        } else {
+            Self::create_in_header_ranges(&self.per_header_ranges, spend, create_id)
         }
-        Self::create_in_header_ranges(&self.per_header_ranges, spend, create_id)
     }
 
     /// Per-packed-row `(vout, spend_fk)` for creates in this plan (Class A overlay).

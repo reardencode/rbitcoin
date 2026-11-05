@@ -56,6 +56,8 @@ pub struct InFlight {
     /// Empty on the IBD hot path; prune skips the per-key check when empty.
     pub evictions: TxidEvictMap,
     pub approx_bytes: u64,
+    /// Lowest create id still in `outs`. Pin does not call [`Self::get_out`] below it.
+    min_out: Option<u64>,
 }
 
 impl InFlight {
@@ -77,6 +79,10 @@ impl InFlight {
             if let Some(id) = fk.get() {
                 self.outs.insert(id, Arc::clone(pin));
                 keys.out_ids.push(id);
+                self.min_out = Some(match self.min_out {
+                    Some(min) if min < id => min,
+                    _ => id,
+                });
                 let pin_bytes =
                     40u64.saturating_add(crate::archive::create_pin_approx_bytes(pin) as u64);
                 keys.approx_bytes = keys.approx_bytes.saturating_add(pin_bytes);
@@ -165,6 +171,28 @@ impl InFlight {
                     .saturating_sub(crate::archive::create_pin_approx_bytes(&pin) as u64);
             }
         }
+        if self.min_out.is_some_and(|id| !self.outs.contains_key(&id)) {
+            self.recompute_min_out();
+        }
+    }
+
+    /// Lowest id still listed on a surviving height, including untagged.
+    ///
+    /// `by_height` is already the kept packs when prune calls this.
+    fn recompute_min_out(&mut self) {
+        let mut min: Option<u64> = None;
+        let mut consider = |ids: &[u64]| {
+            for id in ids {
+                if self.outs.contains_key(id) {
+                    min = Some(min.map_or(*id, |cur| cur.min(*id)));
+                }
+            }
+        };
+        for keys in self.by_height.values() {
+            consider(&keys.out_ids);
+        }
+        consider(&self.untagged.out_ids);
+        self.min_out = min;
     }
 
     /// Drop tagged packs at or above a disconnected height. Untagged stay.
@@ -221,6 +249,12 @@ impl InFlight {
     /// Occupancy for IBD `sizes`: height buckets, create-pin entries, approx bytes.
     pub fn size_snapshot(&self) -> (usize, usize, u64) {
         (self.pack_count(), self.outs.len(), self.approx_bytes)
+    }
+
+    /// Lowest create id in [`Self::outs`], if any.
+    #[inline]
+    pub fn min_out_id(&self) -> Option<u64> {
+        self.min_out
     }
 
     #[inline]
