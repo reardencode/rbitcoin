@@ -271,6 +271,34 @@ fn p2sh_nested_multi_push_witness_program_malleated() {
     assert!(rbitcoin_consensus::script::verify_job_all_inputs(&job).is_err());
 }
 
+/// Extra scriptSig push plus `OP_0 <20 zero bytes>` is a false redeem.
+/// Core reports that before `WITNESS_MALLEATED_P2SH`.
+#[test]
+fn p2sh_nested_false_program_extra_push_is_eval_false() {
+    let redeem = {
+        let mut r = vec![0x00, 0x14];
+        r.extend([0u8; 20]);
+        r
+    };
+    let mut ss = vec![0x01, 0x51];
+    ss.push(redeem.len() as u8);
+    ss.extend_from_slice(&redeem);
+    let mut tx = dummy_tx();
+    tx.input[0].script_sig = ScriptBuf::from_bytes(ss);
+    let job = job_for(tx, p2sh_spk(&redeem), true);
+    let err =
+        rbitcoin_consensus::script::verify_job_all_inputs(&job).expect_err("false nested program");
+    let ConsensusError::Script(msg) = err else {
+        panic!("expected a script error, got {err}");
+    };
+    let token = msg.split(" txid=").next().unwrap_or(&msg);
+    assert_eq!(token, "EVAL_FALSE");
+    assert_eq!(
+        rbitcoin_consensus::script::script_fail::consensus_ordinal(token),
+        Some(2)
+    );
+}
+
 /// Finding 007 (c): v0 wrong-length program → WITNESS_PROGRAM_WRONG_LENGTH.
 #[test]
 fn p2sh_nested_v0_wrong_length_program_rejected() {
