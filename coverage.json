@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "label": "coverage",
-  "message": "91.61%",
+  "message": "91.65%",
   "color": "brightgreen",
-  "pct": 91.61,
-  "lh": 108485,
-  "lf": 118415,
+  "pct": 91.65,
+  "lh": 109049,
+  "lf": 118979,
   "gate": 91,
   "scope": "production",
-  "sha": "c1c5a72e74be",
-  "date": "2026-11-04",
+  "sha": "070facb53bc0",
+  "date": "2026-11-05",
   "crates": [
     {
       "name": "rbitcoin-cli",
@@ -19,27 +19,27 @@
     },
     {
       "name": "rbitcoin-consensus",
-      "lh": 6240,
+      "lh": 6239,
       "lf": 6423,
-      "pct": 97.15
+      "pct": 97.14
     },
     {
       "name": "rbitcoin-electrum",
-      "lh": 2975,
+      "lh": 2974,
       "lf": 3331,
-      "pct": 89.31
+      "pct": 89.28
     },
     {
       "name": "rbitcoin-esplora",
-      "lh": 3745,
+      "lh": 3746,
       "lf": 4252,
-      "pct": 88.08
+      "pct": 88.1
     },
     {
       "name": "rbitcoin-ibd",
-      "lh": 12755,
+      "lh": 12754,
       "lf": 13815,
-      "pct": 92.33
+      "pct": 92.32
     },
     {
       "name": "rbitcoin-log",
@@ -55,15 +55,15 @@
     },
     {
       "name": "rbitcoin-net",
-      "lh": 22701,
-      "lf": 24747,
-      "pct": 91.73
+      "lh": 22916,
+      "lf": 24963,
+      "pct": 91.8
     },
     {
       "name": "rbitcoin-node",
-      "lh": 4392,
-      "lf": 5299,
-      "pct": 82.88
+      "lh": 4414,
+      "lf": 5335,
+      "pct": 82.74
     },
     {
       "name": "rbitcoin-primitives",
@@ -73,21 +73,21 @@
     },
     {
       "name": "rbitcoin-query",
-      "lh": 15269,
-      "lf": 16558,
-      "pct": 92.22
+      "lh": 15314,
+      "lf": 16593,
+      "pct": 92.29
     },
     {
       "name": "rbitcoin-rpc",
-      "lh": 8265,
-      "lf": 8958,
-      "pct": 92.26
+      "lh": 8273,
+      "lf": 8964,
+      "pct": 92.29
     },
     {
       "name": "rbitcoin-store",
-      "lh": 25055,
-      "lf": 27566,
-      "pct": 90.89
+      "lh": 25331,
+      "lf": 27837,
+      "pct": 91.0
     },
     {
       "name": "rbitcoin-sv2",
