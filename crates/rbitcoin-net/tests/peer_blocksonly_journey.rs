@@ -426,6 +426,21 @@ fn force_announce_picks_peers(
         hi_ann.try_recv().is_err(),
         "a filter above the fee is not announced"
     );
+    // Core erases the tx from this peer's to-send set when the trickle
+    // skips it. A later feefilter of 0 must not inv it (`p2p_feefilter.py`).
+    stand_above.note_minfeefilter_sat_kvb(0);
+    on_tx_announce_ok(
+        hub,
+        &hi_tx,
+        &follow,
+        Some(&stand_above),
+        announce(relayed.compute_txid()),
+    )
+    .unwrap();
+    assert!(
+        hi_ann.try_recv().is_err(),
+        "dropping feefilter announces a tx the peer's filter already skipped"
+    );
 
     let due_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
     let _due_equal_rx = writer_of(&due_equal);
@@ -443,6 +458,13 @@ fn force_announce_picks_peers(
     assert!(
         due_hi_rx.try_recv().is_err(),
         "periodic inv skips a filter above the fee"
+    );
+    due_above.note_minfeefilter_sat_kvb(0);
+    due_above.request_tx_inv();
+    queue_due_tx_invs(hub, due_above.as_ref(), &CappedSet::new(), &due_hi_tx);
+    assert!(
+        due_hi_rx.try_recv().is_err(),
+        "a periodic inv sends a tx skipped for the old feefilter"
     );
 
     let force_equal = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);

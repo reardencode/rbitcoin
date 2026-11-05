@@ -1949,10 +1949,18 @@ pub fn on_tx_announce_ok(
         return Ok(());
     };
     tx_announce_maybe_count(session, mp, &txid);
-    if !tx_announce_should_queue(session, mp, &txid) {
+    if !tx_announce_peer_ready(session, mp, &txid) {
         return Ok(());
     }
     let inv = tx_announce_inv(mp, &txid);
+    // Core erases a below-filter tx from this peer's to-send set. A later
+    // lower feefilter does not announce it (`p2p_feefilter.py`).
+    if tx_announce_below_feefilter(session, mp, &txid) {
+        if let (Some(s), Inventory::WTx(w)) = (session, inv) {
+            let _ = s.claim_announced_wtx(w);
+        }
+        return Ok(());
+    }
     // A later rebroadcast still reaches a peer that has not heard this
     // wtxid. The claim is shared with flush, so the two cannot both queue.
     if let Inventory::WTx(w) = inv {
@@ -2004,7 +2012,7 @@ fn tx_inv_peer_ok(
 }
 
 #[doc(hidden)]
-pub fn tx_announce_should_queue(
+fn tx_announce_peer_ready(
     session: Option<&crate::peers::LivePeer>,
     mp: &crate::tx_relay::MempoolHub,
     txid: &bitcoin::Txid,
@@ -2013,7 +2021,15 @@ pub fn tx_announce_should_queue(
         && tx_announce_peer_ok(session, mp, txid)
         && mp.try_contains(txid)
         && (mp.relay_enabled() || mp.is_unbroadcast(txid))
-        && !tx_announce_below_feefilter(session, mp, txid)
+}
+
+#[doc(hidden)]
+pub fn tx_announce_should_queue(
+    session: Option<&crate::peers::LivePeer>,
+    mp: &crate::tx_relay::MempoolHub,
+    txid: &bitcoin::Txid,
+) -> bool {
+    tx_announce_peer_ready(session, mp, txid) && !tx_announce_below_feefilter(session, mp, txid)
 }
 
 #[doc(hidden)]
@@ -3302,6 +3318,8 @@ pub fn tx_inv_candidate_ok(
     }
     let peer_min = session.minfeefilter_sat_kvb();
     if peer_min > 0 && announce_fee_rate_sat_kvb(mp, &txid).is_some_and(|rate| rate < peer_min) {
+        // Same erase as the announce path: a later lower filter does not inv it.
+        let _ = session.claim_announced_wtx(w);
         return false;
     }
     let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);
