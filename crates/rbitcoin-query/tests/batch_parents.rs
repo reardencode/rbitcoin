@@ -88,6 +88,38 @@ fn extend_from_full_pins_keeps_script_bytes() {
     assert_eq!(got1, p1, "merged full pin must borrow vout 1");
 }
 
+/// Checked lists the vout and the script lives only on the other batch.
+#[test]
+fn extend_from_sparse_checked_without_script_keeps_source_record() {
+    let script = vec![0x52u8; 32];
+    let mut a = BatchParents::new();
+    a.insert_owned(
+        Fk(1),
+        tx(1),
+        vec![(0, out(1))],
+        vec![0, 1],
+        None,
+        None,
+        Vec::new(),
+    );
+    assert!(a.pin_covered(Fk(1), &[1]));
+    assert!(!a.has_parent_out(Fk(1), 1));
+    let mut b = BatchParents::new();
+    b.insert_owned(
+        Fk(1),
+        tx(1),
+        vec![(1, OutputRecord::unspent(7, script.clone()))],
+        vec![1],
+        None,
+        None,
+        Vec::new(),
+    );
+    a.extend_from(b);
+    let (_, got) = a.get_parent_out(Fk(1), 1).expect("source script");
+    assert_eq!(got.value, 7);
+    assert_eq!(got.script, script);
+}
+
 #[test]
 fn extend_from_merges_disjoint_and_same_fk() {
     let mut a = BatchParents::new();
