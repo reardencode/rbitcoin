@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
-  "new_skip": 1746,
-  "old_index": 7005,
+  "new_skip": 1895,
+  "old_index": 6963,
   "new_cap_used": true,
-  "run_id": "41789215119",
+  "run_id": "41987303881",
   "old_name": "crates/rbitcoin-mempool/src/accept.rs:1914:12: delete ! in ActiveMempool::package_meets_min_relay",
-  "new_len": 4223,
-  "new_remaining": 2477,
-  "completed_new": 0,
-  "completed_old": 372,
-  "old_len": 29381,
-  "old_remaining": 29009
+  "new_len": 4604,
+  "new_remaining": 2709,
+  "completed_new": 149,
+  "completed_old": 0,
+  "old_len": 29286,
+  "old_remaining": 29286
 }
