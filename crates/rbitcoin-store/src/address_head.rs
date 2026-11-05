@@ -464,8 +464,8 @@ thread_local! {
     static TEST_TX_HEAD_BITS: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Run `f` with a per-thread `RBITCOIN_TX_HEAD_BITS` value. Other threads keep
-/// the process env. The node still reads that variable when this is unset.
+/// Run `f` with a per-thread `tx.head` width string. Other threads keep the
+/// scale default. There is no process env for this.
 pub fn with_tx_head_bits<R>(raw: &str, f: impl FnOnce() -> R) -> R {
     TEST_TX_HEAD_BITS.with(|c| {
         let prev = c.replace(Some(raw.to_owned()));
@@ -484,22 +484,17 @@ impl Drop for BitsRestore<'_> {
 
 /// Resolve address width for new creates.
 ///
-/// A thread override wins. Otherwise `RBITCOIN_TX_HEAD_BITS` when it parses
-/// inside [`MIN_BITS`]..=[`MAX_BITS`]. Anything else uses the scale default.
+/// A thread override ([`with_tx_head_bits`]) wins when it parses inside
+/// [`MIN_BITS`]..=[`MAX_BITS`]. Anything else uses the scale default.
 pub fn bits_for_scale(scale: HeadScale) -> u32 {
     let from_thread = TEST_TX_HEAD_BITS.with(|c| c.borrow().clone());
-    let from_env = if from_thread.is_some() {
-        None
-    } else {
-        std::env::var("RBITCOIN_TX_HEAD_BITS").ok()
-    };
-    if let Some(s) = from_thread.as_deref().or(from_env.as_deref()) {
+    if let Some(s) = from_thread.as_deref() {
         if let Ok(n) = s.parse::<u32>() {
             if (MIN_BITS..=MAX_BITS).contains(&n) {
                 return n;
             }
             rbitcoin_log::warn!(
-                "store: RBITCOIN_TX_HEAD_BITS={s:?} out of {MIN_BITS}..={MAX_BITS}, using scale default"
+                "store: tx head bits {s:?} out of {MIN_BITS}..={MAX_BITS}, using scale default"
             );
         }
     }

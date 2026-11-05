@@ -797,6 +797,22 @@ fn insert_fk_page_buf_error_arms() {
     });
 }
 
+/// `RBITCOIN_TX_HEAD_BITS` is not a width. Nothing else reads it, so this
+/// write is only the pin that the env path stayed gone.
+#[test]
+fn tx_head_bits_env_does_not_change_scale() {
+    let prev = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
+    std::env::set_var("RBITCOIN_TX_HEAD_BITS", "20");
+    let tiny = bits_for_scale(HeadScale::Tiny);
+    let main = bits_for_scale(HeadScale::Mainnet);
+    match prev {
+        Some(v) => std::env::set_var("RBITCOIN_TX_HEAD_BITS", v),
+        None => std::env::remove_var("RBITCOIN_TX_HEAD_BITS"),
+    }
+    assert_eq!(tiny, TINY_BITS);
+    assert_eq!(main, MAINNET_BITS);
+}
+
 /// One thread's head-width choice must not change another thread's scale default.
 #[test]
 fn tx_head_bits_on_one_thread_leaves_the_other_at_scale() {
