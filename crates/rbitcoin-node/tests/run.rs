@@ -1742,3 +1742,114 @@ async fn publish_listener_addr_wakes_the_waiter() {
     assert_eq!(got, addr);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn plant_regtest_genesis(dir: &std::path::Path) {
+    let cfg = tiny_regtest(dir);
+    let q = Query::open_or_create_layout(cfg.store_layout()).unwrap();
+    let params = rbitcoin_consensus::ChainParams::regtest();
+    let genesis = rbitcoin_consensus::genesis_block(&params);
+    rbitcoin_query::accept_and_connect_block(
+        &q,
+        &params,
+        rbitcoin_primitives::Height::GENESIS,
+        &genesis,
+        rbitcoin_consensus::Milestone::NONE,
+    )
+    .unwrap();
+}
+
+fn quiet_run(dir: &std::path::Path, network: rbitcoin_primitives::Network) -> NodeConfig {
+    let mut cfg = NodeConfig::default()
+        .with_datadir(dir)
+        .with_network(network)
+        .with_tiny_heads();
+    cfg.listen.p2p = rbitcoin_node::config::P2pListen::Off;
+    cfg.listen.use_seeds = false;
+    cfg.max_run_secs = Some(0);
+    cfg
+}
+
+/// No block 0 yet: mainnet still starts.
+#[tokio::test]
+async fn empty_datadir_opens_on_mainnet() {
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-empty-main-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = quiet_run(&dir, rbitcoin_primitives::Network::Mainnet);
+    tokio::time::timeout(Duration::from_secs(60), run_p2p(cfg))
+        .await
+        .expect("empty datadir must open")
+        .expect("empty datadir must open");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The stored genesis matches the started chain.
+#[tokio::test]
+async fn matching_regtest_datadir_opens() {
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-match-regtest-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    plant_regtest_genesis(&dir);
+    let cfg = quiet_run(&dir, rbitcoin_primitives::Network::Regtest);
+    tokio::time::timeout(Duration::from_secs(60), run_p2p(cfg))
+        .await
+        .expect("matching network must open")
+        .expect("matching network must open");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A regtest genesis opened as mainnet stops before peers, the peers file,
+/// and RPC.
+#[tokio::test]
+async fn regtest_datadir_refuses_mainnet_before_peers_and_rpc() {
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-wrong-net-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    plant_regtest_genesis(&dir);
+    let p2p_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rpc_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let p2p = p2p_l.local_addr().unwrap();
+    let rpc = rpc_l.local_addr().unwrap();
+    drop(p2p_l);
+    drop(rpc_l);
+    let mut cfg = NodeConfig::default()
+        .with_datadir(&dir)
+        .with_network(rbitcoin_primitives::Network::Mainnet)
+        .with_tiny_heads()
+        .with_p2p_listen(p2p);
+    cfg.rpc.listen = Some(rpc);
+    cfg.rpc.socket = true;
+    cfg.listen.use_seeds = false;
+    cfg.max_run_secs = Some(0);
+    let err = tokio::time::timeout(Duration::from_secs(60), run_p2p(cfg))
+        .await
+        .expect("wrong datadir must refuse before the run cap")
+        .expect_err("wrong datadir must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("Wrong datadir for network"), "{msg}");
+    let stored = rbitcoin_consensus::ChainParams::regtest()
+        .genesis_hash
+        .to_string();
+    assert!(msg.contains(&stored), "{msg}");
+    assert!(!dir.join("peers").exists(), "peers file written");
+    assert!(!dir.join("rpc.sock").exists(), "rpc socket created");
+    assert!(!dir.join("rpc.token").exists(), "rpc token created");
+    assert!(
+        std::net::TcpStream::connect_timeout(&p2p, Duration::from_millis(200)).is_err(),
+        "p2p accepted a connection"
+    );
+    assert!(
+        std::net::TcpStream::connect_timeout(&rpc, Duration::from_millis(200)).is_err(),
+        "rpc accepted a connection"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
