@@ -14,6 +14,7 @@ use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
 use crate::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use rbitcoin_primitives::TableKind;
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::path::Path;
 #[cfg(debug_assertions)]
@@ -134,17 +135,50 @@ pub enum FlushStep {
 /// Default max body size for L2 InRam (256 MiB). Over → pure FdOnly L0.
 pub const DEFAULT_CLASS_C_INRAM_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Cap for loading Class C arrays into process RAM.
-///
-/// Env: `RBITCOIN_CLASS_C_INRAM_MAX_MB` (integer MiB). Unset → 256 MiB.
-pub fn class_c_inram_max_bytes() -> u64 {
-    match std::env::var("RBITCOIN_CLASS_C_INRAM_MAX_MB") {
-        Ok(s) => {
+thread_local! {
+    static TEST_CLASS_C_INRAM_MAX: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Run `f` with a per-thread Class C cap in bytes. Other threads keep the
+/// process default. The node still reads `RBITCOIN_CLASS_C_INRAM_MAX_MB`.
+pub fn with_class_c_inram_max_bytes<R>(bytes: u64, f: impl FnOnce() -> R) -> R {
+    TEST_CLASS_C_INRAM_MAX.with(|c| {
+        let prev = c.replace(Some(bytes));
+        let _restore = CapRestore(c, prev);
+        f()
+    })
+}
+
+struct CapRestore<'a>(&'a Cell<Option<u64>>, Option<u64>);
+
+impl Drop for CapRestore<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.1);
+    }
+}
+
+/// MiB string from `RBITCOIN_CLASS_C_INRAM_MAX_MB`. Unset or unparseable → 256 MiB.
+#[doc(hidden)]
+pub fn class_c_inram_cap_from_mb_str(raw: Option<&str>) -> u64 {
+    match raw {
+        Some(s) => {
             let mb: u64 = s.trim().parse().unwrap_or(256);
             mb.saturating_mul(1024 * 1024)
         }
-        Err(_) => DEFAULT_CLASS_C_INRAM_MAX_BYTES,
+        None => DEFAULT_CLASS_C_INRAM_MAX_BYTES,
     }
+}
+
+/// Cap for loading Class C arrays into process RAM.
+///
+/// A thread override wins. Otherwise env `RBITCOIN_CLASS_C_INRAM_MAX_MB`
+/// (integer MiB). Unset → 256 MiB.
+pub fn class_c_inram_max_bytes() -> u64 {
+    if let Some(n) = TEST_CLASS_C_INRAM_MAX.with(Cell::get) {
+        return n;
+    }
+    let raw = std::env::var("RBITCOIN_CLASS_C_INRAM_MAX_MB").ok();
+    class_c_inram_cap_from_mb_str(raw.as_deref())
 }
 
 /// Copy `dst.len()` bytes from packed words at byte `start`.

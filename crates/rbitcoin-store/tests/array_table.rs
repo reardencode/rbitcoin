@@ -68,13 +68,8 @@ fn fd_only_append_publishes_values_and_zero_gap() {
     let file = rbitcoin_store::file::TableFile::create(&path, TableKind::ArrayLink).unwrap();
     file.write_at(ArrayTable::offset(0), &[0u8; 8]).unwrap();
     drop(file);
-    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "0");
-    let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
-    match &prev {
-        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
-        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
-    }
+    let t =
+        with_class_c_inram_max_bytes(0, || ArrayTable::open(&path, TableKind::ArrayLink).unwrap());
     assert_eq!(t.l2_resident_bytes(), 0, "disk-only table");
     let write = rbitcoin_store::ClassCWrite::for_test();
     t.set(&write, 0, 7).unwrap();
@@ -88,6 +83,27 @@ fn fd_only_append_publishes_values_and_zero_gap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A cap installed on one thread must not change `class_c_inram_max_bytes`
+/// on another. Process env fails this: both threads see the same variable.
+#[test]
+fn class_c_cap_on_one_thread_leaves_the_other_at_default() {
+    use std::sync::mpsc;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        with_class_c_inram_max_bytes(0, || {
+            assert_eq!(class_c_inram_max_bytes(), 0);
+            ready_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+        });
+    });
+    ready_rx.recv().unwrap();
+    let seen = class_c_inram_max_bytes();
+    let _ = done_tx.send(());
+    worker.join().unwrap();
+    assert_eq!(seen, DEFAULT_CLASS_C_INRAM_MAX_BYTES);
+}
+
 /// A disk-only table returns an empty slot after truncate, without a read.
 #[test]
 fn fd_only_truncate_then_get_is_absent() {
@@ -98,13 +114,8 @@ fn fd_only_truncate_then_get_is_absent() {
     let file = rbitcoin_store::file::TableFile::create(&path, TableKind::ArrayLink).unwrap();
     file.write_at(ArrayTable::offset(0), &[0u8; 16]).unwrap();
     drop(file);
-    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "0");
-    let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
-    match &prev {
-        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
-        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
-    }
+    let t =
+        with_class_c_inram_max_bytes(0, || ArrayTable::open(&path, TableKind::ArrayLink).unwrap());
     assert_eq!(t.l2_resident_bytes(), 0, "disk-only table");
     t.set(&rbitcoin_store::ClassCWrite::for_test(), 1, 22)
         .unwrap();
@@ -605,17 +616,18 @@ fn contiguous_image_flush_async_and_env_cap() {
     assert_eq!(t.len(), 0);
     drop(t);
 
-    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    assert_eq!(class_c_inram_max_bytes(), DEFAULT_CLASS_C_INRAM_MAX_BYTES);
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "128");
-    assert_eq!(class_c_inram_max_bytes(), 128 * 1024 * 1024);
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "not-a-number");
-    assert_eq!(class_c_inram_max_bytes(), 256 * 1024 * 1024); // parse fallback
-    match prev {
-        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
-        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
-    }
+    assert_eq!(
+        class_c_inram_cap_from_mb_str(None),
+        DEFAULT_CLASS_C_INRAM_MAX_BYTES
+    );
+    assert_eq!(
+        class_c_inram_cap_from_mb_str(Some("128")),
+        128 * 1024 * 1024
+    );
+    assert_eq!(
+        class_c_inram_cap_from_mb_str(Some("not-a-number")),
+        256 * 1024 * 1024
+    );
     let _ = std::fs::remove_file(&path);
 }
 

@@ -308,35 +308,29 @@ fn strong_tx_count_reads_l2_not_the_file() {
 /// `strong_tx` stays L2 even when the Class C array cap would demote it.
 #[test]
 fn strong_tx_always_l2_above_class_c_cap() {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "1");
     let dir = tmp();
     // 1 MiB + 1 byte of bits → body > class_c_inram_max_bytes() (1 MiB).
     let fk = Fk(8_388_608 + 8);
-    {
-        let t = StrongTxTable::create(&dir).unwrap();
-        t.set_strong(&rbitcoin_store::ClassCWrite::for_test(), fk, Fk(1))
-            .unwrap();
-        t.flush().unwrap();
+    rbitcoin_store::array_table::with_class_c_inram_max_bytes(1024 * 1024, || {
+        {
+            let t = StrongTxTable::create(&dir).unwrap();
+            t.set_strong(&rbitcoin_store::ClassCWrite::for_test(), fk, Fk(1))
+                .unwrap();
+            t.flush().unwrap();
+            assert!(
+                t.l2_resident_bytes() > 1024 * 1024,
+                "create path L2={}",
+                t.l2_resident_bytes()
+            );
+        }
+        let t = StrongTxTable::open(&dir).unwrap();
         assert!(
             t.l2_resident_bytes() > 1024 * 1024,
-            "create path L2={}",
+            "reopen must keep L2 under a 1 MiB Class C cap; got {}",
             t.l2_resident_bytes()
         );
-    }
-    let t = StrongTxTable::open(&dir).unwrap();
-    assert!(
-        t.l2_resident_bytes() > 1024 * 1024,
-        "reopen must keep L2 under a 1 MiB Class C cap; got {}",
-        t.l2_resident_bytes()
-    );
-    assert!(t.is_strong(fk).unwrap());
-    match prev {
-        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
-        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
-    }
+        assert!(t.is_strong(fk).unwrap());
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 

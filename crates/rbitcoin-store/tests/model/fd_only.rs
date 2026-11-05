@@ -12,10 +12,6 @@ use rbitcoin_store::ClassCWrite;
 use std::path::Path;
 
 fn open_fd_only(dir: &Path, slots: u64) -> ArrayTable {
-    // `set_var` is process-global. The model binary runs these tests in
-    // parallel, so one open must not restore the cap under the other.
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _lock = LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let path = dir.join("slots.body");
     let file = TableFile::create(&path, TableKind::ArrayLink).unwrap();
     let zeros = vec![0u8; (slots * 8) as usize];
@@ -23,13 +19,9 @@ fn open_fd_only(dir: &Path, slots: u64) -> ArrayTable {
         file.write_at(ArrayTable::offset(0), &zeros).unwrap();
     }
     drop(file);
-    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
-    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "0");
-    let table = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
-    match prev {
-        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
-        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
-    }
+    let table = rbitcoin_store::array_table::with_class_c_inram_max_bytes(0, || {
+        ArrayTable::open(&path, TableKind::ArrayLink).unwrap()
+    });
     assert_eq!(table.l2_resident_bytes(), 0, "disk-only table");
     table
 }
