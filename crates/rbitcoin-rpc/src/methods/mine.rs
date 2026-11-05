@@ -1786,52 +1786,52 @@ pub fn cheap_immature_coinbase(
     Ok(coinbases.get(&created_h).copied() == Some(create_fk))
 }
 
-/// Confirmed unspent output at `op`, with the creating tx's fk. `Ok(None)` is
-/// a real miss or spend. `Err` is a store read fault, not a verdict on the
-/// spending block.
-///
-/// `vout` is peer-chosen. It is checked against the parent's output count
-/// before the spender read, which treats a slot past that count as corrupt.
-#[doc(hidden)]
-pub fn read_confirmed_prevout(
+/// A block's spent parents by txid: the parent's create fk and its spent
+/// outputs by vout.
+pub type BlockParents = std::collections::HashMap<
+    Txid,
+    (
+        rbitcoin_primitives::Fk,
+        std::collections::HashMap<u32, rbitcoin_store::OutputRecord>,
+    ),
+>;
+
+/// The outputs a block spends from the archive, keyed by parent txid: one
+/// txid resolve and one body read per parent, decoding only the spent
+/// vouts. A parent with no row, and a vout past its output count, are
+/// absent. Outputs created inside the block are the caller's.
+pub fn confirmed_parents_of(
     query: &rbitcoin_query::Query,
-    op: bitcoin::OutPoint,
-    at_tip: bool,
-) -> Result<Option<(rbitcoin_primitives::Fk, bitcoin::TxOut)>, rbitcoin_store::StoreError> {
+    block: &Block,
+    txids: &[Txid],
+) -> Result<BlockParents, rbitcoin_store::StoreError> {
     use rbitcoin_store::StoreError;
-    let tid = op.txid.to_byte_array();
-    let Some((fk, rec)) = (match query.get_tx_by_txid(&tid) {
-        Ok(v) => v,
-        Err(StoreError::NotFound) => None,
-        Err(e) => return Err(e),
-    }) else {
-        return Ok(None);
-    };
-    if op.vout >= rec.output_count {
-        return Ok(None);
+    let in_block: std::collections::HashSet<&Txid> = txids.iter().collect();
+    let mut vouts_by_parent: std::collections::HashMap<Txid, Vec<u32>> =
+        std::collections::HashMap::new();
+    for inp in block.txdata.iter().skip(1).flat_map(|tx| &tx.input) {
+        let op = inp.previous_output;
+        if !in_block.contains(&op.txid) {
+            vouts_by_parent.entry(op.txid).or_default().push(op.vout);
+        }
     }
-    // Tip spentness is the parent chain only when this block extends the tip.
-    // A sibling can spend a coin the current tip also spent; caching that as
-    // invalid drops the competing block for the rest of the process.
-    if at_tip && query.is_outpoint_spent(&tid, op.vout)? {
-        return Ok(None);
+    let mut parents = std::collections::HashMap::with_capacity(vouts_by_parent.len());
+    for (txid, mut vouts) in vouts_by_parent {
+        vouts.sort_unstable();
+        vouts.dedup();
+        let fk = match query.tx_fk_by_txid(&txid.to_byte_array()) {
+            Ok(Some(fk)) => fk,
+            Ok(None) | Err(StoreError::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
+        let outs = match query.tx_outputs_at_fk(fk, &vouts) {
+            Ok(outs) => outs,
+            Err(StoreError::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
+        parents.insert(txid, (fk, outs.into_iter().collect()));
     }
-    let out = match query
-        .tx_output_at_fk(fk, op.vout)
-        .or_else(|_| query.tx_output(&rec, op.vout))
-    {
-        Ok(out) => out,
-        Err(StoreError::NotFound) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let value = bitcoin::Amount::from_sat(out.value);
-    Ok(Some((
-        fk,
-        bitcoin::TxOut {
-            value,
-            script_pubkey: bitcoin::ScriptBuf::from_bytes(out.script),
-        },
-    )))
+    Ok(parents)
 }
 
 /// Hard consensus rejects stick. A mutated body, a missing or invalid parent,
@@ -1875,6 +1875,7 @@ pub fn cheap_submit_tx_reject(
     if spend_height.is_none() {
         return Ok(None);
     }
+    let parents = confirmed_parents_of(query, block, &txids)?;
     let mut spent = std::collections::HashSet::new();
     let mut created: std::collections::HashMap<OutPoint, TxOut> = std::collections::HashMap::new();
     for (i, (tx, &tid)) in block.txdata.iter().zip(&txids).enumerate() {
@@ -1912,15 +1913,24 @@ pub fn cheap_submit_tx_reject(
             let txout = if let Some(o) = created.get(&op) {
                 o.clone()
             } else {
-                let Some((fk, out)) = read_confirmed_prevout(query, op, parent_is_tip)? else {
+                let Some((fk, out)) = parents
+                    .get(&op.txid)
+                    .and_then(|(fk, outs)| outs.get(&op.vout).map(|o| (*fk, o)))
+                else {
                     return Ok(Some("bad-txns-inputs-missingorspent".into()));
                 };
+                if parent_is_tip && query.is_outpoint_spent(&op.txid.to_byte_array(), op.vout)? {
+                    return Ok(Some("bad-txns-inputs-missingorspent".into()));
+                }
                 if let Some(h) = spend_height {
                     if cheap_immature_coinbase(query, fk, h, maturity)? {
                         return Ok(Some("bad-txns-premature-spend-of-coinbase".into()));
                     }
                 }
-                out
+                TxOut {
+                    value: bitcoin::Amount::from_sat(out.value),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(out.script.clone()),
+                }
             };
             in_val = in_val.saturating_add(txout.value.to_sat());
         }

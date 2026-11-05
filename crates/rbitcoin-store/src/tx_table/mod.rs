@@ -692,6 +692,8 @@ pub struct TxTable {
     /// machines decode raw spans and are not counted. One Relaxed add per
     /// decode.
     pub body_decodes: std::sync::atomic::AtomicU64,
+    /// Output records materialized from packed bodies (instance stats).
+    pub outputs_decoded: std::sync::atomic::AtomicU64,
 }
 
 /// Structural-meta backend from env hierarchy.
@@ -1129,6 +1131,7 @@ impl TxTable {
             secret,
             pending_head: pending_head::PendingHeadInserts::new(),
             body_decodes: std::sync::atomic::AtomicU64::new(0),
+            outputs_decoded: std::sync::atomic::AtomicU64::new(0),
             rebuild_seal_bits: seal_bits,
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(false),
@@ -1360,6 +1363,7 @@ impl TxTable {
             secret,
             pending_head: pending_head::PendingHeadInserts::new(),
             body_decodes: std::sync::atomic::AtomicU64::new(0),
+            outputs_decoded: std::sync::atomic::AtomicU64::new(0),
             rebuild_seal_bits: seal_bits,
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(prune_seqsigwit_mode),
@@ -2526,14 +2530,52 @@ impl TxTable {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (mut tx, outs, _) =
             decode_packed_tx_outs_with_spender_rels_secret(&raw, pair.n_out, Some(&self.secret))?;
+        self.outputs_decoded
+            .fetch_add(outs.len() as u64, std::sync::atomic::Ordering::Relaxed);
         tx.txid = self.txids.get(fk)?;
         self.overlay_stamped_n_in(fk, &mut tx)?;
         Ok((tx, outs))
     }
 
+    /// The outputs at `vouts` of one create, in ascending vout order: one
+    /// body read, and only those outputs decoded. The other outputs are
+    /// skipped by length, not materialized, through the end of the row, so
+    /// a row that does not decode as a whole is still corrupt here, even
+    /// when nothing is asked of it. A vout at or past the output count is
+    /// left out; a readable row with only such vouts reads as empty.
+    pub fn get_outputs_at(
+        &self,
+        fk: Fk,
+        vouts: &[u32],
+    ) -> Result<Vec<(u32, OutputRecord)>, StoreError> {
+        let pair = self
+            .create_loc_range_batch(&[fk])?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or(StoreError::NotFound)?;
+        let mut need: Vec<u32> = vouts.iter().copied().filter(|&v| v < pair.n_out).collect();
+        need.sort_unstable();
+        need.dedup();
+        let (_, live, _) = self.body.with_bytes_at(pair.txout.0, pair.txout.1, |raw| {
+            decode_packed_tx_outs_exact(raw, pair.n_out, &need, Some(&self.secret))
+        })?;
+        self.body_decodes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.outputs_decoded
+            .fetch_add(live.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(live)
+    }
+
     /// Sample-and-reset per-fk packed body decodes (instance stats).
     pub fn sample_reset_body_decodes(&self) -> u64 {
         self.body_decodes
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Sample-and-reset output records materialized (instance stats).
+    pub fn sample_reset_outputs_decoded(&self) -> u64 {
+        self.outputs_decoded
             .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 

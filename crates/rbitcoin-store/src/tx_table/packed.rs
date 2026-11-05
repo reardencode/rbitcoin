@@ -1097,13 +1097,38 @@ pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
     need_vouts: &[u32],
     secret: Option<&crate::store_secret::StoreSecret>,
 ) -> Result<super::SparseOutsRow, StoreError> {
+    // Empty need → all vouts (full materialize path without a second full decode).
+    decode_packed_outs(raw, n_out, need_vouts, need_vouts.is_empty(), secret, false)
+}
+
+/// Exactly `need_vouts` (sorted unique, possibly none) decoded; every other
+/// output is skipped by its own length rules through the trailing pad. A row
+/// a full decode rejects is `Corrupt` even when nothing is asked of it, so a
+/// prevout read past the output count cannot turn corruption into a miss.
+pub fn decode_packed_tx_outs_exact(
+    raw: &[u8],
+    n_out: u32,
+    need_vouts: &[u32],
+    secret: Option<&crate::store_secret::StoreSecret>,
+) -> Result<super::SparseOutsRow, StoreError> {
+    decode_packed_outs(raw, n_out, need_vouts, false, secret, true)
+}
+
+/// `take_all` decodes every output and ignores `need_vouts`; `through_end`
+/// keeps walking after the last needed output and checks the trailing pad.
+fn decode_packed_outs(
+    raw: &[u8],
+    n_out: u32,
+    need_vouts: &[u32],
+    take_all: bool,
+    secret: Option<&crate::store_secret::StoreSecret>,
+    through_end: bool,
+) -> Result<super::SparseOutsRow, StoreError> {
     let (mut meta, mut off) = TxRecord::decode_body_meta(raw)?;
     if n_out == 0 {
         return Err(StoreError::Corrupt("invariant: create n_out"));
     }
     meta.output_count = n_out;
-    // Empty need → all vouts (full materialize path without a second full decode).
-    let take_all = need_vouts.is_empty();
     let mut need_i = 0usize;
     let mut live = Vec::with_capacity(if take_all {
         n_out as usize
@@ -1126,7 +1151,7 @@ pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
             sparse.push((vout, rel));
             if !take_all {
                 need_i = need_i.saturating_add(1);
-                if need_i == need_vouts.len() {
+                if need_i == need_vouts.len() && !through_end {
                     return Ok((meta, live, sparse));
                 }
             }

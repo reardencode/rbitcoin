@@ -500,7 +500,11 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
             m.fetch_add(1, Ordering::Relaxed);
         }
         let tid = op.txid.to_byte_array();
-        let Some((fk, create_height, outs)) = self.query.connected_tx_outputs(&tid).ok().flatten()
+        let Some((fk, create_height, outs)) = self
+            .query
+            .connected_tx_outputs_at(&tid, &[op.vout])
+            .ok()
+            .flatten()
         else {
             return ChainPrevout::Unknown;
         };
@@ -515,7 +519,7 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
             Ok(false) => {}
             Err(_) => return ChainPrevout::KnownUnavailable,
         }
-        let Some(out) = outs.into_iter().nth(op.vout as usize) else {
+        let Some((_, out)) = outs.into_iter().next() else {
             return ChainPrevout::KnownUnavailable;
         };
         let value = Amount::from_sat(out.value);

@@ -5546,3 +5546,92 @@ fn review_trust_recent_reject_does_not_drop_session_tx() {
     let _ = std::fs::remove_dir_all(&mp_dir);
     let _ = std::fs::remove_dir_all(&store);
 }
+
+fn wide_parent_pad() -> (std::path::PathBuf, Arc<Query>, Transaction) {
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
+    let (store, q, cbs) = copy_maturity_pad(3);
+    let params = ChainParams::regtest();
+    let tip_h = q.tip_height().expect("tip").0;
+    let fk = q.tip_header_fk().unwrap().expect("tip header");
+    let rec = q.get_header(fk).unwrap();
+    let tip = bitcoin::BlockHash::from_byte_array(rec.hash);
+    let next = tip_h + 1;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let mut wide = spend_true(cbs[0], 1_000, spk.clone());
+    wide.output = (0..1_000u64)
+        .map(|i| TxOut {
+            value: Amount::from_sat(40_000 + i),
+            script_pubkey: spk.clone(),
+        })
+        .collect();
+    let b = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        rec.timestamp + 600,
+        next,
+        spk,
+        vec![wide.clone()],
+    );
+    accept_and_connect_block(&q, &params, Height(next), &b, Milestone::NONE).unwrap();
+    q.apply_sh_pending().unwrap();
+    (store, q, wide)
+}
+
+fn spend_wide(wide: &Transaction, vouts: &[u32]) -> Transaction {
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let total: u64 = vouts
+        .iter()
+        .map(|&v| wide.output[v as usize].value.to_sat())
+        .sum();
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vouts
+            .iter()
+            .map(|&v| TxIn {
+                previous_output: OutPoint {
+                    txid: wide.compute_txid(),
+                    vout: v,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(total - 1_000),
+            script_pubkey: spk,
+        }],
+    }
+}
+
+/// A coin lookup decodes the spent output only. The parent has 1,000
+/// outputs and the child spends vout 500; a whole-row decode counts 1,000
+/// per lookup.
+#[test]
+fn get_coin_decodes_only_the_spent_output_of_a_wide_parent() {
+    let (_store, q, wide) = wide_parent_pad();
+    let mp = tmp();
+    let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    let _ = hub.sample_reset_perf();
+    let child = spend_wide(&wide, &[500]);
+    let _ = q.store().txs.sample_reset_body_decodes();
+    let _ = q.store().txs.sample_reset_outputs_decoded();
+    hub.accept_tx(&child).expect("spend of vout 500");
+    assert_eq!(
+        hub.get_live_meta(&child.compute_txid()).map(|(fee, _)| fee),
+        Some(1_000)
+    );
+    let s = hub.sample_reset_perf();
+    assert!(s.get_coin >= 1);
+    assert_eq!(q.store().txs.sample_reset_body_decodes(), s.get_coin);
+    assert_eq!(
+        q.store().txs.sample_reset_outputs_decoded(),
+        s.get_coin,
+        "one output decoded per coin lookup"
+    );
+    drop(hub);
+    let _ = std::fs::remove_dir_all(mp);
+}

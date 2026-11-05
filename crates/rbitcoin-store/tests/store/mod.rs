@@ -2200,3 +2200,102 @@ fn split_roundtrip_create_fk_and_seqsigwit_range() {
     assert!(!hot.join("seqsigwit.body").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// One output of a wide transaction is read without decoding its siblings:
+/// one body read, and only the requested outputs materialized.
+#[test]
+fn get_tx_outputs_at_decodes_only_the_requested_outputs() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let outs: Vec<OutputRecord> = (0..1_000u64)
+        .map(|i| OutputRecord::unspent(i + 1, vec![0x51, (i % 251) as u8, (i / 251) as u8]))
+        .collect();
+    let fks = s
+        .put_tx_full_batch_indexed(&[coinbase_item([12u8; 32], outs)], true)
+        .unwrap();
+    let fk = fks[0];
+    let _ = s.txs.sample_reset_body_decodes();
+    let _ = s.txs.sample_reset_outputs_decoded();
+    let (_, all) = s.get_tx_meta_and_outputs(fk).unwrap();
+    assert_eq!(all.len(), 1_000);
+    assert_eq!(s.txs.sample_reset_outputs_decoded(), 1_000);
+    let _ = s.txs.sample_reset_body_decodes();
+    let got = s.get_tx_outputs_at(fk, &[997, 3]).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].0, 3);
+    assert_eq!(got[0].1.value, all[3].value);
+    assert_eq!(got[0].1.script, all[3].script);
+    assert_eq!(got[1].0, 997);
+    assert_eq!(got[1].1.value, all[997].value);
+    assert_eq!(got[1].1.script, all[997].script);
+    assert_eq!(
+        s.txs.sample_reset_outputs_decoded(),
+        2,
+        "two outputs decoded"
+    );
+    assert_eq!(s.txs.sample_reset_body_decodes(), 1, "one body read");
+    assert!(
+        s.get_tx_outputs_at(fk, &[1_000]).unwrap().is_empty(),
+        "a vout past the output count is left out"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A two-output row whose second output's kind byte says `OP_RETURN_PUSH`
+/// over a 256-byte payload: corrupt for a full decode.
+fn corrupt_sibling_row(dir: &Path) -> (Store, Fk) {
+    use rbitcoin_store::compact::SCRIPT_KIND_V17_OP_RETURN_PUSH;
+    let s = Store::create_tiny(dir).unwrap();
+    let outs = vec![
+        OutputRecord::unspent(7, vec![0x51]),
+        OutputRecord::unspent(9, vec![0x6a; 256]),
+    ];
+    let fk = s
+        .put_tx_full_batch_indexed(&[coinbase_item([13u8; 32], outs)], true)
+        .unwrap()[0];
+    assert_eq!(s.get_tx_outputs_at(fk, &[0]).unwrap().len(), 1);
+    let pair = s.txs.create_loc_range_batch(&[fk]).unwrap()[0].expect("loc");
+    let body = dir.join("txout.body");
+    let raw = std::fs::read(&body).unwrap();
+    let span = &raw[pair.txout.0 as usize..(pair.txout.0 + pair.txout.1) as usize];
+    let (_meta, meta_len) = TxRecord::decode_body_meta(span).unwrap();
+    let first_len = OutputRecord::skip_at(&span[meta_len..]).unwrap();
+    let flags_at = pair.txout.0 as usize + meta_len + first_len;
+    let flags = raw[flags_at];
+    let mut f = std::fs::OpenOptions::new().write(true).open(&body).unwrap();
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(flags_at as u64)).unwrap();
+    std::io::Write::write_all(&mut f, &[(flags & 0xf0) | SCRIPT_KIND_V17_OP_RETURN_PUSH]).unwrap();
+    drop(f);
+    assert!(
+        matches!(s.get_tx_meta_and_outputs(fk), Err(StoreError::Corrupt(_))),
+        "a full decode rejects the sibling"
+    );
+    (s, fk)
+}
+
+/// A read of one output still walks its siblings with the decoder's own
+/// length rules, so the corrupt sibling fails the row as a full decode does.
+#[test]
+fn get_tx_outputs_at_rejects_a_corrupt_sibling_output() {
+    let dir = tmp();
+    let (s, fk) = corrupt_sibling_row(&dir);
+    assert!(
+        matches!(s.get_tx_outputs_at(fk, &[0]), Err(StoreError::Corrupt(_))),
+        "the single-output read rejects the row too"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A read of only past-end vouts decodes nothing but still walks the row,
+/// so the corrupt sibling is `Corrupt`, not a clean empty miss that a
+/// prevout reader would turn into a sticky missing-input reject.
+#[test]
+fn get_tx_outputs_at_past_end_read_still_rejects_a_corrupt_row() {
+    let dir = tmp();
+    let (s, fk) = corrupt_sibling_row(&dir);
+    assert!(
+        matches!(s.get_tx_outputs_at(fk, &[2]), Err(StoreError::Corrupt(_))),
+        "a past-end read of a corrupt row is corrupt, not empty"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

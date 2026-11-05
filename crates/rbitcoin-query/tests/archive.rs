@@ -2033,3 +2033,142 @@ fn wire_edges_match_rejects_a_disagreeing_prevout() {
     assert!(!planned.is_coinbase);
     assert_eq!(planned.prev_index, u32::MAX);
 }
+
+/// A wire plan of one tx that spends `vouts` of a stored 1,000-output parent
+/// (output `v` holds `100 + v` sats) and pays one output of 1 sat. The
+/// parent's row is outside the plan, so its values come from the store.
+fn wide_parent_wire_plan(q: &Query, vouts: &[u32]) -> rbitcoin_query::ArchiveWritePlan {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Txid, Witness,
+    };
+    use rbitcoin_query::{ArchiveWritePlan, CreatePinInner, SpendEdge};
+
+    let parent_txid = [0x77u8; 32];
+    let outs: Vec<OutputRecord> = (0..1_000u64)
+        .map(|i| OutputRecord::unspent(100 + i, vec![0x51]))
+        .collect();
+    let parent = TxRecord {
+        txid: parent_txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1_000,
+    };
+    let pfk = q
+        .store()
+        .put_tx_full_batch_indexed(
+            &[(
+                parent,
+                vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+                outs,
+            )],
+            true,
+        )
+        .unwrap()[0];
+    let tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vouts
+            .iter()
+            .map(|&v| TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array(parent_txid),
+                    vout: v,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let txid = tx.compute_txid().to_byte_array();
+    let block = Arc::new(Block {
+        header: Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        },
+        txdata: vec![tx],
+    });
+    let pin = CreatePinInner::wire(
+        block,
+        0,
+        TxRecord {
+            txid,
+            version: 2,
+            locktime: 0,
+            input_count: vouts.len() as u32,
+            output_count: 1,
+        },
+    );
+    let fk = Fk(pfk.get().expect("parent fk") + 1);
+    let mut plan = ArchiveWritePlan::empty();
+    plan.packed = vec![(pin, Vec::new())];
+    plan.planned_fks = vec![fk];
+    plan.edges.insert(
+        fk.get().expect("fk"),
+        vouts
+            .iter()
+            .enumerate()
+            .map(|(vin, &v)| SpendEdge {
+                prev_txid: parent_txid,
+                vout: v,
+                spend_fk: fk,
+                create_fk: pfk,
+                vin: vin as u32,
+            })
+            .collect(),
+    );
+    plan
+}
+
+/// The fee stamp of a wire plan reads each store-backed parent once and
+/// decodes only the spent outputs: five spends of one 1,000-output parent
+/// cost one body read and five output decodes.
+#[test]
+fn wire_plan_fee_stamp_reads_each_parent_once_and_only_its_spent_outputs() {
+    let (_dir, q) = temp_query("txstat-wide-parent");
+    let vouts = [3u32, 7, 11, 500, 999];
+    let mut plan = wide_parent_wire_plan(&q, &vouts);
+    let _ = q.store().txs.sample_reset_body_decodes();
+    let _ = q.store().txs.sample_reset_outputs_decoded();
+    rbitcoin_query::archive::stamp_wire_plan_txstat(&q, &mut plan).expect("stamp");
+    let in_sum: u64 = vouts.iter().map(|&v| 100 + u64::from(v)).sum();
+    assert_eq!(plan.tx_fees, vec![in_sum - 1]);
+    assert_eq!(
+        q.store().txs.sample_reset_body_decodes(),
+        1,
+        "one body read for the parent"
+    );
+    assert_eq!(
+        q.store().txs.sample_reset_outputs_decoded(),
+        5,
+        "only the five spent outputs decoded"
+    );
+}
+
+/// A spend of a vout past the parent's output count is a missing output on
+/// a parent that read fine: `NotFound`, as the one-output read reports it,
+/// not a corruption claim about the store.
+#[test]
+fn wire_plan_fee_stamp_of_a_past_end_vout_is_not_found() {
+    let (_dir, q) = temp_query("txstat-past-end-vout");
+    let mut plan = wide_parent_wire_plan(&q, &[3, 1_000]);
+    let err = rbitcoin_query::archive::stamp_wire_plan_txstat(&q, &mut plan).unwrap_err();
+    assert!(
+        matches!(err, rbitcoin_store::error::StoreError::NotFound),
+        "a past-end vout is not found, not corrupt: {err}"
+    );
+}

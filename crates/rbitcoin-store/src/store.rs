@@ -857,12 +857,22 @@ impl Store {
         self.txs.get_full_span(first, last)
     }
 
-    /// Parent-prevout hot path: meta + outputs only (no input materialization).
+    /// Meta + every output of one create (no input materialization).
     pub fn get_tx_meta_and_outputs(
         &self,
         fk: Fk,
     ) -> Result<(TxRecord, Vec<OutputRecord>), StoreError> {
         self.txs.get_meta_and_outputs(fk)
+    }
+
+    /// Parent-prevout hot path: the outputs at `vouts` of one create, one
+    /// body read, only those outputs decoded ([`TxTable::get_outputs_at`]).
+    pub fn get_tx_outputs_at(
+        &self,
+        fk: Fk,
+        vouts: &[u32],
+    ) -> Result<Vec<(u32, OutputRecord)>, StoreError> {
+        self.txs.get_outputs_at(fk, vouts)
     }
 
     /// Page-grouped `txid.body` identity for scattered create fks.

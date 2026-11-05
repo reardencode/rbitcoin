@@ -2242,10 +2242,11 @@ fn spending_an_unspendable_output_is_missing_prevout() {
         .expect("creating an unspendable output still connects");
     let cb_txid = created.txdata[0].compute_txid();
     let stored = q
-        .connected_tx_outputs(&cb_txid.to_byte_array())
+        .connected_tx_outputs_at(&cb_txid.to_byte_array(), &[1])
         .unwrap()
         .expect("the create stays in the archive");
-    assert_eq!(stored.2[1].script, op_return);
+    assert_eq!(stored.2[0].0, 1);
+    assert_eq!(stored.2[0].1.script, op_return);
     assert!(!q.is_outpoint_spent(&cb_txid.to_byte_array(), 1).unwrap());
 
     let maturity = params.coinbase_maturity();

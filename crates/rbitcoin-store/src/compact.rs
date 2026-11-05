@@ -341,6 +341,9 @@ pub fn script_kind_v17_disk_used(kind: u8, buf: &[u8]) -> Result<usize, StoreErr
         }
         SCRIPT_KIND_V17_RAW | SCRIPT_KIND_V17_OP_RETURN_PUSH => {
             let (slen, n) = read_compact_size(buf)?;
+            if kind == SCRIPT_KIND_V17_OP_RETURN_PUSH && !(1..=255).contains(&slen) {
+                return Err(StoreError::Corrupt("v17 OP_RETURN push length"));
+            }
             if !span_fits(buf.len(), n, slen) {
                 return Err(StoreError::Corrupt("v17 script payload truncated"));
             }
