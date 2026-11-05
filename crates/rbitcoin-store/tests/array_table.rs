@@ -83,8 +83,22 @@ fn fd_only_append_publishes_values_and_zero_gap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `RBITCOIN_CLASS_C_INRAM_MAX_MB` is not a cap. Nothing else reads it, so
+/// this write is only the pin that the env path stayed gone.
+#[test]
+fn class_c_cap_env_does_not_change_the_default() {
+    let prev = std::env::var_os("RBITCOIN_CLASS_C_INRAM_MAX_MB");
+    std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", "0");
+    let seen = class_c_inram_max_bytes();
+    match prev {
+        Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
+        None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
+    }
+    assert_eq!(seen, DEFAULT_CLASS_C_INRAM_MAX_BYTES);
+}
+
 /// A cap installed on one thread must not change `class_c_inram_max_bytes`
-/// on another. Process env fails this: both threads see the same variable.
+/// on another.
 #[test]
 fn class_c_cap_on_one_thread_leaves_the_other_at_default() {
     use std::sync::mpsc;
@@ -594,7 +608,7 @@ fn append_only_flush_extends_without_losing_prefix() {
 }
 
 #[test]
-fn contiguous_image_flush_async_and_env_cap() {
+fn contiguous_image_flush_async() {
     let path = tmp_path();
     let _ = std::fs::remove_file(&path);
     let t = ArrayTable::create(&path, TableKind::Confirmed).unwrap();
@@ -615,19 +629,6 @@ fn contiguous_image_flush_async_and_env_cap() {
     t.flush().unwrap();
     assert_eq!(t.len(), 0);
     drop(t);
-
-    assert_eq!(
-        class_c_inram_cap_from_mb_str(None),
-        DEFAULT_CLASS_C_INRAM_MAX_BYTES
-    );
-    assert_eq!(
-        class_c_inram_cap_from_mb_str(Some("128")),
-        128 * 1024 * 1024
-    );
-    assert_eq!(
-        class_c_inram_cap_from_mb_str(Some("not-a-number")),
-        256 * 1024 * 1024
-    );
     let _ = std::fs::remove_file(&path);
 }
 

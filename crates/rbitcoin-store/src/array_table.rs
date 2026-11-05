@@ -139,8 +139,8 @@ thread_local! {
     static TEST_CLASS_C_INRAM_MAX: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-/// Run `f` with a per-thread Class C cap in bytes. Other threads keep the
-/// process default. The node still reads `RBITCOIN_CLASS_C_INRAM_MAX_MB`.
+/// Run `f` with a per-thread Class C cap in bytes. Other threads keep
+/// [`DEFAULT_CLASS_C_INRAM_MAX_BYTES`]. There is no process env for this.
 pub fn with_class_c_inram_max_bytes<R>(bytes: u64, f: impl FnOnce() -> R) -> R {
     TEST_CLASS_C_INRAM_MAX.with(|c| {
         let prev = c.replace(Some(bytes));
@@ -157,28 +157,14 @@ impl Drop for CapRestore<'_> {
     }
 }
 
-/// MiB string from `RBITCOIN_CLASS_C_INRAM_MAX_MB`. Unset or unparseable → 256 MiB.
-#[doc(hidden)]
-pub fn class_c_inram_cap_from_mb_str(raw: Option<&str>) -> u64 {
-    match raw {
-        Some(s) => {
-            let mb: u64 = s.trim().parse().unwrap_or(256);
-            mb.saturating_mul(1024 * 1024)
-        }
-        None => DEFAULT_CLASS_C_INRAM_MAX_BYTES,
-    }
-}
-
 /// Cap for loading Class C arrays into process RAM.
 ///
-/// A thread override wins. Otherwise env `RBITCOIN_CLASS_C_INRAM_MAX_MB`
-/// (integer MiB). Unset → 256 MiB.
+/// A thread override ([`with_class_c_inram_max_bytes`]) wins. Otherwise
+/// [`DEFAULT_CLASS_C_INRAM_MAX_BYTES`].
 pub fn class_c_inram_max_bytes() -> u64 {
-    if let Some(n) = TEST_CLASS_C_INRAM_MAX.with(Cell::get) {
-        return n;
-    }
-    let raw = std::env::var("RBITCOIN_CLASS_C_INRAM_MAX_MB").ok();
-    class_c_inram_cap_from_mb_str(raw.as_deref())
+    TEST_CLASS_C_INRAM_MAX
+        .with(Cell::get)
+        .unwrap_or(DEFAULT_CLASS_C_INRAM_MAX_BYTES)
 }
 
 /// Copy `dst.len()` bytes from packed words at byte `start`.

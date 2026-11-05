@@ -130,7 +130,7 @@ catalogs, or 16-layout Class A with creates is **refused**.
 | Policy | Choice |
 |--------|--------|
 | Loc | One loc pair per create; `seqsigwit` is the fat stem (cold) and does not force `txout` splits. `tx.head` rolls at OA 80% slots only. |
-| `strong_tx` | Always L2. `RBITCOIN_CLASS_C_INRAM_MAX_MB` (default 256) still caps **`confirmed`** and **`header_txs_*`** only. |
+| `strong_tx` | Always L2. **`confirmed`** and **`header_txs_*`** stay in RAM up to 256 MiB, then fd. |
 | `RWF_DONTCACHE` | **Not used.** Annotate pwrites hit `spent.body` only; evicting those pages does not protect `txout`, and the next block wants the same spent pages. |
 
 ### New script kinds without a wipe
@@ -860,8 +860,8 @@ Dense u64 array: index = height → header_fk. Length = tip_height + 1 when non-
 
 Bitset: bit `(tx_fk − 1)` set ⇒ tx is strong on the best chain.
 
-Always **L2** (full `Vec` in process), even when `RBITCOIN_CLASS_C_INRAM_MAX_MB`
-demotes `confirmed` / `header_txs_*`. One bit per create; confirm/reorg/Electrum
+Always **L2** (full `Vec` in process), even when `confirmed` / `header_txs_*`
+fall back to fd past 256 MiB. One bit per create; confirm/reorg/Electrum
 must not pread the bitset.
 
 ### Create height (schema 16: RAM fence, no `tx_height.body`)
