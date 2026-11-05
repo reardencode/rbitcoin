@@ -159,6 +159,17 @@ pub fn dust_vouts(tx: &Transaction) -> impl Iterator<Item = u32> + '_ {
         .map(|(i, _)| i as u32)
 }
 
+/// Whether `child` spends one of `parent`'s dust outputs.
+pub fn spends_dust_of(parent: &Transaction, child: &Transaction) -> bool {
+    let txid = parent.compute_txid();
+    dust_vouts(parent).any(|vout| {
+        child
+            .input
+            .iter()
+            .any(|i| i.previous_output.txid == txid && i.previous_output.vout == vout)
+    })
+}
+
 /// Libre admission for a single tx given fee and weight (no dust limit, no template ban).
 ///
 /// Callers still enforce consensus, cluster limits, and DoS caps separately.

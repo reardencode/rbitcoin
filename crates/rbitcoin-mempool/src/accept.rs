@@ -2089,6 +2089,23 @@ impl ActiveMempool {
         Ok(accepted)
     }
 
+    /// Lift the one parked orphan that waits only on `parent` and spends its
+    /// dust output, so it can be admitted with `parent` as 1p1c (Core finds
+    /// the orphan child of a reconsiderable parent the same way).
+    pub fn lift_dust_spender(&mut self, parent: &Transaction) -> Option<LiftedOrphan> {
+        let pid = parent.compute_txid();
+        let child = self
+            .orphanage
+            .by_parent
+            .get(&pid)?
+            .iter()
+            .filter_map(|id| self.orphanage.by_txid.get(id))
+            .find(|e| e.missing.len() == 1 && policy::spends_dust_of(parent, &e.tx))?
+            .tx
+            .clone();
+        self.lift_parked_member(&child)
+    }
+
     /// Take `tx` out of the orphanage so a package can admit it.
     ///
     /// `prepare_admit` and `plan_after_script` both refuse a tx that is
