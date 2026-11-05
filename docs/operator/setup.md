@@ -7,8 +7,9 @@ Electrum confirmed + unconfirmed (TLS via reverse proxy). Mainnet is safe to
 run. A consensus split is vanishingly unlikely. The runbook is
 [`mainnet.md`](mainnet.md). **1.0** is the release planned for further
 hardening, a support window, and signed binaries. Default mainnet milestone
-is block **840000**
-(`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`): script
+is block **966143**
+(`00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3`,
+Bitcoin Core 32.1 `defaultAssumeValid`): script
 and signature checks skip only when that hash and the block being connected
 are the header-path occupants at their heights. Explicit `--milestone HEIGHT`
 is height-only. `--milestone 0` checks every script. Signet and testnet4

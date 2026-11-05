@@ -457,25 +457,26 @@ pub fn block_hash_from_display_hex(hex: &str) -> BlockHash {
     hex.parse().expect("block hash hex")
 }
 
-/// Mainnet assumeutxo block at height 840_000 (Core `kernel/chainparams.cpp`,
-/// display order). The default milestone hash, not Core's later assumevalid.
+/// Mainnet block at height 966_143 (Core v32.1 `defaultAssumeValid`,
+/// display order). The default milestone hash. The skip is still the two
+/// height lookups, not Core's assumevalid predicate.
 pub const MAINNET_MILESTONE_HASH: &str =
-    "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
+    "00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3";
 
-/// Core mainnet `nMinimumChainWork` (display hex, big-endian). Refresh at release.
+/// Core v32.1 mainnet `nMinimumChainWork` (display hex, big-endian).
 pub const MAINNET_MIN_CHAIN_WORK: &str =
     "000000000000000000000000000000000000000145ec036acc5ba740052af1a0";
 
-/// Testnet3 assumeutxo block at height 2_500_000 (Core `kernel/chainparams.cpp`,
+/// Testnet3 block at height 5_128_859 (Core v32.1 `defaultAssumeValid`,
 /// display order). Same role as [`MAINNET_MILESTONE_HASH`].
 pub const TESTNET_MILESTONE_HASH: &str =
-    "0000000000000093bcb68c03a9a168ae252572d348a2eaeba2cdf9231d73206f";
+    "00000000b318a3703d14a844c55ef507f4c2fc8f8766e24271fd43c180c51637";
 
-/// Core testnet3 `nMinimumChainWork` (display hex, big-endian).
+/// Core v32.1 testnet3 `nMinimumChainWork` (display hex, big-endian).
 pub const TESTNET_MIN_CHAIN_WORK: &str =
     "0000000000000000000000000000000000000000000017f49f702147f10c0eb6";
 
-/// Core testnet4 `nMinimumChainWork` (display hex, big-endian), from the
+/// Core v32.1 testnet4 `nMinimumChainWork` (display hex, big-endian), from the
 /// same `chainparams.cpp` as the mainnet and testnet3 floors.
 pub const TESTNET4_MIN_CHAIN_WORK: &str =
     "000000000000000000000000000000000000000000000e346a558455ade8eca9";
@@ -483,14 +484,14 @@ pub const TESTNET4_MIN_CHAIN_WORK: &str =
 /// Default IBD milestone height. `0` means full script validation.
 ///
 /// Signet and testnet4 are 0 on purpose: their IBD runs every script (slower than a
-/// height skip; that is the dress rehearsal). Mainnet (840_000) and testnet3
-/// (2_500_000) defaults are paired with [`default_milestone_anchor`].
+/// height skip; that is the dress rehearsal). Mainnet (966_143) and testnet3
+/// (5_128_859) defaults are paired with [`default_milestone_anchor`].
 /// Operators still override with `--milestone HEIGHT` (height-only) or
 /// `--milestone 0`.
 pub fn default_milestone_height(network: rbitcoin_primitives::Network) -> u32 {
     match network {
-        rbitcoin_primitives::Network::Mainnet => 840_000,
-        rbitcoin_primitives::Network::Testnet => 2_500_000,
+        rbitcoin_primitives::Network::Mainnet => 966_143,
+        rbitcoin_primitives::Network::Testnet => 5_128_859,
         rbitcoin_primitives::Network::Signet
         | rbitcoin_primitives::Network::Testnet4
         | rbitcoin_primitives::Network::Regtest => 0,

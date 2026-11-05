@@ -15,8 +15,9 @@ consensus/script** path.
 > split is vanishingly unlikely. **1.0** is where further hardening, a
 > support window, and signed release binaries are planned.
 >
-> The default mainnet milestone is block **840000**
-> (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`).
+> The default mainnet milestone is block **966143**
+> (`00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3`),
+> Bitcoin Core 32.1’s `defaultAssumeValid` block.
 > Script and signature checks skip only when that hash and the block being
 > connected are the header-path occupants at their heights. Stored minimum
 > chain work is not that gate. `--milestone 0` checks every script. An

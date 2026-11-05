@@ -89,13 +89,57 @@ fn is_bip30_repeat_matches_core() {
     assert!(!ChainParams::signet().bip30_exception_height(91_842));
 }
 
+/// Bitcoin Core v32.1 `kernel/chainparams.cpp`: `defaultAssumeValid` blocks
+/// and `nMinimumChainWork` (display hex).
 #[test]
-fn mainnet_min_chain_work_is_core_n_minimum_chain_work() {
-    let work = default_min_chain_work_be(rbitcoin_primitives::Network::Mainnet).unwrap();
+fn defaults_match_core_32_assumevalid_and_min_chain_work() {
+    use rbitcoin_primitives::Network;
+
+    assert_eq!(default_milestone_height(Network::Mainnet), 966_143);
+    assert_eq!(
+        default_milestone_anchor(Network::Mainnet).unwrap().hash,
+        block_hash_from_display_hex(
+            "00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3",
+        )
+    );
+    assert_eq!(default_milestone_height(Network::Testnet), 5_128_859);
+    assert_eq!(
+        default_milestone_anchor(Network::Testnet).unwrap().hash,
+        block_hash_from_display_hex(
+            "00000000b318a3703d14a844c55ef507f4c2fc8f8766e24271fd43c180c51637",
+        )
+    );
+    assert_eq!(default_milestone_height(Network::Signet), 0);
+    assert!(default_milestone_anchor(Network::Signet).is_none());
+    assert_eq!(default_milestone_height(Network::Testnet4), 0);
+    assert!(default_milestone_anchor(Network::Testnet4).is_none());
+    assert!(default_min_chain_work_be(Network::Signet).is_none());
+
+    assert_eq!(
+        MAINNET_MIN_CHAIN_WORK,
+        "000000000000000000000000000000000000000145ec036acc5ba740052af1a0"
+    );
+    assert_eq!(
+        TESTNET_MIN_CHAIN_WORK,
+        "0000000000000000000000000000000000000000000017f49f702147f10c0eb6"
+    );
+    assert_eq!(
+        TESTNET4_MIN_CHAIN_WORK,
+        "000000000000000000000000000000000000000000000e346a558455ade8eca9"
+    );
+    let work = default_min_chain_work_be(Network::Mainnet).unwrap();
     assert_eq!(work, min_work_from_display_hex(MAINNET_MIN_CHAIN_WORK));
     assert!(
         work.iter().any(|b| *b != 0),
         "minimum chain work must not be zero"
+    );
+    assert_eq!(
+        default_min_chain_work_be(Network::Testnet),
+        Some(min_work_from_display_hex(TESTNET_MIN_CHAIN_WORK))
+    );
+    assert_eq!(
+        default_min_chain_work_be(Network::Testnet4),
+        Some(min_work_from_display_hex(TESTNET4_MIN_CHAIN_WORK))
     );
 }
 

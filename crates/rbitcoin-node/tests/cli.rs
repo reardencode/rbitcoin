@@ -320,7 +320,7 @@ fn operator_conf_and_argv() {
     assert_eq!(signet.milestone_height, 0);
     assert!(!signet.milestone().skips_scripts_at(1));
     let testnet = ready_config(["rbitcoin-node", "--network=testnet"]);
-    assert_eq!(testnet.milestone_height, 2_500_000);
+    assert_eq!(testnet.milestone_height, 5_128_859);
     assert!(testnet.milestone().anchor.is_some());
     assert!(
         !testnet.milestone().skips_scripts_at(1),
@@ -649,19 +649,19 @@ fn max_sh_creates_and_esplora_block_template_cli_hyphens() {
 
 include!("overlay_config_journey.rs");
 
-/// Testnet3 default milestone: Core's assumeutxo block at 2_500_000 and
-/// Core `CTestNetParams` `nMinimumChainWork`, like mainnet's 840_000.
+/// Testnet3 default milestone: Core v32.1 `defaultAssumeValid` at 5_128_859
+/// and Core `CTestNetParams` `nMinimumChainWork`, like mainnet's 966_143.
 #[test]
 fn testnet3_default_milestone_is_anchored() {
     use bitcoin::hashes::Hash;
     let cfg = ready_config(["rbitcoin-node", "--network", "testnet"]);
     assert_eq!(cfg.network, Network::Testnet);
     let m = cfg.milestone();
-    assert_eq!(m.height, 2_500_000);
+    assert_eq!(m.height, 5_128_859);
     let anchor = m.anchor.expect("testnet3 default milestone is anchored");
     assert_eq!(
         anchor.hash.to_string(),
-        "0000000000000093bcb68c03a9a168ae252572d348a2eaeba2cdf9231d73206f"
+        "00000000b318a3703d14a844c55ef507f4c2fc8f8766e24271fd43c180c51637"
     );
     let mut min_work = [0u8; 32];
     min_work[22..].copy_from_slice(&[0x17, 0xf4, 0x9f, 0x70, 0x21, 0x47, 0xf1, 0x0c, 0x0e, 0xb6]);
@@ -671,14 +671,14 @@ fn testnet3_default_milestone_is_anchored() {
     below[31] -= 1;
     assert!(!cfg.meets_minimum_chain_work(below));
 
-    // A chain without the anchor at 2_500_000 runs scripts at any height.
+    // A chain without the anchor at 5_128_859 runs scripts at any height.
     let block = [0x22u8; 32];
     let other_chain = |h: u32| (h == 100).then_some(block).or(Some([0x33; 32]));
     assert!(!m.skips_scripts_at(100));
     assert!(!m.skips_scripts(100, &block, other_chain));
     let anchored = |h: u32| match h {
         100 => Some(block),
-        2_500_000 => Some(anchor.hash.to_byte_array()),
+        5_128_859 => Some(anchor.hash.to_byte_array()),
         _ => None,
     };
     assert!(

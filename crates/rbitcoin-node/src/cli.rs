@@ -1,8 +1,12 @@
 use crate::config::{ConfApply, NodeConfig, NodeEnv};
 use crate::inhibit::SuspendInhibit;
 use crate::run::{run_node, run_p2p};
-use rbitcoin_consensus::{default_milestone_height, default_min_chain_work_be};
+use rbitcoin_consensus::{
+    default_milestone_height, default_min_chain_work_be, MAINNET_MILESTONE_HASH,
+    TESTNET_MILESTONE_HASH,
+};
 use rbitcoin_log::{self, error, info, warn, Level};
+use rbitcoin_primitives::Network;
 use rbitcoin_store::HeadScale;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -363,9 +367,9 @@ Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG 
 API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also TRACE `api:`).\n\
 Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {{datadir}}/ip_asn.dat.\n\
 Milestone: skip script/sig checks at/below HEIGHT.\n\
-  Defaults: mainnet 840000 anchored to block 0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5,\n\
-  testnet 2500000 anchored to block 0000000000000093bcb68c03a9a168ae252572d348a2eaeba2cdf9231d73206f\n\
-  (skip only on that header path, and only when header work meets that network's min chain work),\n\
+  Defaults: mainnet {main_height} anchored to block {MAINNET_MILESTONE_HASH},\n\
+  testnet {testnet_height} anchored to block {TESTNET_MILESTONE_HASH}\n\
+  (skip only on that header path; chain work is not the script gate),\n\
   signet 0, testnet4 0 (testnet4 still ships Core's min chain work), regtest 0.\n\
   Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
 Check-blocks: --check-blocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
@@ -429,7 +433,9 @@ Conf: --conf FILE (snake_case key=value; CLI kebab overrides conf). See OPERATOR
 Advanced debug/IO knobs remain RBITCOIN_* env (not required for normal sync; preserved if CLI omits).\n\
 IBD densify: up to 1024 concurrent getdata, max 16 in transit per peer.\n\
   Relay / RPC initialblockdownload after catch-up: --min-chain-work + --max-tip-age (24h).",
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        main_height = default_milestone_height(Network::Mainnet),
+        testnet_height = default_milestone_height(Network::Testnet),
     )
 }
 
