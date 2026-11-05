@@ -27,7 +27,7 @@ Homes that must match on a ship commit: `Cargo.toml`
 `## [X.Y.Z]` with a **`### Highlights`** subsection (1–10 bullets,
 operator-facing, then the thanks paragraph when this release has one).
 `./scripts/release-gate.sh` checks the bullets. Narrative banners
-(README, SECURITY, `docs/experimental-mainnet.md`)
+(README, SECURITY, `docs/operator/mainnet.md`)
 are edited on the same bump PR; the scripts do not rewrite them.
 
 `./scripts/release-cut.sh` folds [`changelog.d/`](../changelog.d/) into

@@ -10,30 +10,32 @@ in-process **Electrum + optional Esplora REST** (scripthash index via
 around a **relational archive (Class A/B/C)** and a **pure-Rust
 consensus/script** path.
 
-> **0.8.99** is the in-tree version (pre-**0.9.0**). Last published GitHub
-> Release tag is **0.8.0** (patch line **`v0.8.x`**: Linux musl + Windows
-> CRT-static + Darwin aarch64). Occupied **0.6.x** stores **refuse** — wipe
-> the datadir and redo IBD.
-> Schema **24 and 25** open in place and rewrite to **26**.
-> **Not 1.0:** schema can still refuse a named wipe ([`SCHEMA.md`](./SCHEMA.md),
-> [`OPERATOR.md`](./OPERATOR.md));
-> default mainnet **`--milestone` is block 840000**
-> (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`):
-> script/sig checks skip only on that header path once it contains that
-> hash and the block is the path hash at its height (`--milestone 0` is
-> full scripts; an explicit height is height-only). Signet’s default
-> milestone is **0** (every script).
-> Electrum/Esplora need **`--sh-index`**
-> (default off) after tip. Run **signet first**, then mainnet with monitoring.
-> Report security issues privately: [`SECURITY.md`](./SECURITY.md). Runbook:
-> [`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
+> **0.8.99** is the in-tree version (pre-**0.9.0**). The last published
+> GitHub Release is **0.8.0**. Mainnet is the network to run. A consensus
+> split is vanishingly unlikely. **1.0** is where further hardening, a
+> support window, and signed release binaries are planned.
+>
+> The default mainnet milestone is block **840000**
+> (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`).
+> Script and signature checks skip only when that hash and the block being
+> connected are the header-path occupants at their heights. Stored minimum
+> chain work is not that gate. `--milestone 0` checks every script. An
+> explicit height skips by height alone. Signet and testnet4 check every
+> script by default.
+>
+> Occupied **0.6.x** stores refuse: wipe the datadir and sync again.
+> Schema **24 and 25** open in place and rewrite to **26**. A published
+> **0.8** directory is already schema 26. Electrum and Esplora need
+> **`--sh-index`** (default off) for address history. Report security
+> issues privately: [`SECURITY.md`](./SECURITY.md). Runbook:
+> [`docs/operator/mainnet.md`](./docs/operator/mainnet.md).
 
 | | |
 |--|--|
 | **License** | MIT OR Apache-2.0 ([`LICENSE-MIT`](./LICENSE-MIT), [`LICENSE-APACHE`](./LICENSE-APACHE)) |
 | **Version** | **0.8.99** (pre-0.9.0) — [`CHANGELOG.md`](./CHANGELOG.md) |
-| **Platform** | **Linux musl** is the operator path. Windows / Darwin are published snapshots (no IoRing; Darwin not notarized) |
-| **Security** | [`SECURITY.md`](./SECURITY.md) — **0.8.x** supported published line; no LTS until 1.0 |
+| **Platform** | **Linux musl** (x86_64, and aarch64 from 0.9) is the operator path. The container image ships with 0.9. Windows / Darwin are published snapshots (no IoRing; Darwin not notarized) |
+| **Security** | [`SECURITY.md`](./SECURITY.md) — **0.8.x** supported published line; support window and signed binaries are 1.0 |
 | **Design** | [`docs/architecture.md`](./docs/architecture.md) — why this node is different |
 | **Develop** | rustup 1.95, no Nix — [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
 | **Coverage** | Live production-file LCOV (badge; last green `master` `coverage` job). Every PR **must not drop** that ratio. Highest published line coverage among bitcoin full nodes — [`TESTING.md`](./TESTING.md) |
@@ -59,14 +61,12 @@ Product surface: [`COMPAT.md`](./COMPAT.md). RPC subset: [`docs/rpc.md`](./docs/
 
 Core pipelines exist (store, consensus, P2P IBD, tip follow, scripthash,
 Electrum, Esplora REST, libre mempool) for the **server-side / wallet-client
-backend** role. **0.7 mainnet** is early production / high-scrutiny — not a
-Core or Fulcrum replacement, not a soak badge. Run **signet first**, then
-mainnet with monitoring ([`OPERATOR.md`](./OPERATOR.md)). First hour on
-regtest (mine → Electrum → Esplora): [`docs/operator/operations.md`](./docs/operator/operations.md#first-hour-regtest).
-Finishing any one operator’s first full mainnet sync is **not** a gate for
-using or packaging this tree. Ongoing test growth is
-[`docs/quality.md`](./docs/quality.md). A 1.0 tag waits on a support window
-in [`SECURITY.md`](./SECURITY.md).
+backend** role. Mainnet is that job. It is not a full Core RPC clone and
+not Fulcrum. First hour on regtest (mine → Electrum → Esplora):
+[`docs/operator/operations.md`](./docs/operator/operations.md#first-hour-regtest).
+The mainnet runbook is [`docs/operator/mainnet.md`](./docs/operator/mainnet.md).
+Ongoing test growth is [`docs/quality.md`](./docs/quality.md). A 1.0 tag
+is the support window and signed binaries in [`SECURITY.md`](./SECURITY.md).
 
 **0.8:** drop-in for **mempool/electrs or Blockstream electrs HTTP** (not
 address-prefix, not their `/api/v1/` Node process). Core RPC for that stack
@@ -77,8 +77,8 @@ surface: [`COMPAT.md`](./COMPAT.md).
 **Authorship:** first-party code is **AI-written** (Grok / xAI) under
 **Brandon Black** ([@reardencode](https://github.com/reardencode)) prompting —
 details in [`SECURITY.md`](./SECURITY.md). Default milestone and script skip:
-[`OPERATOR.md`](./OPERATOR.md). Signet lab:
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
+[`docs/operator/mainnet.md`](./docs/operator/mainnet.md). Signet and a
+constrained host: [`docs/operator/field-notes.md`](./docs/operator/field-notes.md).
 
 ## Build
 
@@ -102,8 +102,8 @@ Actions run workspace/coverage gates — [`AGENTS.md`](./AGENTS.md).
 
 Pinned **nixpkgs + Cargo.lock** musl static binaries. Commands and
 byte-identity: [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
-Day-to-day flags: [`OPERATOR.md`](./OPERATOR.md). Experimental mainnet:
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
+Day-to-day flags: [`OPERATOR.md`](./OPERATOR.md). Mainnet:
+[`docs/operator/mainnet.md`](./docs/operator/mainnet.md).
 
 Do **not** use `cargo build --release` inside `nix-shell` / `nix develop` as the
 operator binary — that links against the Nix store glibc and fails outside the

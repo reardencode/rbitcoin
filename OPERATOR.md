@@ -12,5 +12,5 @@ Start with the task you need to do:
 | Run signet/mainnet, or tune a constrained host or uplink | [Labs and constrained hosts](docs/operator/field-notes.md) |
 
 Product compatibility: [`COMPAT.md`](COMPAT.md). Current on-disk format and
-migration rules: [`SCHEMA.md`](SCHEMA.md). Experimental mainnet runbook:
-[`docs/experimental-mainnet.md`](docs/experimental-mainnet.md).
+migration rules: [`SCHEMA.md`](SCHEMA.md). Mainnet runbook:
+[`docs/operator/mainnet.md`](docs/operator/mainnet.md).

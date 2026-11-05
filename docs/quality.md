@@ -55,7 +55,7 @@ at an explicit rank with **Q-63+**.
 | **Q-25** | crates.io package metadata | Distro is `nix build .#rbitcoin-musl` |
 | **Q-32** | Structured logging option | INFO/DEBUG text is the operator contract |
 | **Q-33** | Published rustdoc site | `cargo doc` locally; no docs.rs until crates.io |
-| **Q-35** | Mainnet soak program | Signet first, then mainnet with monitoring. No badge |
+| **Q-35** | Mainnet soak program | No soak badge. Mainnet is the network to run. 1.0 is the support window |
 | **—** | Darwin notarization | Ad-hoc `codesign -s -` only |
 | **—** | Leftover maps as `txid → Vec<Fk>` | [`errata.md`](./errata.md): only if a mainnet miss is shown |
 | **X-M3** | Esplora unbounded process `sh_join` LRU | Last-1 GET + last-bulk POST (16 MiB/client) shipped. Sticky joins stay Electrum TCP |

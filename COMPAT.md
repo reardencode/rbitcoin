@@ -5,9 +5,10 @@ Pinned reference version: **Bitcoin Core v32.1** (same pin as
 BIP324 v2 interop. Package wire tracks BIP331 when rust-bitcoin exposes the
 messages (**Q-48** / RB-007).
 
-**Experimental 0.x** — not a production Core or Fulcrum replacement. Design
-contrasts: [`docs/architecture.md`](./docs/architecture.md). Lab mainnet:
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
+**0.x** is not a full Bitcoin Core RPC clone and not Fulcrum. A consensus
+split on mainnet is vanishingly unlikely. Design contrasts:
+[`docs/architecture.md`](./docs/architecture.md). The runbook is
+[`docs/operator/mainnet.md`](./docs/operator/mainnet.md).
 
 A Core, Electrum, or Esplora difference that looks like a bug is often
 **intentional**. Read this file before changing shipped behavior. Name the
