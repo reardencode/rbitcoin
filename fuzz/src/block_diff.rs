@@ -1560,7 +1560,8 @@ pub fn compare_fork_n_one(
         side_branch.push(nxt);
     }
     if side_branch.len() > 1 {
-        match hub.accept_branch(&side_branch) {
+        let shared: Vec<Arc<Block>> = side_branch.iter().cloned().map(Arc::new).collect();
+        match hub.accept_branch(&shared) {
             Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
             Ok(AcceptOutcome::IgnoredWeaker)
                 if hub.tip_hash() == Some(side_branch.last().unwrap().block_hash()) => {}

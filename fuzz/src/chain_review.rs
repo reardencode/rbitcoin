@@ -20,6 +20,7 @@ use rbitcoin_consensus::{
 use rbitcoin_net::{AcceptOutcome, ChainHub, NetError};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::confirm_scripts_phase;
+use std::sync::Arc;
 
 use crate::block_diff::{BlockOracle, BlockStanding, OracleReply};
 
@@ -590,7 +591,10 @@ fn plan_reorg_respend() -> Result<Vec<PlannedSubmit>, String> {
         fork_a.header.time + REGTEST_BLOCK_SPACING,
         102,
     );
-    match session.hub.accept_branch(&[fork_a.clone(), fork_b.clone()]) {
+    match session
+        .hub
+        .accept_branch(&[Arc::new(fork_a.clone()), Arc::new(fork_b.clone())])
+    {
         Ok(AcceptOutcome::Accepted { .. }) => {}
         Ok(other) => return Err(format!("reorg did not connect: {other:?}")),
         Err(e) => return Err(format!("reorg: {e}")),
