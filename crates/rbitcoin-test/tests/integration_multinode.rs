@@ -1302,13 +1302,6 @@ async fn p2p_compact_hb_getblocktxn_and_orphan() {
             },
         )
         .await;
-        let getdata_parked = seed
-            .peers
-            .snapshot()
-            .into_iter()
-            .find(|p| p.inbound)
-            .map(|p| p.bytesrecv_per_msg.get("getdata").copied().unwrap_or(0))
-            .unwrap_or(0);
         wait_ms_until(
             3_000,
             || {
@@ -1329,20 +1322,9 @@ async fn p2p_compact_hb_getblocktxn_and_orphan() {
             },
         )
         .await;
-        wait_ms_until(
-            3_000,
-            || {
-                seed.peers
-                    .snapshot()
-                    .into_iter()
-                    .find(|p| p.inbound)
-                    .map(|p| p.bytesrecv_per_msg.get("getdata").copied().unwrap_or(0))
-                    .unwrap_or(0)
-                    > getdata_parked
-            },
-            || "INV of orphanage txid must GetData (same-txid different witness)".to_string(),
-        )
-        .await;
+        // The peer negotiated wtxid-relay, so the txid half of this inv is
+        // ignored. The wtxid is the orphan already parked, so it is not
+        // fetched again.
 
         wait_ms_until(
             3_000,

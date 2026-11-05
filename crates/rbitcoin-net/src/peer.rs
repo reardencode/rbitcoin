@@ -4821,6 +4821,13 @@ pub fn on_inv(
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(txid.to_string());
                 }
+                // A wtxid-relay peer announces by wtxid. Ignoring only a txid
+                // we already have, and fetching one we lack, is the same
+                // answer as a node that already has the tx. The inv is still
+                // noted so a block-relay peer is disconnected for it.
+                if session.is_some_and(|s| s.wtxid_relay()) {
+                    continue;
+                }
                 if !seen_txids.insert(*txid) {
                     continue;
                 }
@@ -4940,7 +4947,7 @@ pub fn on_inv_txid(
         if let Some(s) = session {
             let _ = mp.add_orphan_announcer(txid, s.id);
         }
-        if !asks_back_local_tx(mp, session, txid) || session.is_some_and(|s| s.wtxid_relay()) {
+        if !asks_back_local_tx(mp, session, txid) {
             return None;
         }
     }

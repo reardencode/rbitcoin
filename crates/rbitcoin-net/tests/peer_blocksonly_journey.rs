@@ -532,7 +532,38 @@ async fn returned_tx_ends_the_private_broadcast(
             let mut w_follow = PeerFollowState::new();
             push(hub, &w_out, &mut w_follow, Some(wtxid_peer.as_ref()), NetworkMessage::Inv(vec![item])).await;
             assert!(getdata_txs(&mut w_rx).is_empty(), "a wtxid-relay peer's txid inv is ignored");
+            let unknown = bitcoin::Txid::from_byte_array([0x44; 32]);
+            let unknown_inv = Inventory::WitnessTransaction(unknown);
+            push(
+                hub,
+                &w_out,
+                &mut w_follow,
+                Some(wtxid_peer.as_ref()),
+                NetworkMessage::Inv(vec![unknown_inv]),
+            )
+            .await;
+            assert!(
+                getdata_txs(&mut w_rx).is_empty(),
+                "a wtxid-relay peer's txid inv is ignored for a tx this node does not have"
+            );
+            let plain = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+            let (plain_out, mut plain_rx) = mpsc::unbounded_channel();
+            let mut plain_follow = PeerFollowState::new();
+            push(
+                hub,
+                &plain_out,
+                &mut plain_follow,
+                Some(plain.as_ref()),
+                NetworkMessage::Inv(vec![unknown_inv]),
+            )
+            .await;
+            assert_eq!(
+                getdata_txs(&mut plain_rx),
+                vec![unknown_inv],
+                "an ordinary peer's txid inv for an unknown tx is fetched"
+            );
             peers.unregister(wtxid_peer.id);
+            peers.unregister(plain.id);
         }
 
         let (echo_out, mut echo_rx) = mpsc::unbounded_channel();
