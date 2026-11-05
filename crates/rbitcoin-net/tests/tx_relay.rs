@@ -500,27 +500,47 @@ async fn returned_tx_waits_for_in_flight_isolated_sends() {
     hub.set_isolated_broadcast(true);
     let spk = ScriptBuf::from_bytes(vec![0x51]);
 
+    hub.note_mock_now(1_000);
     let sending = spend_true(cbs[1], 1_000, spk.clone());
     let txid = sending.compute_txid();
     hub.accept_tx_from(&sending, TxOrigin::Local)
         .expect("accept");
+    assert_eq!(hub.accept_time_txid(&txid), Some(1_000));
     assert_eq!(hub.next_isolated().await.0, txid);
+    hub.note_mock_now(2_000);
     hub.note_returned(&txid);
     assert!(
         hub.is_local_origin(&txid),
         "a tx back mid-send keeps its entry so the other dials still run"
     );
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(1_000),
+        "the relay age stays put until the in-flight sends finish"
+    );
     hub.isolated_sent(&txid);
     assert!(!hub.is_local_origin(&txid));
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(2_000),
+        "the inbound gate starts when the private broadcast ends"
+    );
 
+    hub.note_mock_now(3_000);
     let sent = spend_true(cbs[2], 1_000, spk);
     let txid = sent.compute_txid();
     hub.accept_tx_from(&sent, TxOrigin::Local).expect("accept");
     assert_eq!(hub.next_isolated().await.0, txid);
     hub.isolated_sent(&txid);
     assert!(hub.is_local_origin(&txid), "sent but not back yet");
+    hub.note_mock_now(4_000);
     hub.note_returned(&txid);
     assert!(!hub.is_local_origin(&txid));
+    assert_eq!(
+        hub.accept_time_txid(&txid),
+        Some(4_000),
+        "an echo after the one-shots restarts the relay age"
+    );
 }
 
 #[test]

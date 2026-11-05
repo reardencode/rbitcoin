@@ -6,4 +6,6 @@ Changed
   the private broadcast is done and the tx is announced the normal way.
   A txid announcement from a wtxid-relay peer is ignored for every
   transaction, so this node answers the same way whether or not it
-  already has the tx.
+  already has the tx. If the first peer does not send the tx, the next
+  standing peer who announced it is asked then. Inbound peers wait 30
+  seconds from that echo, not from when you submitted the tx.

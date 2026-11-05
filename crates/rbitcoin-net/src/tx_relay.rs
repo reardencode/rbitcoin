@@ -5130,11 +5130,24 @@ impl MempoolHub {
     pub fn take_due_parent_getdata(&self, peer: u64, now: u64) -> Vec<DueParent> {
         let mut g = self.parent_req.lock().unwrap();
         g.take_due(peer, now, |hash, wtxid| {
+            // A local-origin tx is in the pool, but the private broadcast is
+            // still asking peers who announced it. Dropping the row here
+            // leaves the next announcer unasked after a notfound or a drop.
             if wtxid {
                 let w = Wtxid::from_byte_array(*hash);
+                if self
+                    .try_txid_for_wtxid(&w)
+                    .is_some_and(|txid| self.skip_standing_inv(&txid))
+                {
+                    return false;
+                }
                 self.try_contains_wtxid(&w) || self.try_recent_reject(&w)
             } else {
-                self.parent_already_have(&Txid::from_byte_array(*hash))
+                let txid = Txid::from_byte_array(*hash);
+                if self.skip_standing_inv(&txid) {
+                    return false;
+                }
+                self.parent_already_have(&txid)
             }
         })
     }
@@ -6189,26 +6202,76 @@ impl MempoolHub {
         if !self.isolated_broadcast() {
             return;
         }
-        let mut origin = self.local_origin.lock().unwrap();
-        match origin.txs.get_mut(txid) {
-            Some(IsolatedTurn::Taken { returned }) => *returned = true,
-            Some(_) => {
-                origin.txs.remove(txid);
+        let ended = {
+            let mut origin = self.local_origin.lock().unwrap();
+            match origin.txs.get_mut(txid) {
+                Some(IsolatedTurn::Taken { returned }) => {
+                    *returned = true;
+                    false
+                }
+                Some(_) => {
+                    origin.txs.remove(txid);
+                    true
+                }
+                None => false,
             }
-            None => {}
+        };
+        if ended {
+            self.restamp_relay_age(txid);
         }
     }
 
     pub fn isolated_sent(&self, txid: &Txid) {
-        let mut origin = self.local_origin.lock().unwrap();
-        match origin.txs.get(txid) {
-            Some(IsolatedTurn::Taken { returned: true }) => {
-                origin.txs.remove(txid);
+        let ended = {
+            let mut origin = self.local_origin.lock().unwrap();
+            match origin.txs.get(txid) {
+                Some(IsolatedTurn::Taken { returned: true }) => {
+                    origin.txs.remove(txid);
+                    true
+                }
+                Some(IsolatedTurn::Taken { returned: false }) => {
+                    origin.txs.insert(*txid, IsolatedTurn::Sent);
+                    false
+                }
+                _ => false,
             }
-            Some(IsolatedTurn::Taken { returned: false }) => {
-                origin.txs.insert(*txid, IsolatedTurn::Sent);
-            }
-            _ => {}
+        };
+        if ended {
+            self.restamp_relay_age(txid);
+        }
+    }
+
+    /// The private broadcast is over. Inbound inv age counts from now, not
+    /// from submit, and the expiry order follows that same stamp.
+    fn restamp_relay_age(&self, txid: &Txid) {
+        let now = self.relay_now_secs();
+        let by_tx = self.wtxid_by_txid.lock().unwrap();
+        let Some(wtxid) = by_tx.get(txid).copied() else {
+            return;
+        };
+        // Same order as `insert_relay_maps`: wtxid, seq, accept, gen, age, expiry.
+        let _seqs = self.relay_seq.lock().unwrap();
+        let mut ats = self.accept_at.lock().unwrap();
+        let gens = self.accept_gen.lock().unwrap();
+        let mut age = self.age_inv.lock().unwrap();
+        let mut order = self.expiry_order.lock().unwrap();
+        let Some(old) = ats.get(&wtxid).copied() else {
+            return;
+        };
+        if old == now {
+            return;
+        }
+        ats.insert(wtxid, now);
+        if let Some(gen) = gens.get(&wtxid).copied() {
+            let pair = (*txid, wtxid);
+            age.remove(&(old.saturating_add(30), gen));
+            age.insert((now.saturating_add(30), gen), pair);
+        }
+        order.remove(&(old, wtxid));
+        order.insert((now, wtxid), *txid);
+        if old == self.min_live_accept_at.load(Ordering::Relaxed) {
+            let min = ats.values().copied().min().unwrap_or(u64::MAX);
+            self.min_live_accept_at.store(min, Ordering::Relaxed);
         }
     }
 

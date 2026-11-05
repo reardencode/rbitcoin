@@ -518,6 +518,7 @@ async fn returned_tx_ends_the_private_broadcast(
         let mut other_rx = writer_of(&other);
         mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
             .expect("local");
+        let submitted = mp.relay_now_secs();
 
         let (block_out, mut block_rx) = mpsc::unbounded_channel();
         let mut block_follow = PeerFollowState::new();
@@ -526,44 +527,7 @@ async fn returned_tx_ends_the_private_broadcast(
         assert!(mp.is_local_origin(&txid));
 
         if by_txid {
-            let wtxid_peer = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
-            wtxid_peer.set_wtxid_relay();
-            let (w_out, mut w_rx) = mpsc::unbounded_channel();
-            let mut w_follow = PeerFollowState::new();
-            push(hub, &w_out, &mut w_follow, Some(wtxid_peer.as_ref()), NetworkMessage::Inv(vec![item])).await;
-            assert!(getdata_txs(&mut w_rx).is_empty(), "a wtxid-relay peer's txid inv is ignored");
-            let unknown = bitcoin::Txid::from_byte_array([0x44; 32]);
-            let unknown_inv = Inventory::WitnessTransaction(unknown);
-            push(
-                hub,
-                &w_out,
-                &mut w_follow,
-                Some(wtxid_peer.as_ref()),
-                NetworkMessage::Inv(vec![unknown_inv]),
-            )
-            .await;
-            assert!(
-                getdata_txs(&mut w_rx).is_empty(),
-                "a wtxid-relay peer's txid inv is ignored for a tx this node does not have"
-            );
-            let plain = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
-            let (plain_out, mut plain_rx) = mpsc::unbounded_channel();
-            let mut plain_follow = PeerFollowState::new();
-            push(
-                hub,
-                &plain_out,
-                &mut plain_follow,
-                Some(plain.as_ref()),
-                NetworkMessage::Inv(vec![unknown_inv]),
-            )
-            .await;
-            assert_eq!(
-                getdata_txs(&mut plain_rx),
-                vec![unknown_inv],
-                "an ordinary peer's txid inv for an unknown tx is fetched"
-            );
-            peers.unregister(wtxid_peer.id);
-            peers.unregister(plain.id);
+            wtxid_relay_ignores_txid_inv(hub, peers, item).await;
         }
 
         let (echo_out, mut echo_rx) = mpsc::unbounded_channel();
@@ -580,6 +544,8 @@ async fn returned_tx_ends_the_private_broadcast(
             "an inv alone does not end the private broadcast"
         );
 
+        let later = notfound_asks_the_next_announcer(hub, peers, &echo, &echo_out, &mut follow, item).await;
+        set_relay_clock(hub, peers, submitted.saturating_add(30));
         push(hub, &echo_out, &mut follow, Some(echo.as_ref()), NetworkMessage::Tx(local.clone())).await;
         assert!(
             !mp.is_local_origin(&txid),
@@ -597,10 +563,143 @@ async fn returned_tx_ends_the_private_broadcast(
             !tx_invs(&mut back_rx).contains(&wtxid),
             "the peer that sent it does not get it back"
         );
-        for s in [block_only, echo, other] {
+        let inbound = inbound_waits_thirty_seconds_from_the_echo(hub, peers, wtxid).await;
+        for s in [block_only, echo, other, later, inbound] {
             peers.unregister(s.id);
         }
     }
+}
+
+/// A wtxid-relay peer's txid inv is ignored for every tx, known or not.
+async fn wtxid_relay_ignores_txid_inv(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    item: Inventory,
+) {
+    use rbitcoin_net::peers::PeerConnType::OutboundFullRelay;
+    let wtxid_peer = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    wtxid_peer.set_wtxid_relay();
+    let (w_out, mut w_rx) = mpsc::unbounded_channel();
+    let mut w_follow = PeerFollowState::new();
+    push(
+        hub,
+        &w_out,
+        &mut w_follow,
+        Some(wtxid_peer.as_ref()),
+        NetworkMessage::Inv(vec![item]),
+    )
+    .await;
+    assert!(
+        getdata_txs(&mut w_rx).is_empty(),
+        "a wtxid-relay peer's txid inv is ignored"
+    );
+    let unknown = bitcoin::Txid::from_byte_array([0x44; 32]);
+    let unknown_inv = Inventory::WitnessTransaction(unknown);
+    push(
+        hub,
+        &w_out,
+        &mut w_follow,
+        Some(wtxid_peer.as_ref()),
+        NetworkMessage::Inv(vec![unknown_inv]),
+    )
+    .await;
+    assert!(
+        getdata_txs(&mut w_rx).is_empty(),
+        "a wtxid-relay peer's txid inv is ignored for a tx this node does not have"
+    );
+    let plain = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let (plain_out, mut plain_rx) = mpsc::unbounded_channel();
+    let mut plain_follow = PeerFollowState::new();
+    push(
+        hub,
+        &plain_out,
+        &mut plain_follow,
+        Some(plain.as_ref()),
+        NetworkMessage::Inv(vec![unknown_inv]),
+    )
+    .await;
+    assert_eq!(
+        getdata_txs(&mut plain_rx),
+        vec![unknown_inv],
+        "an ordinary peer's txid inv for an unknown tx is fetched"
+    );
+    peers.unregister(wtxid_peer.id);
+    peers.unregister(plain.id);
+}
+
+/// The first ask is in flight. A notfound makes the next announcer due now.
+async fn notfound_asks_the_next_announcer(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    echo: &rbitcoin_net::peers::LivePeer,
+    echo_out: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    item: Inventory,
+) -> std::sync::Arc<rbitcoin_net::peers::LivePeer> {
+    use rbitcoin_net::peers::PeerConnType::OutboundFullRelay;
+    let later = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    let (later_out, mut later_rx) = mpsc::unbounded_channel();
+    let mut later_follow = PeerFollowState::new();
+    push(
+        hub,
+        &later_out,
+        &mut later_follow,
+        Some(later.as_ref()),
+        NetworkMessage::Inv(vec![item]),
+    )
+    .await;
+    assert!(
+        getdata_txs(&mut later_rx).is_empty(),
+        "a second inv waits while the first ask is in flight"
+    );
+    push(
+        hub,
+        echo_out,
+        follow,
+        Some(echo),
+        NetworkMessage::NotFound(vec![item]),
+    )
+    .await;
+    queue_due_parent_getdata(hub, later.as_ref(), &later_out);
+    assert_eq!(
+        getdata_txs(&mut later_rx),
+        vec![item],
+        "a notfound asks the next peer who announced the local tx, with the clock unmoved"
+    );
+    later
+}
+
+/// Inbound inv age starts when the private broadcast ends.
+async fn inbound_waits_thirty_seconds_from_the_echo(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    wtxid: bitcoin::Wtxid,
+) -> std::sync::Arc<rbitcoin_net::peers::LivePeer> {
+    use rbitcoin_net::peers::PeerConnType::Inbound;
+    let inbound = relay_peer(peers, [127, 0, 0, 1], Inbound);
+    let (in_out, mut in_rx) = mpsc::unbounded_channel();
+    let quiet = |rx: &mut mpsc::UnboundedReceiver<PeerOut>, why: &str| {
+        assert!(!tx_invs(rx).contains(&wtxid), "{why}");
+    };
+    inbound.request_tx_inv();
+    queue_due_tx_invs(hub, inbound.as_ref(), &CappedSet::new(), &in_out);
+    quiet(&mut in_rx, "an inbound peer stays quiet at the echo");
+    let echoed = hub.mempool().unwrap().relay_now_secs();
+    set_relay_clock(hub, peers, echoed.saturating_add(29));
+    inbound.request_tx_inv();
+    queue_due_tx_invs(hub, inbound.as_ref(), &CappedSet::new(), &in_out);
+    quiet(
+        &mut in_rx,
+        "an inbound peer stays quiet until 30s after the echo",
+    );
+    set_relay_clock(hub, peers, echoed.saturating_add(30));
+    inbound.request_tx_inv();
+    queue_due_tx_invs(hub, inbound.as_ref(), &CappedSet::new(), &in_out);
+    assert!(
+        tx_invs(&mut in_rx).contains(&wtxid),
+        "an inbound peer hears the tx 30s after the echo"
+    );
+    inbound
 }
 
 /// Relay on: inbound waits 30s even for an unbroadcast tx, never gets a tx
