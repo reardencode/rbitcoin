@@ -1288,6 +1288,9 @@ pub(crate) fn apply_confirm_reject_pending(
     parent: super::confirm::RejectParent,
 ) -> Option<DeferredArchivedClear> {
     use super::confirm::ConfirmRejectClass;
+    if let Some(f) = feed {
+        f.release_dropped_body(&hash);
+    }
     let sent = class;
     let class = if class == ConfirmRejectClass::ConsensusInvalid {
         if let Some(h) = hub {

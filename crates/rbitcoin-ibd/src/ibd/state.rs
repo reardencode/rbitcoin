@@ -220,7 +220,9 @@ pub struct IbdWorkState {
     pub header_walk: super::header_walk::HeaderWalk,
     /// `-whitelist` / operator noban grants. `None`: no peer is noban.
     pub perms: Option<std::sync::Arc<rbitcoin_net::peers::PeerHub>>,
-    /// Confirm engine feed: assign does not demote a body load still holds.
+    /// Confirm engine feed: assign does not demote a body load still holds,
+    /// and does not getdata a lone consensus-invalid body until its verdict
+    /// is applied.
     pub confirm_feed: Option<std::sync::Arc<super::confirm::ConfirmFeed>>,
     /// Set while a header thread owns store IO. Peer reads only enqueue.
     pub header_cmd: Option<HeaderCmdTx>,
