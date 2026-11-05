@@ -1008,6 +1008,8 @@ pub struct MempoolHub {
     pub dir: PathBuf,
     /// Locally submitted txids not yet requested by a peer (`getmempoolinfo.unbroadcastcount`).
     pub unbroadcast: Mutex<HashSet<Txid>>,
+    /// Getdata arrived before [`Self::note_unbroadcast`]. Lock `unbroadcast` first.
+    broadcast_before_note: Mutex<HashSet<Txid>>,
     /// Test latch. Async admits park before `note_unbroadcast` while this is set.
     /// Production leaves it clear. Each hub has its own latch.
     #[doc(hidden)]
@@ -1343,6 +1345,7 @@ impl MempoolHub {
             meter_cmpct_avail: AtomicU64::new(0),
             sh_index: Mutex::new(MempoolShIndex::new()),
             unbroadcast: Mutex::new(unbroadcast),
+            broadcast_before_note: Mutex::new(HashSet::new()),
             pause_before_unbroadcast_note: AtomicBool::new(false),
             unbroadcast_note_parked: AtomicBool::new(false),
             local_origin: Mutex::new(LocalOrigin::default()),
@@ -1544,6 +1547,7 @@ impl MempoolHub {
             persist_unbroadcast_file(&self.dir, &u);
             rbitcoin_log::info!("{}", Self::unbroadcast_removed_log(txid));
         }
+        self.broadcast_before_note.lock().unwrap().remove(txid);
     }
 
     pub fn relay_now_secs(&self) -> u64 {
@@ -6158,10 +6162,15 @@ impl MempoolHub {
     }
 
     /// `sendrawtransaction` origin: rebroadcast until a peer getdata's it.
+    /// A getdata that already won the publish-to-note race is not put back.
     pub fn note_unbroadcast(&self, txid: Txid) {
-        let mut u = self.unbroadcast.lock().unwrap();
-        u.insert(txid);
-        persist_unbroadcast_file(&self.dir, &u);
+        let mut live = self.unbroadcast.lock().unwrap();
+        let mut early = self.broadcast_before_note.lock().unwrap();
+        if early.remove(&txid) {
+            return;
+        }
+        live.insert(txid);
+        persist_unbroadcast_file(&self.dir, &live);
     }
 
     fn kick_isolated(&self, txid: &Txid) {
@@ -6333,11 +6342,15 @@ impl MempoolHub {
     }
 
     /// Peer getdata served this txid — it is no longer unbroadcast.
+    /// If the note has not run yet, remember the getdata so the note does not
+    /// put the tx back.
     pub fn mark_broadcast(&self, txid: &Txid) {
-        let mut u = self.unbroadcast.lock().unwrap();
-        if u.remove(txid) {
-            persist_unbroadcast_file(&self.dir, &u);
+        let mut live = self.unbroadcast.lock().unwrap();
+        if live.remove(txid) {
+            persist_unbroadcast_file(&self.dir, &live);
+            return;
         }
+        self.broadcast_before_note.lock().unwrap().insert(*txid);
     }
 
     /// Re-INV still-unbroadcast local txs (15m due-now).

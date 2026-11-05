@@ -6776,6 +6776,54 @@ fn dropped_sendraw_still_notes_unbroadcast() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A peer getdata in the publish-to-note window already has the tx.
+/// `note_unbroadcast` must not put it back (`mempool_packages.py`).
+#[test]
+fn getdata_before_unbroadcast_note_stays_broadcast() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, tx) = spend_generated_coinbase(
+        &ctx,
+        1,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let txid = tx.compute_txid();
+    let ctx = std::sync::Arc::new(ctx);
+    let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.pause_before_unbroadcast_note
+        .store(true, Ordering::Release);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(hex)]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let ctx_job = std::sync::Arc::clone(&ctx);
+            let job = tokio::spawn(async move {
+                rbitcoin_rpc::methods::mempool::sendrawtransaction_async(&ctx_job, &params).await
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !mp.contains(&txid) || !mp.unbroadcast_note_parked.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "sendraw did not park between publish and the note"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(mp.unbroadcast_count(), 0, "the note ran before getdata");
+            mp.mark_broadcast(&txid);
+            mp.pause_before_unbroadcast_note
+                .store(false, Ordering::Release);
+            job.await.expect("join").expect("sendraw");
+            assert!(
+                !mp.is_unbroadcast(&txid),
+                "getdata before the note left the tx unbroadcast"
+            );
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Same drop as `dropped_sendraw_still_notes_unbroadcast` for one package member.
 #[test]
 fn dropped_submitpackage_still_notes_unbroadcast() {
