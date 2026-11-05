@@ -89,7 +89,7 @@ impl StoreLayout {
         self.head_scale.sh_main_shards()
     }
 
-    /// `tx.head` bits (honors `RBITCOIN_TX_HEAD_BITS`).
+    /// `tx.head` bits for this scale.
     pub fn tx_head_bits(&self) -> u32 {
         crate::address_head::bits_for_scale(self.head_scale)
     }

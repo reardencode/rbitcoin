@@ -135,8 +135,8 @@ If a change seems to require collapsing a machine, **stop and ask**.
 | **L2** | Compact Class C (`confirmed`, `header_txs_*`, `strong_tx`) full image in process | **Write-behind:** RAM mutate during commit; live slots on `flush_class_c_tip` ([when](./crash-recovery.md#flush)) |
 
 **Never L2:** `txout` / `seqsigwit` / `spent`, full `tx.head` / `*.idx`.
-`RBITCOIN_CLASS_C_INRAM_MAX_MB` (default 256) caps **`confirmed`** and
-**`header_txs_*` only**. `strong_tx` stays L2 (1 bit/fk). Create height is a
+A 256 MiB cap limits **`confirmed`** and **`header_txs_*`** to L2; over that
+they stay fd. `strong_tx` stays L2 (1 bit/fk). Create height is a
 RAM fence (~15 MiB at 1M blocks), not a file.
 
 ---

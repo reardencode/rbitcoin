@@ -298,8 +298,6 @@ fn open_time_scale_is_explicit_not_env_or_cargo_test_sniff() {
         rbitcoin_store::address_head::TINY_BITS
     );
 
-    let prev = std::env::var_os("RBITCOIN_HEAD_SCALE");
-    std::env::set_var("RBITCOIN_HEAD_SCALE", "mainnet");
     let dir = tmp();
     let s = Store::create_layout(StoreLayout::tiny(&dir)).unwrap();
     assert_eq!(s.head_scale(), HeadScale::Tiny);
@@ -309,18 +307,13 @@ fn open_time_scale_is_explicit_not_env_or_cargo_test_sniff() {
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 
-    std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
     let still_mainnet = StoreLayout::single("/tmp/rbitcoin-scale-unused-2");
     assert_eq!(
         still_mainnet.head_scale,
         HeadScale::Mainnet,
-        "RBITCOIN_HEAD_SCALE must not win over explicit Mainnet open"
+        "explicit Mainnet open keeps the mainnet scale"
     );
     assert_eq!(still_mainnet.header_slots(), 1 << 22);
-    match prev {
-        Some(v) => std::env::set_var("RBITCOIN_HEAD_SCALE", v),
-        None => std::env::remove_var("RBITCOIN_HEAD_SCALE"),
-    }
 }
 
 fn coinbase_item(

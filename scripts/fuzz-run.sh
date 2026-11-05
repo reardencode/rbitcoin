@@ -461,7 +461,7 @@ fi
 
 # Tiny heads via Query::open_or_create_tiny (not RBITCOIN_HEAD_SCALE).
 # tx.head tiny is 16-bit (~64k). Compared candidates uniquify coinbase + extra
-# txs so mix_txid values spread; do not override RBITCOIN_TX_HEAD_BITS
+# txs so mix_txid values spread. There is no tx-head-bits env override
 # (that was a BIP30-chain workaround).
 export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
 export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"

@@ -1,11 +1,4 @@
 use rbitcoin_store::io_backend::*;
-use std::sync::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn clear_io_envs() {
-    std::env::remove_var("RBITCOIN_IO");
-}
 
 #[test]
 fn parse_tokens() {
@@ -36,40 +29,84 @@ fn parse_tokens() {
 
 #[test]
 fn path_env_ignored_global_only() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    clear_io_envs();
-    std::env::set_var("RBITCOIN_IO", "uring");
-    assert_eq!(resolve_read(), effective_read(ReadIoBackend::Uring));
-    clear_io_envs();
-    std::env::set_var("RBITCOIN_IO", "pread");
-    assert_eq!(resolve_read(), ReadIoBackend::Pread);
-    clear_io_envs();
+    let before = std::env::var_os("RBITCOIN_IO");
+    assert_eq!(
+        global_read_from_env_str("uring").map(effective_read),
+        Some(effective_read(ReadIoBackend::Uring))
+    );
+    assert_eq!(
+        global_read_from_env_str("pread"),
+        Some(ReadIoBackend::Pread)
+    );
+    assert_eq!(
+        std::env::var_os("RBITCOIN_IO"),
+        before,
+        "io token checks must not write process env"
+    );
 }
 
 #[test]
 fn global_env_io_uring_off_and_aliases() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    clear_io_envs();
-    std::env::set_var("RBITCOIN_IO", "mmap");
+    let before_io = std::env::var_os("RBITCOIN_IO");
+    let before_uring = std::env::var_os("RBITCOIN_IO_URING");
+    let mut seen = Vec::new();
+    let read = global_read_from_vars(|k| {
+        seen.push(k.to_string());
+        match k {
+            "RBITCOIN_IO" => Some("pread".to_string()),
+            "RBITCOIN_IO_URING" => Some("0".to_string()),
+            _ => None,
+        }
+    });
+    assert_eq!(seen, vec!["RBITCOIN_IO".to_string()]);
     assert_eq!(
-        global_read_from_env(),
-        None,
-        "mmap is not a token; unknown RBITCOIN_IO falls through"
+        read,
+        Some(ReadIoBackend::Pread),
+        "RBITCOIN_IO_URING is not an alias; the lookup reads RBITCOIN_IO"
     );
-    assert_eq!(global_write_from_env(), None);
-    clear_io_envs();
-    std::env::set_var("RBITCOIN_IO_URING", "0");
+    seen.clear();
     assert_eq!(
-        global_read_from_env(),
+        global_read_from_vars(|k| {
+            seen.push(k.to_string());
+            None
+        }),
         None,
-        "RBITCOIN_IO_URING is not an alias; use RBITCOIN_IO=pread"
+        "absent RBITCOIN_IO falls through"
     );
-    assert_eq!(global_write_from_env(), None);
-    clear_io_envs();
-    std::env::set_var("RBITCOIN_IO", "not-a-backend");
-    assert_eq!(global_read_from_env(), None);
-    assert_eq!(global_write_from_env(), None);
-    clear_io_envs();
+    assert_eq!(seen, vec!["RBITCOIN_IO".to_string()]);
+    seen.clear();
+    let write = global_write_from_vars(|k| {
+        seen.push(k.to_string());
+        match k {
+            "RBITCOIN_IO" => Some("pread".to_string()),
+            "RBITCOIN_IO_URING" => Some("0".to_string()),
+            _ => None,
+        }
+    });
+    assert_eq!(seen, vec!["RBITCOIN_IO".to_string()]);
+    assert_eq!(write, Some(WriteIoBackend::Pwrite));
+    assert_eq!(
+        global_read_from_vars(|_| Some("0".to_string())),
+        None,
+        "RBITCOIN_IO=0 is not a backend"
+    );
+    assert_eq!(global_write_from_vars(|_| Some("0".to_string())), None);
+    assert_eq!(global_read_from_vars(|_| Some("mmap".to_string())), None);
+    assert_eq!(global_write_from_vars(|_| Some("mmap".to_string())), None);
+    assert_eq!(
+        global_read_from_vars(|_| Some("not-a-backend".to_string())),
+        None
+    );
+    assert_eq!(
+        global_write_from_vars(|_| Some("not-a-backend".to_string())),
+        None
+    );
+    assert_eq!(std::env::var_os("RBITCOIN_IO"), before_io);
+    assert_eq!(
+        std::env::var_os("RBITCOIN_IO_URING"),
+        before_uring,
+        "io token checks must not write process env"
+    );
 }
 
 #[test]

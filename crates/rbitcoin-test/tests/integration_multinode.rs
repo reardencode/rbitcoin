@@ -3220,6 +3220,10 @@ async fn pin_blocksonly_seeder_tx_disconnects(
 /// while connected. `max_run_secs=0` stays a node-crate unit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn node_run_p2p_short() {
+    // The node cap is past this deadline. An equal cap drops the seeder
+    // while the pin is still reading it, and the redial handshake has no
+    // tip inv yet. A fast run still ends on `stop`.
+    let wall = llvm_cov_wall(120, 180);
     let fut = async {
         use rbitcoin_node::{run_p2p, NodeConfig};
         use rbitcoin_primitives::Network;
@@ -3255,7 +3259,7 @@ async fn node_run_p2p_short() {
             )
             .unwrap();
         }
-        cfg.max_run_secs = Some(60);
+        cfg.max_run_secs = Some(wall.as_secs().saturating_add(30));
         cfg.connect_redial = rbitcoin_net::REDIAL_INTERVAL_TEST;
         cfg.mempool.blocksonly = true;
         cfg.max_tip_age_secs = Some(u64::MAX);
@@ -3305,13 +3309,13 @@ async fn node_run_p2p_short() {
             );
             assert_eq!(
                 rows[0]["synced_headers"].as_i64(),
-                Some(-1),
-                "empty getheaders at tip does not set best_known: {peers}"
+                Some(3),
+                "the seeder announces its tip when the session starts, so the inv sets best_known: {peers}"
             );
             assert_eq!(
                 rows[0]["synced_blocks"].as_i64(),
-                Some(-1),
-                "synced_blocks follows best_known, not startingheight: {peers}"
+                Some(3),
+                "synced_blocks follows that best_known header once the block is connected: {peers}"
             );
             assert!(
                 rows[0]["servicesnames"]
@@ -3467,7 +3471,6 @@ async fn node_run_p2p_short() {
 
         seed.shutdown().await;
     };
-    let wall = llvm_cov_wall(60, 180);
     tokio::time::timeout(wall, fut)
         .await
         .unwrap_or_else(|_| panic!("node_run_p2p_short wall timeout ({wall:?})"));

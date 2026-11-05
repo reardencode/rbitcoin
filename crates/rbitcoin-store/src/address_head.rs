@@ -44,6 +44,7 @@ use crate::file::{TableFile, TRAILING_FOOTER_LEN};
 use crate::hashhead::HeadScale;
 use crate::readonly_map::ReadonlyMap;
 use rbitcoin_primitives::{Fk, TableKind};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -459,15 +460,41 @@ pub fn store_entry_in_page_buf(
     Ok(())
 }
 
-/// Resolve address width for new creates (`scale`, then `RBITCOIN_TX_HEAD_BITS`).
+thread_local! {
+    static TEST_TX_HEAD_BITS: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with a per-thread `tx.head` width string. Other threads keep the
+/// scale default. There is no process env for this.
+pub fn with_tx_head_bits<R>(raw: &str, f: impl FnOnce() -> R) -> R {
+    TEST_TX_HEAD_BITS.with(|c| {
+        let prev = c.replace(Some(raw.to_owned()));
+        let _restore = BitsRestore(c, prev);
+        f()
+    })
+}
+
+struct BitsRestore<'a>(&'a RefCell<Option<String>>, Option<String>);
+
+impl Drop for BitsRestore<'_> {
+    fn drop(&mut self) {
+        *self.0.borrow_mut() = self.1.take();
+    }
+}
+
+/// Resolve address width for new creates.
+///
+/// A thread override ([`with_tx_head_bits`]) wins when it parses inside
+/// [`MIN_BITS`]..=[`MAX_BITS`]. Anything else uses the scale default.
 pub fn bits_for_scale(scale: HeadScale) -> u32 {
-    if let Ok(s) = std::env::var("RBITCOIN_TX_HEAD_BITS") {
+    let from_thread = TEST_TX_HEAD_BITS.with(|c| c.borrow().clone());
+    if let Some(s) = from_thread.as_deref() {
         if let Ok(n) = s.parse::<u32>() {
             if (MIN_BITS..=MAX_BITS).contains(&n) {
                 return n;
             }
             rbitcoin_log::warn!(
-                "store: RBITCOIN_TX_HEAD_BITS={s:?} out of {MIN_BITS}..={MAX_BITS}, using scale default"
+                "store: tx head bits {s:?} out of {MIN_BITS}..={MAX_BITS}, using scale default"
             );
         }
     }

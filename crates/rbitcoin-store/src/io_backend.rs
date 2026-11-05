@@ -50,23 +50,35 @@ pub fn parse_write_token(s: &str) -> Option<WriteIoBackend> {
 }
 
 #[doc(hidden)]
+pub fn global_read_from_env_str(s: &str) -> Option<ReadIoBackend> {
+    parse_read_token(s)
+}
+
+#[doc(hidden)]
+pub fn global_write_from_env_str(s: &str) -> Option<WriteIoBackend> {
+    parse_write_token(s)
+}
+
+#[doc(hidden)]
 pub fn global_read_from_env() -> Option<ReadIoBackend> {
-    if let Ok(s) = std::env::var("RBITCOIN_IO") {
-        if let Some(b) = parse_read_token(&s) {
-            return Some(b);
-        }
-    }
-    None
+    global_read_from_vars(|k| std::env::var(k).ok())
+}
+
+#[doc(hidden)]
+pub fn global_read_from_vars(mut var: impl FnMut(&str) -> Option<String>) -> Option<ReadIoBackend> {
+    var("RBITCOIN_IO").as_deref().and_then(parse_read_token)
 }
 
 #[doc(hidden)]
 pub fn global_write_from_env() -> Option<WriteIoBackend> {
-    if let Ok(s) = std::env::var("RBITCOIN_IO") {
-        if let Some(b) = parse_write_token(&s) {
-            return Some(b);
-        }
-    }
-    None
+    global_write_from_vars(|k| std::env::var(k).ok())
+}
+
+#[doc(hidden)]
+pub fn global_write_from_vars(
+    mut var: impl FnMut(&str) -> Option<String>,
+) -> Option<WriteIoBackend> {
+    var("RBITCOIN_IO").as_deref().and_then(parse_write_token)
 }
 
 #[inline]

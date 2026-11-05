@@ -33,8 +33,6 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_BLOCK_QUEUE_GB` | 1 | Densify assign-stop (GiB). `0` = unlimited. Never refuses enqueue for budget (undecodable wire is dropped) |
 | `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over `RBITCOIN_BLOCK_QUEUE_GB`). `0` = unlimited |
 | `RBITCOIN_BULK_IO_WORKERS` | backend default | pread worker count when `RBITCOIN_IO=pread` |
-| `RBITCOIN_CLASS_C_INRAM_MAX_MB` | 256 | L2 cap for `confirmed` / `header_txs_*`; over → fd L0. `strong_tx` always L2 |
-| `RBITCOIN_TX_HEAD_BITS` | scale default | `tx.head` bits (dangerous on a live datadir) |
 | `RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS` | 25 | Wipe/empty-head MPHF range `2^bits` (26 wider; clamp 6..=26) |
 | `RBITCOIN_TX_HEAD_REBUILD_WORKERS` | min(n-cpu, free-RAM/1 GiB) | Wipe/empty-head MPHF parallelism (`1` = serial). Unset = auto. **Not** the SH extract 1.5 GiB cap |
 | `RBITCOIN_HEAD_SLOTS_HEADER` | scale default | Header hash-head initial slots (power of two) |
@@ -82,6 +80,8 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_SH_TARGET_RUN_BYTES` | Deleted; catalog recollect/spill is gone |
 | `RBITCOIN_SH_MERGE_FANIN` | Deleted; no fan-in reduce |
 | `RBITCOIN_HEAD_SCALE` | Deleted (was test-only). Tiny vs Mainnet is store open layout (`StoreLayout::tiny` / `single`). Do not reintroduce |
+| `RBITCOIN_TX_HEAD_BITS` | Deleted. New `tx.head` uses the scale width (tiny 16, otherwise 25). Do not reintroduce |
+| `RBITCOIN_CLASS_C_INRAM_MAX_MB` | Deleted. `confirmed` and `header_txs_*` stay in RAM up to 256 MiB, then fd. `strong_tx` stays in RAM. Do not reintroduce |
 | `RBITCOIN_TX_IDX_SOFT_SPAN` | Deleted; schema 22 loc has no Class A idx mmap span. Do not reintroduce |
 
 ## Related

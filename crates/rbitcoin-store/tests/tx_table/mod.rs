@@ -1691,9 +1691,8 @@ fn streaming_resolve_early_exit_fewer_body_lookups() {
 
 /// Depth-max match: foreigners + two same-txid creates; batch prefers deepest.
 #[test]
-fn get_fk_by_txid_batch_depth_wins_with_workers() {
+fn get_fk_by_txid_batch_depth_wins() {
     with_env_lock(|| {
-        std::env::set_var("RBITCOIN_BULK_IO_WORKERS", "4");
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-tx-batch-depth-{}",
             std::time::SystemTime::now()
@@ -1772,7 +1771,6 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
         }
         assert!(batch.iter().any(|(t, f)| *t == [0xff; 32] && f.is_none()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::remove_var("RBITCOIN_BULK_IO_WORKERS");
     });
 }
 

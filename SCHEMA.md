@@ -130,7 +130,7 @@ catalogs, or 16-layout Class A with creates is **refused**.
 | Policy | Choice |
 |--------|--------|
 | Loc | One loc pair per create; `seqsigwit` is the fat stem (cold) and does not force `txout` splits. `tx.head` rolls at OA 80% slots only. |
-| `strong_tx` | Always L2. `RBITCOIN_CLASS_C_INRAM_MAX_MB` (default 256) still caps **`confirmed`** and **`header_txs_*`** only. |
+| `strong_tx` | Always L2. **`confirmed`** and **`header_txs_*`** stay in RAM up to 256 MiB, then fd. |
 | `RWF_DONTCACHE` | **Not used.** Annotate pwrites hit `spent.body` only; evicting those pages does not protect `txout`, and the next block wants the same spent pages. |
 
 ### New script kinds without a wipe
@@ -665,7 +665,7 @@ bits-widen / shadow-resize path. Module map: [`docs/heads.md`](./docs/heads.md).
 |----------|---------|
 | Files | `tx.head/meta` (**v2**: per-segment `sealed` and `tagged` flags) + open `tx.head/NNNNNN`; sealed `NNNNNN.mphf` + `.fuse8` |
 | Default | **BITS=25**, **4 B** entries → **128 MiB** per segment (`2^25` slots) |
-| Env | `RBITCOIN_TX_HEAD_BITS` in **8..=32** (tests/tiny only); product default **25**. The entry is always 4 B; a footer that says 8 B **refuses** (`tx.head footer entry width`) |
+| Bits | Tiny **16**, otherwise **25**. No process env. The entry is always 4 B; a footer that says 8 B **refuses** (`tx.head footer entry width`) |
 | Entry | LE u32 word `rel \| fp << bits`. Low `bits`: **relative** create id, **0 = empty**, `fk = first_fk + rel − 1`. Spare high bits: fingerprint of the mixed key, `1..=2^(32−bits)−1`; **0 = untagged**, matches every key. No fingerprint at bits 32 |
 | Meta v1 → v2 | A v1 meta **opens** (no refuse). Its unsealed OA slots carry fingerprint 0; open writes each slot's fingerprint from `txid.body` (one 4 B `pwrite` per row), flushes, then persists meta v2 with the segment `tagged`. A v1 binary refuses v2 meta (`tx.head.meta version`) and rebuilds `tx.head` from Class A |
 | Capacity | Segment ends at **80% of head slots** (`max_keys`) → open next OA, seal previous on a sidecar. Class A loc/body size does **not** cut `tx.head`. |
@@ -860,8 +860,8 @@ Dense u64 array: index = height → header_fk. Length = tip_height + 1 when non-
 
 Bitset: bit `(tx_fk − 1)` set ⇒ tx is strong on the best chain.
 
-Always **L2** (full `Vec` in process), even when `RBITCOIN_CLASS_C_INRAM_MAX_MB`
-demotes `confirmed` / `header_txs_*`. One bit per create; confirm/reorg/Electrum
+Always **L2** (full `Vec` in process), even when `confirmed` / `header_txs_*`
+fall back to fd past 256 MiB. One bit per create; confirm/reorg/Electrum
 must not pread the bitset.
 
 ### Create height (schema 16: RAM fence, no `tx_height.body`)
