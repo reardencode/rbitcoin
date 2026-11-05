@@ -3,14 +3,16 @@
 ## Status
 
 BIP324 v2-only P2P, cluster mempool (Libre admission + **consensus script checks on accept**),
-Electrum confirmed + unconfirmed (TLS via reverse proxy). **0.7 mainnet** is
-early production / high-scrutiny — see
-[`docs/experimental-mainnet.md`](../../docs/experimental-mainnet.md). Watch reorgs and disk
-headroom before any serious use. Default mainnet milestone is block **840000**
-(`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`): script/sig
-checks skip only when the header path contains that hash and the block is
-the path hash at its height. Explicit `--milestone HEIGHT` is height-only. `--milestone 0` is
-full scripts. Signet’s default is **0** (every script, slower on purpose).
+Electrum confirmed + unconfirmed (TLS via reverse proxy). Mainnet is safe to
+run. A consensus split is vanishingly unlikely. The runbook is
+[`mainnet.md`](mainnet.md). **1.0** is the release planned for further
+hardening, a support window, and signed binaries. Default mainnet milestone
+is block **840000**
+(`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`): script
+and signature checks skip only when that hash and the block being connected
+are the header-path occupants at their heights. Explicit `--milestone HEIGHT`
+is height-only. `--milestone 0` checks every script. Signet and testnet4
+default to **0**.
 
 Architecture and confirm pipeline: [`docs/architecture.md`](../../docs/architecture.md),
 [`docs/concurrency.md`](../../docs/concurrency.md). Download defaults to **1024**

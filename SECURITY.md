@@ -4,15 +4,16 @@
 IBD and tip follow, block/tx relay, and Electrum serving for **wallet backends**
 and similar infrastructure—not a desktop GUI or end-user wallet.
 
-Until **1.0**, treat mainnet deployment as **early production / high-scrutiny**:
-on-disk format and APIs can still change (named refuse/wipe, not a silent
-wipe), and there is **no** long-term support SLA. In-tree is **0.8.99**
-(pre-0.9.0). **0.8.x** tags (0.8.0) are the supported published
-line until 0.9 or 1.0. Occupied **0.6.x** stores refuse (wipe + IBD).
-Schema 24 and 25 open in place (rewrite to 26).
-Run signet first, then mainnet with monitoring. See
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md)
-and [`OPERATOR.md`](./OPERATOR.md).
+A consensus split on mainnet is vanishingly unlikely. The on-disk format
+and APIs can still change before **1.0** (a named refuse or wipe, not a
+silent wipe), and there is no long-term support window yet. **1.0** is
+where that window, further hardening, and signed release binaries are
+planned. In-tree is **0.8.99** (pre-0.9.0). **0.8.x** (tag 0.8.0) is the
+supported published line until 0.9. Occupied **0.6.x** stores refuse
+(wipe and sync again). Schema 24 and 25 open in place and rewrite to 26.
+A published 0.8 directory is already schema 26. The runbook is
+[`docs/operator/mainnet.md`](./docs/operator/mainnet.md). Day-to-day flags
+are [`OPERATOR.md`](./OPERATOR.md).
 
 `--trust-peer` stores and serves a chain rbitcoin considers invalid. Do not
 point a wallet at that node unless you accept that peer. The fault list is
@@ -107,8 +108,9 @@ xAI), under the direction and prompting of **Brandon Black**
 That does **not** change how to report bugs or how seriously we take
 consensus/P2P integrity. It **does** mean:
 
-- Callers should assume the usual need for **independent review**, fuzzing, and
-  adversarial testing before trusting a deployment with real funds.
+- Independent review and fuzzing continue. A consensus split on mainnet is
+  vanishingly unlikely. Further hardening and signed release binaries are
+  what 1.0 is for.
 - Security reports remain welcome and will be handled through
   [security@reardencode.com](mailto:security@reardencode.com).
 

@@ -2,9 +2,9 @@
 
 ## First hour (regtest)
 
-One loop: mine a block, one Electrum RPC, one Esplora GET. This is **regtest**,
-not validated mainnet (default mainnet `--milestone` skips historical scripts).
-Signet/mainnet: [`docs/experimental-mainnet.md`](../../docs/experimental-mainnet.md).
+One loop: mine a block, one Electrum RPC, one Esplora GET. This is **regtest**.
+The default mainnet milestone skips historical scripts on the anchored header
+path. Mainnet: [`mainnet.md`](mainnet.md).
 
 Electrum and Esplora **start without `--sh-index`**. Address/scripthash
 history needs it (fail closed otherwise). JSON-RPC is only there so

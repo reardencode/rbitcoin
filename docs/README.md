@@ -44,7 +44,8 @@ into `AGENTS.md`.
 | [`io-modality.md`](./io-modality.md) | `RBITCOIN_IO`, fd vs uring, TLS harvest, do-not-flatten machines, host A/B. |
 | [`heads.md`](./heads.md) | Which head file / module (tx / header / SH). |
 | [`env-knobs.md`](./env-knobs.md) | Residual `RBITCOIN_*` inventory. |
-| [`experimental-mainnet.md`](./experimental-mainnet.md) | 0.x mainnet runbook (early production / high-scrutiny). |
+| [`operator/mainnet.md`](./operator/mainnet.md) | Mainnet runbook: catch-up, milestone, wallets after tip. |
+| [`experimental-mainnet.md`](./experimental-mainnet.md) | Pointer. The runbook moved to `operator/mainnet.md`. |
 | [`rpc.md`](./rpc.md) | Core-class JSON-RPC subset. |
 | [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. |
 | [`core-functional.md`](./core-functional.md) | Core v32.1 functional harness. |

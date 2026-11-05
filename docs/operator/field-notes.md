@@ -2,8 +2,9 @@
 
 ## Signet lab
 
-Default signet catch-up, Electrum-after-tip, and SIGTERM resume:
-[`docs/experimental-mainnet.md`](../../docs/experimental-mainnet.md). Prefer
+Signet is a place to try a wallet or a short connectivity run. It is not a
+gate in front of mainnet. The mainnet runbook, including when to turn
+Electrum on and how SIGTERM resume works, is [`mainnet.md`](mainnet.md). Prefer
 SIGTERM over `kill -9` (last uncommitted mempool batch may be lost on hard
 kill). Same `--datadir` resumes tip from the relational archive.
 
@@ -43,25 +44,11 @@ The equivalent conf-file keys are `signet_challenge` and `signet_block_time`.
 Replace the illustrative `OP_TRUE` challenge and documentation-only peer with
 the parameters supplied by the custom Signet operator.
 
-## Mainnet experimental
-
-Catch-up command, milestone table, and Electrum-after-tip:
-[`docs/experimental-mainnet.md`](../../docs/experimental-mainnet.md). 16 GiB /
-sluggish-disk knobs stay in this file (below).
-
-### Before trusting mainnet
-
-- [ ] Signet (or large range) to tip; restart resume
-- [ ] Mainnet tip follow without corruption / OOM
-- [ ] Post-milestone or `--milestone 0` script path exercised
-- [ ] Disk headroom for full Class A archive
-- [ ] Mempool file growth bounded under load (compaction + eviction)
-- [ ] Electrum TCP wallet smoke (subscribe, broadcast, fees; TLS via proxy if needed)
-- [ ] Peer diversity and reorg behavior under load
-
 ## 16 GiB RAM / sluggish disk (mainnet)
 
-Full-validation IBD can be disk-bound and make a shared desktop disk sluggish.
+The ordinary command, the milestone rule, and when to attach a wallet are
+[`mainnet.md`](mainnet.md). Full-validation IBD can be disk-bound and make a
+shared desktop disk sluggish.
 Prefer a dedicated volume. The example below lowers the mempool weight budget;
 `--mempool-size-mb` is **not** a hard process-RAM limit.
 
