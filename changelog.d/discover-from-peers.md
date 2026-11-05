@@ -1,0 +1,3 @@
+Added
+
+- **`--discover-from-peers` announces the address peers see.** Off by default. With it on and no clearnet `--external-ip`, the node tells each clearnet peer the IP that peer's `version` says it reached us at, with our listen port, as Core's `-discover` does behind NAT. A clearnet `--external-ip` always wins. The address never goes over Tor, I2P or CJDNS, nor to a peer reached through `--proxy`, and an unroutable or `fc00::/8` report is ignored. Up to eight announced addresses count as the node's own, so a `getaddr` reply or `addrv2` relay never passes one on. `--no-discover` turns it off too.

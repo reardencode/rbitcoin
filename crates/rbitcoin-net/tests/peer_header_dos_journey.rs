@@ -1574,6 +1574,137 @@ fn self_announce_stays_on_the_link_network() {
     );
 }
 
+/// An addrv2 session to `net` whose VERSION says it reached us at `seen`.
+fn reporting_peer(
+    peers: &std::sync::Arc<rbitcoin_net::peers::PeerHub>,
+    net: rbitcoin_net::NetAddr,
+    conn: rbitcoin_net::peers::PeerConnType,
+    seen: IpAddr,
+) -> std::sync::Arc<rbitcoin_net::peers::LivePeer> {
+    let addr = match net {
+        rbitcoin_net::NetAddr::Ip(sock) => sock,
+        other => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), other.port()),
+    };
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&SocketAddr::new(seen, 50_123), ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 0,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let inbound = conn == rbitcoin_net::peers::PeerConnType::Inbound;
+    let peer = peers.register_net(addr, net, addr, &ver, inbound, conn);
+    peer.set_wants_addrv2();
+    peer
+}
+
+/// The clearnet sockets one self-announce carries.
+fn announced_ips(peer: &rbitcoin_net::peers::LivePeer) -> Vec<SocketAddr> {
+    use bitcoin::p2p::address::AddrV2;
+    let Some(msg) = peer.take_self_announce_msg() else {
+        return Vec::new();
+    };
+    let NetworkMessage::AddrV2(v) = msg else {
+        panic!("expected AddrV2, got {msg:?}");
+    };
+    v.iter()
+        .filter_map(|a| match a.addr {
+            AddrV2::Ipv4(ip) => Some(SocketAddr::new(IpAddr::V4(ip), a.port)),
+            AddrV2::Ipv6(ip) => Some(SocketAddr::new(IpAddr::V6(ip), a.port)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `--discover-from-peers` announces, at our listen port, the IP a clearnet
+/// peer reports reaching us at. Off by default; never on an overlay or
+/// proxied link; an unroutable or CJDNS report is ignored; a clearnet
+/// `--external-ip` wins; `--no-discover` and no clearnet listener stop it.
+#[test]
+fn discover_from_peers_announces_the_reported_address() {
+    use rbitcoin_net::peers::PeerConnType::{Inbound, OutboundFullRelay as Out};
+
+    let seen = IpAddr::V4(Ipv4Addr::new(81, 2, 69, 160));
+    let clearnet = rbitcoin_net::NetAddr::Ip(SocketAddr::from(([93, 184, 216, 34], 8333)));
+    let hub = |from_peers: bool| {
+        let peers = rbitcoin_net::peers::PeerHub::new();
+        peers.set_discover(true);
+        peers.set_clearnet_listen(true);
+        peers.set_listen_port(8333);
+        peers.set_discover_from_peers(from_peers);
+        peers
+    };
+
+    assert!(
+        announced_ips(&reporting_peer(&hub(false), clearnet, Out, seen)).is_empty(),
+        "off by default: a peer's report is never announced"
+    );
+    let on = hub(true);
+    assert_eq!(
+        announced_ips(&reporting_peer(&on, clearnet, Out, seen)),
+        [SocketAddr::new(seen, 8333)],
+        "the reported IP goes out at our listen port, not the peer-seen port"
+    );
+    assert_eq!(
+        announced_ips(&reporting_peer(&on, clearnet, Inbound, seen)),
+        [SocketAddr::new(seen, 8333)]
+    );
+    for bad in [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 7)),
+    ] {
+        assert!(
+            announced_ips(&reporting_peer(&on, clearnet, Out, bad)).is_empty(),
+            "an unroutable or CJDNS report {bad} is not announced"
+        );
+    }
+    let onion: rbitcoin_net::NetAddr =
+        "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion:8333"
+            .parse()
+            .unwrap();
+    assert!(
+        announced_ips(&reporting_peer(&on, onion, Out, seen)).is_empty(),
+        "an onion peer never gets a clearnet IP"
+    );
+    let proxied = hub(true);
+    proxied.set_proxies(rbitcoin_net::NetProxies {
+        dialer: rbitcoin_net::socks::Dialer::socks(SocketAddr::from(([127, 0, 0, 1], 9050)), true),
+        i2p_sam: None,
+    });
+    assert!(
+        announced_ips(&reporting_peer(&proxied, clearnet, Out, seen)).is_empty(),
+        "a peer dialled through the proxy sees the exit, and gets nothing"
+    );
+
+    let external = hub(true);
+    external.set_external_ips(vec![IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42))]);
+    assert_eq!(
+        announced_ips(&reporting_peer(&external, clearnet, Out, seen)),
+        [SocketAddr::from(([42, 42, 42, 42], 8333))],
+        "a clearnet --external-ip wins over the report"
+    );
+    let cjdns_bind = hub(true);
+    cjdns_bind.set_cjdns_reachable(true);
+    cjdns_bind.set_external_ips(vec![IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 9))]);
+    assert_eq!(
+        announced_ips(&reporting_peer(&cjdns_bind, clearnet, Out, seen)),
+        [SocketAddr::new(seen, 8333)],
+        "a CJDNS address is not a clearnet --external-ip"
+    );
+
+    let no_discover = hub(true);
+    no_discover.set_discover(false);
+    assert!(announced_ips(&reporting_peer(&no_discover, clearnet, Out, seen)).is_empty());
+    let no_listen = hub(true);
+    no_listen.set_clearnet_listen(false);
+    assert!(announced_ips(&reporting_peer(&no_listen, clearnet, Out, seen)).is_empty());
+}
+
 /// A peer gossips this node's own onion, I2P and external addresses back.
 /// The `getaddr` reply still leaves them out.
 #[test]

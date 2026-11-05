@@ -596,6 +596,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     }
     node.peers.set_discover(config.listen.discover);
     node.peers
+        .set_discover_from_peers(config.listen.discover_from_peers);
+    node.peers
         .set_clearnet_listen(!matches!(config.listen.p2p, crate::config::P2pListen::Off));
     if node.local_addr.port() != 0 {
         node.peers.set_listen_port(node.local_addr.port());
