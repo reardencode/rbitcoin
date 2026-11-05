@@ -1,9 +1,8 @@
 Fixed
 
-- **A scripthash head with no include mark and no SEAL is rebuilt.**
-  Restart used to treat that head as caught up, so confirmed
+- **A scripthash index with no progress mark is rebuilt.** Restart used to
+  treat a head with no include mark and no SEAL as caught up, so confirmed
   transactions in the gap never entered the index and later blocks were
-  applied above it. Replaying every height from the start is the append
-  path over the whole chain. Startup deletes the head and
-  bulk-materializes from Class A. A mark, or a SEAL when the mark file
-  is missing, still resumes at the height it covers.
+  applied above it. Startup deletes that head and builds the index from
+  the archive. A mark, or a SEAL when the mark file is missing, still
+  resumes at the height it covers.
