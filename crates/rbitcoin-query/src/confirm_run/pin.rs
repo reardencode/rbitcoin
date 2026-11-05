@@ -18,14 +18,6 @@ pub fn spend_edges_from_plan<'a>(
     plan: &'a crate::ArchiveWritePlan,
     parent_pin: &mut ParentPinStamp,
 ) -> Result<PlanSpend<'a>, ConfirmError> {
-    let mut batch_pin_by_id: U64Map<&CreatePin> = U64Map::default();
-    // Reachable plans store the same pin Arc in `packed` and `batch_pin`.
-    // Indexing `packed` is that pin either way.
-    for ((pin, _ins), fk) in plan.packed.iter().zip(plan.planned_fks.iter()) {
-        if let Some(id) = fk.get() {
-            batch_pin_by_id.insert(id, pin);
-        }
-    }
     if plan.edges.is_empty() && !plan.planned_fks.is_empty() {
         return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: plan spend edges empty",
@@ -34,13 +26,18 @@ pub fn spend_edges_from_plan<'a>(
     let spend_edges = std::borrow::Cow::Borrowed(&plan.edges);
     let fill_vouts = parent_pin.parent_vouts.is_empty();
     let (parent_vouts, vouts_from_stamp) = if fill_vouts {
+        let planned_ids = if plan.per_header_ranges.is_empty() {
+            plan.planned_create_ids()
+        } else {
+            crate::U64Set::default()
+        };
         let mut parent_vouts: U64Map<Vec<u32>> = U64Map::default();
         for eds in plan.edges.values() {
             for e in eds {
                 let Some(pid) = e.create_fk.get() else {
                     continue;
                 };
-                if plan.create_in_spend_header(e.spend_fk, pid) {
+                if plan.create_in_planned_or_header(e.spend_fk, pid, &planned_ids) {
                     continue;
                 }
                 parent_vouts.entry(pid).or_default().push(e.vout);
@@ -50,6 +47,16 @@ pub fn spend_edges_from_plan<'a>(
     } else {
         (std::mem::take(&mut parent_pin.parent_vouts), true)
     };
+    let mut batch_pin_by_id: U64Map<&CreatePin> = U64Map::default();
+    if !parent_vouts.is_empty() {
+        for ((pin, _ins), fk) in plan.packed.iter().zip(plan.planned_fks.iter()) {
+            if let Some(id) = fk.get() {
+                if parent_vouts.contains_key(&id) {
+                    batch_pin_by_id.insert(id, pin);
+                }
+            }
+        }
+    }
     Ok(PlanSpend {
         spend_edges,
         parent_vouts,
@@ -140,23 +147,21 @@ pub fn fill_pins(
     stats: &crate::ConfirmStats,
 ) -> U64Map<CreatePin> {
     let mut plan_by_id: U64Map<CreatePin> = U64Map::default();
-    if let Some(ifo) = in_flight {
-        for (id, need) in parent_vouts {
-            if plan_by_id.contains_key(id) {
-                continue;
-            }
-            if let Some(pin) = ifo.get_out(*id) {
-                let _ = need;
-                plan_by_id.insert(*id, std::sync::Arc::clone(pin));
-            }
-        }
-    }
     for id in parent_vouts.keys() {
-        if plan_by_id.contains_key(id) {
-            continue;
-        }
         if let Some(pin) = batch_pin_by_id.get(id) {
             plan_by_id.insert(*id, std::sync::Arc::clone(pin));
+        }
+    }
+    if let Some(ifo) = in_flight {
+        if let Some(min_out) = ifo.min_out_id() {
+            for id in parent_vouts.keys() {
+                if plan_by_id.contains_key(id) || *id < min_out {
+                    continue;
+                }
+                if let Some(pin) = ifo.get_out(*id) {
+                    plan_by_id.insert(*id, std::sync::Arc::clone(pin));
+                }
+            }
         }
     }
     let t_recent = Instant::now();
@@ -387,6 +392,8 @@ pub fn pin_for_wire_batch<'a>(
         }
     }
 
+    let edges_ns = t_thin.elapsed().as_nanos() as u64;
+    let t_fill = Instant::now();
     let plan_by_id = fill_pins(
         &parent_vouts,
         &batch_pin_by_id,
@@ -394,10 +401,16 @@ pub fn pin_for_wire_batch<'a>(
         in_flight,
         query.confirm_stats(),
     );
+    let fill_ns = t_fill.elapsed().as_nanos() as u64;
+    let t_reject = Instant::now();
     reject_vout_past_n_out(&parent_vouts, parent_pin, &plan_by_id)?;
+    let reject_ns = t_reject.elapsed().as_nanos() as u64;
 
     let mut batch_parents = crate::BatchParents::with_capacity(parent_vouts.len());
-    let thin_ns = t_thin.elapsed().as_nanos() as u64;
+    let thin_ns = edges_ns.saturating_add(fill_ns).saturating_add(reject_ns);
+    crate::note_confirm(&query.confirm_stats().thin_edges_ns, edges_ns);
+    crate::note_confirm(&query.confirm_stats().thin_fill_ns, fill_ns);
+    crate::note_confirm(&query.confirm_stats().thin_reject_ns, reject_ns);
     crate::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
     let mut still_need: U64Map<Vec<u32>> = U64Map::default();
 

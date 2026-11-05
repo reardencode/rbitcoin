@@ -207,6 +207,9 @@ confirm_window! {
     cold_range_guess_full_n,
     body_tx_reads,
     thin_ns,
+    thin_edges_ns,
+    thin_fill_ns,
+    thin_reject_ns,
     parent_pin_ns,
     // class C / SH
     strong_ns,

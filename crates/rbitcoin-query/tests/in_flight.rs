@@ -256,6 +256,24 @@ fn same_txid_overwrite_does_not_double_count_creates_bytes() {
 }
 
 #[test]
+fn min_out_id_follows_note_and_prune() {
+    let mut m = InFlight::new();
+    assert_eq!(m.min_out_id(), None);
+    let low = pin(10);
+    let high = pin(50);
+    m.note_pins([(Fk(50), &high)], Some(3));
+    assert_eq!(m.min_out_id(), Some(50));
+    m.note_pins([(Fk(10), &low)], Some(1));
+    assert_eq!(m.min_out_id(), Some(10));
+    m.prune_below_height(Some(2));
+    assert_eq!(m.min_out_id(), Some(50));
+    assert!(m.get_out(10).is_none());
+    m.drop_from_height(3);
+    assert_eq!(m.min_out_id(), None);
+    assert!(m.get_out(50).is_none());
+}
+
+#[test]
 fn empty_note_is_noop() {
     let mut m = InFlight::new();
     m.note_pins(std::iter::empty(), Some(1));
