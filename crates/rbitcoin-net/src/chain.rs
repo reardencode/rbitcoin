@@ -1662,6 +1662,7 @@ impl ChainHub {
             self.invalidate_header_report();
         }
         self.drop_held(hash);
+        self.cache.drop_servable(&hash);
     }
 
     /// A block failed connect on a consensus rule. Unlike
@@ -2955,6 +2956,7 @@ impl ChainHub {
                     let bh = b.block_hash();
                     self.invalidated.set.write().unwrap().insert(bh);
                     self.drop_held(bh);
+                    self.cache.drop_servable(&bh);
                     path.push(bh);
                 }
             }
@@ -2978,6 +2980,8 @@ impl ChainHub {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
             self.invalidated.set.write().unwrap().insert(hash);
+            // Reconsider still uses the hold. Peers must not get this body.
+            self.cache.drop_servable(&hash);
             self.revalidate_header_report();
             self.invalidated.paths.write().unwrap().push(InvalidPath {
                 hashes: vec![hash],
@@ -4455,6 +4459,9 @@ impl ChainHub {
         let tx_count = block.txdata.len();
         let owned = Arc::try_unwrap(block).unwrap_or_else(|a| (*a).clone());
         let _ = self.cache.push_best(owned);
+        // The store can serve this hash now. A staged copy would outlive
+        // prune and answer getdata the archive is not allowed to serve.
+        self.cache.drop_servable(&hash);
         // Tip-follow / wire accept: one info line per height. IBD bulk confirm
         // uses note_confirmed_tip without this line; IBD retains periodic status.
         info!("{}", log_update_tip_line(height, &hash, &header, tx_count));

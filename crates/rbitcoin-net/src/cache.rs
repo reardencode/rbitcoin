@@ -27,6 +27,8 @@ pub struct Inner {
     pub by_hash: HashMap<BlockHash, Block>,
     /// Best-chain hashes by height (contiguous from 0).
     pub chain: Vec<BlockHash>,
+    /// Unconnected bodies a compact announce may serve. Not best-chain.
+    servable: HashMap<BlockHash, Block>,
 }
 
 impl Default for BlockCache {
@@ -115,6 +117,22 @@ impl BlockCache {
         let mut g = self.inner.write().unwrap();
         g.by_hash.clear();
         g.chain.clear();
+        g.servable.clear();
+    }
+
+    /// Park a body so `getblocktxn` can serve it before connect. Best-chain
+    /// lookup does not see this map.
+    pub fn stage_servable(&self, block: Block) {
+        let hash = block.block_hash();
+        self.inner.write().unwrap().servable.insert(hash, block);
+    }
+
+    pub fn servable(&self, hash: &BlockHash) -> Option<Block> {
+        self.inner.read().unwrap().servable.get(hash).cloned()
+    }
+
+    pub fn drop_servable(&self, hash: &BlockHash) {
+        self.inner.write().unwrap().servable.remove(hash);
     }
 
     /// Append a block that extends the best chain (or becomes genesis at height 0).

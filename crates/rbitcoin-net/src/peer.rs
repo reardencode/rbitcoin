@@ -202,6 +202,7 @@ pub async fn accept_received_from_peer(
     block: Block,
     session: Option<&crate::peers::LivePeer>,
 ) -> Result<AcceptOutcome, NetError> {
+    let announced = block.block_hash();
     let waive =
         session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.session_is_trusted_peer(s)));
     // Relay may flip inside this connect once the index is in tip mode.
@@ -232,10 +233,58 @@ pub async fn accept_received_from_peer(
             r
         })
     };
+    if drop_servable_after_accept(hub, &announced, &r) {
+        hub.cache.drop_servable(&announced);
+    }
     if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
         s.note_last_block_at(at);
     }
     r
+}
+
+/// Drop the staged body only once this hash is in the store, or the block
+/// was rejected for good. `Accepted` can be a different held branch.
+/// `UnknownParent` and a lost tip race come back as
+/// [`AcceptOutcome::IgnoredWeaker`]. A not-yet-valid timestamp is not a
+/// permanent reject, and the store still has no body.
+fn drop_servable_after_accept(
+    hub: &ChainHub,
+    announced: &bitcoin::BlockHash,
+    r: &Result<AcceptOutcome, NetError>,
+) -> bool {
+    match r {
+        Ok(AcceptOutcome::AlreadyHave) => true,
+        Ok(AcceptOutcome::Accepted { .. }) => store_has_announced_body(hub, announced),
+        Ok(AcceptOutcome::IgnoredWeaker) => false,
+        Err(e) if keep_staged_body_after_accept_err(hub, e) => false,
+        Err(_) => true,
+    }
+}
+
+/// Not a verdict on the staged bytes. `Mutated` stays dropped: `servable`
+/// is read before the store, so those transactions would answer every later
+/// `getdata` for this hash.
+fn keep_staged_body_after_accept_err(hub: &ChainHub, e: &NetError) -> bool {
+    if e.is_mutated() {
+        return false;
+    }
+    net_error_needs_parent(e)
+        || matches!(e, NetError::Store(_) | NetError::Cancelled)
+        || net_error_is_store_not_found(e)
+        || crate::chain::accept_err_is_temporary_time(e)
+        || matches!(e, NetError::Consensus(m) if m == "bad-prevblk")
+        || (hub.query.trust_peer() && crate::chain::accept_err_is_warn_and_apply(e))
+}
+
+fn store_has_announced_body(hub: &ChainHub, hash: &bitcoin::BlockHash) -> bool {
+    if hub.has_block(hash) {
+        return true;
+    }
+    hub.query
+        .reconstruct_block_by_hash(&hash.to_byte_array())
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// The hub and key a misbehavior exit may record. Noban and manual peers
@@ -4447,13 +4496,11 @@ pub fn compact_serve_outcome(
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(CompactServe::Missing);
     };
-    let block_h = query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|ht| ht.0)
-        .unwrap_or(0);
-    if tip_h.saturating_sub(block_h) > MAX_CMPCTBLOCK_DEPTH {
+    if !within_relay_window(query, &block) {
+        return Ok(CompactServe::Missing);
+    }
+    let block_h = served_block_height(query, &block);
+    if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_CMPCTBLOCK_DEPTH) {
         return Ok(CompactServe::Full(block));
     }
     match HeaderAndShortIds::from_block(&block, rand_nonce(), ver, &pref) {
@@ -4558,6 +4605,59 @@ pub async fn serve_getdata_wtx(
 /// Core: past this depth a `getblocktxn` is answered with the full block.
 #[doc(hidden)]
 pub const MAX_GETBLOCKTXN_DEPTH: u32 = 10;
+
+/// Best-chain height, or the same count walked back to a confirmed
+/// ancestor. A tip child is `tip + 1`, so it stays inside the compact
+/// window. A loser still ages out after its parent leaves the best chain.
+///
+/// The walk is [`crate::chain::ancestor_walk`]: at most
+/// [`MAX_GETBLOCKTXN_DEPTH`] headers, and `None` when that cap is hit.
+/// `None` is an unknown height, not genesis. Height 0 would already be
+/// the full block once the tip is past the window. A height-index error
+/// is the same unknown height: the body stays the transactions.
+fn served_block_height(query: &Query, block: &Block) -> Option<u32> {
+    match query.height_of_hash(&block.block_hash().to_byte_array()) {
+        Ok(Some(h)) => return Some(h.0),
+        Err(_) => return None,
+        Ok(None) => {}
+    }
+    let hash = block.block_hash();
+    crate::chain::ancestor_walk(
+        &hash,
+        MAX_GETBLOCKTXN_DEPTH,
+        |cur| {
+            if cur == &hash {
+                return Some(block.header);
+            }
+            let Ok(Some((_, rec))) = query.get_header_by_hash(&cur.to_byte_array()) else {
+                return None;
+            };
+            query.wire_header_from_record(&rec).ok()
+        },
+        |prev| match query.height_of_hash(&prev.to_byte_array()) {
+            Ok(Some(h)) => Some(h.0),
+            Ok(None) | Err(_) => None,
+        },
+    )
+}
+
+/// Active-chain blocks are always served. A side body is silent once the
+/// best header is a month ahead of it, same as full-block `getdata`.
+/// A failed height read is not proof the block is off the active chain.
+fn within_relay_window(query: &Query, block: &Block) -> bool {
+    match query.height_of_hash(&block.block_hash().to_byte_array()) {
+        Ok(Some(_)) | Err(_) => return true,
+        Ok(None) => {}
+    }
+    let Some(tip_h) = query.tip_height() else {
+        return false;
+    };
+    let Ok(best) = query.wire_header_at_height(tip_h) else {
+        return false;
+    };
+    u64::from(best.time).saturating_sub(u64::from(block.header.time))
+        < crate::chain::STALE_RELAY_AGE_LIMIT_SECS
+}
 
 #[doc(hidden)]
 pub enum GetBlockTxnServe {
@@ -4664,6 +4764,9 @@ pub fn getblocktxn_reply(
     let Some(block) = block else {
         return Ok(None);
     };
+    if !within_relay_window(query, &block) {
+        return Ok(None);
+    }
     let mut transactions = Vec::with_capacity(txs_request.indexes.len());
     for idx in &txs_request.indexes {
         match block.txdata.get(*idx as usize) {
@@ -4671,13 +4774,8 @@ pub fn getblocktxn_reply(
             None => return Ok(Some(GetBlockTxnServe::BadIndex)),
         }
     }
-    let block_h = query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|h| h.0)
-        .unwrap_or(0);
-    if tip_h.saturating_sub(block_h) > MAX_GETBLOCKTXN_DEPTH {
+    let block_h = served_block_height(query, &block);
+    if block_h.is_some_and(|h| tip_h.saturating_sub(h) > MAX_GETBLOCKTXN_DEPTH) {
         return Ok(Some(GetBlockTxnServe::Block(block)));
     }
     Ok(Some(GetBlockTxnServe::Txns(BlockTransactions {
@@ -6392,7 +6490,8 @@ fn hb_peer_offered_block(
 /// Send `cmpctblock` to peers who asked for high-bandwidth announcements
 /// (`hb_from`: they sent `sendcmpct` announce=1) as soon as a reconstructed
 /// or received body has a PoW-valid header that extends our tip, **before**
-/// `tip-accept` connect. Does not mark the block connected.
+/// `tip-accept` connect. The body is staged for `getblocktxn` before that
+/// message is queued. Does not mark the block connected.
 ///
 /// The compact message is built only when one of those peers would be
 /// offered the block. No such peer returns before the clone and the
@@ -6444,6 +6543,9 @@ pub async fn relay_new_pow_valid_block(
             return;
         }
     };
+    // The peer can ask for the missing transactions as soon as this message
+    // leaves. Connect has not written the body yet.
+    hub.cache.stage_servable(block.clone());
     for s in targets {
         let Some(out) = s.writer() else {
             continue;
@@ -7329,6 +7431,9 @@ pub fn block_for_peer(
     if let Some(block) = cache.get_block(hash) {
         return Ok(Some(block));
     }
+    if let Some(block) = cache.servable(hash) {
+        return Ok(Some(block));
+    }
     match query.reconstruct_block_by_hash(&hash.to_byte_array()) {
         Ok(b) => Ok(b),
         Err(rbitcoin_store::StoreError::Pruned { .. }) => Ok(None),
@@ -7355,7 +7460,7 @@ pub fn encode_served_witness_block(
 ) -> Result<Option<Vec<u8>>, NetError> {
     crate::reactor::assert_not_reactor("getdata reconstruct");
     let t0 = std::time::Instant::now();
-    if let Some(block) = cache.get_block(hash) {
+    if let Some(block) = cache.get_block(hash).or_else(|| cache.servable(hash)) {
         let tx_count = block.txdata.len() as u32;
         let encoded = crate::v2::encode_v2_contents(NetworkMessage::Block(block))?;
         let payload_len = encoded.len().saturating_sub(1);
