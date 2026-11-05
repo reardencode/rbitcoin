@@ -1800,8 +1800,8 @@ impl Store {
         let gen = self
             .spend_reorg_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        self.txs.sync_replay_bodies()?;
-        self.spenders.flush()?;
+        self.txs.sync_replay_data()?;
+        self.spenders.sync_data_only()?;
         self.store_spend_marker(tip, tip, gen)?;
         Ok(t.elapsed().as_nanos() as u64)
     }

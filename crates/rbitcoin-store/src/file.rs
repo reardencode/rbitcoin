@@ -1053,6 +1053,13 @@ impl TableFile {
     /// Does not publish the high-water mark and does not clear `needs_sync`.
     /// Uses the read fd so the grow lock is not held across the wait.
     pub fn sync_data_only(&self) -> Result<(), StoreError> {
+        #[cfg(debug_assertions)]
+        if crate::io_handle::take_fail_sync(self.io_handle()) {
+            return Err(StoreError::io(
+                &self.path,
+                std::io::Error::from_raw_os_error(5),
+            ));
+        }
         self.read_file
             .sync_data()
             .map_err(|e| StoreError::io(&self.path, e))

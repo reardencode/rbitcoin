@@ -177,6 +177,82 @@ fn checkpoint_stops_below_a_pending_annotate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A clean stem still has to `sync_data` before the marker bytes change.
+/// Failing `spent` or `spenders` after the tx body has synced must leave
+/// the previous file alone. `flush` on a clean file would skip that and publish.
+#[test]
+fn clean_replay_does_not_publish_the_marker_before_the_barrier() {
+    use std::sync::atomic::Ordering;
+
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-spend-barrier-{}-{}",
+        std::process::id(),
+        unix_ms()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = rbitcoin_store::Store::create_tiny(&dir).unwrap();
+    s.confirmed
+        .set(
+            &rbitcoin_store::ClassCWrite::for_test(),
+            rbitcoin_primitives::Height(0),
+            rbitcoin_primitives::Fk(1),
+        )
+        .unwrap();
+    SpendDurable::new(4, 4).store(s.path()).unwrap();
+    let marker = s.path().join(SPEND_DURABLE_NAME);
+    let before = std::fs::read(&marker).unwrap();
+    for file in [
+        &s.txs.body.body,
+        &s.txs.seqsigwit.body,
+        &s.txs.spent.body,
+        &s.txs.txids.file,
+        &s.txs.txstat.body,
+        &s.txs.txstat.ovf,
+        &s.txs.txstat.blk,
+        &s.txs.input.loc,
+        &s.txs.input.off,
+        &s.txs.input.body,
+        &s.spenders.body,
+    ] {
+        file.needs_sync.store(false, Ordering::Release);
+    }
+
+    let spent = s.txs.spent.body.io_handle();
+    rbitcoin_store::io_handle::arm_fail_sync(spent, 1);
+    let arm = SyncArm(spent);
+    let err = s.sync_spend_durable(0).unwrap_err();
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        before,
+        "spent barrier published the marker: {err}"
+    );
+    drop(arm);
+
+    let spenders = s.spenders.body.io_handle();
+    rbitcoin_store::io_handle::arm_fail_sync(spenders, 1);
+    let arm = SyncArm(spenders);
+    let err = s.sync_spend_durable(0).unwrap_err();
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        before,
+        "spenders barrier published the marker: {err}"
+    );
+    drop(arm);
+
+    s.sync_spend_durable(0).unwrap();
+    let m = SpendDurable::load(s.path()).unwrap().unwrap();
+    assert_eq!((m.annotated_through(), m.durable_through()), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct SyncArm(rbitcoin_store::io_handle::IoHandle);
+
+impl Drop for SyncArm {
+    fn drop(&mut self) {
+        rbitcoin_store::io_handle::disarm_sync(self.0);
+    }
+}
+
 /// A replacement notes the same height after the write that is about to
 /// clear. The earlier token must leave the replacement pending.
 #[test]
