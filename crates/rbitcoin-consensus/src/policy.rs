@@ -199,6 +199,7 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     check_libre_annex(tx)
 }
 
+/// Libre admission at an explicit min-relay floor (Core `-minrelaytxfee`).
 ///
 /// `fee_delta` is the `prioritisetransaction` delta. A tx with a dust output
 /// must pay nothing, base or modified (Core `PreCheckEphemeralTx`): it enters

@@ -24,6 +24,8 @@ Added
 - **Peers relay the anchor pair.** A peer's 0-fee anchor parent and the
   child that spends the anchor are admitted together as 1p1c, whichever
   arrives first, so an exit package one node accepts reaches the rest of
-  the network. A peer's child of any other low-fee parent still waits in
-  the orphanage. A peer pair that fails is not tried again until the next
-  block, and a waiting child is tried once per parent delivery.
+  the network, also when a full mempool has raised the fee floor. A peer's
+  child of any other low-fee parent still waits in the orphanage. A peer
+  pair that fails is not tried again until the next block, one waiting
+  child is tried per parent delivery, and a child that fails hard is
+  dropped rather than parked again.

@@ -2089,10 +2089,15 @@ impl ActiveMempool {
         Ok(accepted)
     }
 
-    /// Lift the one parked orphan that waits only on `parent` and spends its
+    /// Lift one parked orphan that waits only on `parent` and spends its
     /// dust output, so it can be admitted with `parent` as 1p1c (Core finds
-    /// the orphan child of a reconsiderable parent the same way).
-    pub fn lift_dust_spender(&mut self, parent: &Transaction) -> Option<LiftedOrphan> {
+    /// the orphan child of a reconsiderable parent the same way). `tried`
+    /// skips a child whose pair with `parent` already failed.
+    pub fn lift_dust_spender(
+        &mut self,
+        parent: &Transaction,
+        tried: impl Fn(&Transaction) -> bool,
+    ) -> Option<LiftedOrphan> {
         let pid = parent.compute_txid();
         let child = self
             .orphanage
@@ -2100,7 +2105,9 @@ impl ActiveMempool {
             .get(&pid)?
             .iter()
             .filter_map(|id| self.orphanage.by_txid.get(id))
-            .find(|e| e.missing.len() == 1 && policy::spends_dust_of(parent, &e.tx))?
+            .find(|e| {
+                e.missing.len() == 1 && policy::spends_dust_of(parent, &e.tx) && !tried(&e.tx)
+            })?
             .tx
             .clone();
         self.lift_parked_member(&child)
@@ -2555,6 +2562,13 @@ impl ActiveMempool {
                 Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
             }
             AcceptError::Policy("min relay fee") => Some(AcceptFailureRecord::Extra),
+            // Under the rolling floor, keep only an anchor parent: a dust
+            // output reaches the fee check only on a 0-fee tx, and its child
+            // pays for both (1p1c). Other sub-floor txs stay out of the
+            // small extra pool.
+            AcceptError::Policy("mempool min fee") if policy::dust_vouts(tx).next().is_some() => {
+                Some(AcceptFailureRecord::Extra)
+            }
             _ => None,
         }
     }

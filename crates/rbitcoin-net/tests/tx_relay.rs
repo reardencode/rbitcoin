@@ -3404,6 +3404,70 @@ fn peer_anchor_pair_admits_in_either_order() {
     }
 }
 
+/// Under fee pressure a lone anchor parent fails the rolling floor
+/// (`mempool min fee`), not `min relay fee`. The pair still relays from
+/// peers in either order, as `submitpackage` admits it.
+#[test]
+fn peer_anchor_pair_relays_under_fee_pressure() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.lock_write().note_evicted_feerate(5_000);
+
+        let parent = zero_fee_anchor(cbs[0]);
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        let err = from_peer(&hub, &parent, 7, on_async).expect_err("alone");
+        assert!(
+            matches!(err, AcceptError::Policy("mempool min fee")),
+            "{err:?}"
+        );
+        from_peer(&hub, &child, 8, on_async).expect("parent first");
+        assert!(hub.contains(&child.compute_txid()));
+
+        let parent = zero_fee_anchor(cbs[2]);
+        let child = spend_anchor(&parent, cbs[3], 50_000);
+        let err = from_peer(&hub, &child, 8, on_async).expect_err("orphan");
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        from_peer(&hub, &parent, 7, on_async).expect("child first");
+        assert!(hub.contains(&child.compute_txid()));
+    }
+}
+
+/// The anchor is anyone-can-spend, so a peer can park invalid spenders of
+/// it. Each parent delivery tries one waiting child; a child that failed is
+/// dropped, not tried again, so the paying child is reached.
+#[test]
+fn invalid_anchor_spenders_do_not_hold_the_slot() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = zero_fee_anchor(cbs[0]);
+        for fee in 1..=5u64 {
+            let mut bad = spend_anchor(&parent, cbs[1], 50_000 + fee);
+            bad.output.push(pay_true(0));
+            let err = from_peer(&hub, &bad, 9, on_async).expect_err("parked");
+            assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        }
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert_eq!(hub.orphan_count(), 6);
+        for _ in 0..6 {
+            if from_peer(&hub, &parent, 7, on_async).is_ok() {
+                break;
+            }
+        }
+        assert!(
+            hub.contains(&child.compute_txid()),
+            "the paying child got in"
+        );
+        assert_eq!(hub.orphan_count(), 0, "the dust spenders were dropped");
+    }
+}
+
 /// A peer pair that failed is not tried again until the next block, so a
 /// re-sent child or parent does not repeat the parent's verify and commit.
 #[test]
