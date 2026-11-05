@@ -7,6 +7,8 @@ use bitcoin::script::{Instruction, Script};
 use bitcoin::sighash::SighashCache;
 use bitcoin::Transaction;
 
+use rbitcoin_primitives::{OP_CHECKSIG, OP_DUP, OP_EQUALVERIFY, OP_HASH160};
+
 use super::{crypto, interpreter};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
@@ -80,14 +82,15 @@ pub fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), Consensus
 /// signature hashes `spk` unchanged, with no script walk and no allocation.
 fn sighash_script_code<'a>(spk: &'a [u8], sig: &[u8]) -> Cow<'a, [u8]> {
     if spk.len() == 25 && sig.len() == 20 && sig == &spk[3..23] {
-        Cow::Borrowed(P2PKH_SCRIPT_CODE_KEYHASH_REMOVED)
+        Cow::Borrowed(&P2PKH_SCRIPT_CODE_KEYHASH_REMOVED)
     } else {
         Cow::Borrowed(spk)
     }
 }
 
 /// `OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG`.
-const P2PKH_SCRIPT_CODE_KEYHASH_REMOVED: &[u8] = &[0x76, 0xa9, 0x88, 0xac];
+const P2PKH_SCRIPT_CODE_KEYHASH_REMOVED: [u8; 4] =
+    [OP_DUP, OP_HASH160, OP_EQUALVERIFY, OP_CHECKSIG];
 
 #[cfg(test)]
 mod tests {
