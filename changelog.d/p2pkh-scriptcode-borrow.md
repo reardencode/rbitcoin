@@ -1,3 +1,3 @@
 Changed
 
-- **The P2PKH fast path no longer walks the script for `FindAndDelete`.** On the 25-byte template the signature push matches only when it is the 20-byte pubkey hash. Every other signature hashes the script in place.
+- **The P2PKH fast path still hashes the post-`FindAndDelete` scriptCode, without walking the script.** A signature that is the 20-byte pubkey hash still hashes `OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG`. Every other signature still hashes the 25-byte template, which `FindAndDelete` would leave unchanged.
