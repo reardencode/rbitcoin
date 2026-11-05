@@ -61,16 +61,24 @@ pub fn global_write_from_env_str(s: &str) -> Option<WriteIoBackend> {
 
 #[doc(hidden)]
 pub fn global_read_from_env() -> Option<ReadIoBackend> {
-    std::env::var("RBITCOIN_IO")
-        .ok()
-        .and_then(|s| global_read_from_env_str(&s))
+    global_read_from_vars(|k| std::env::var(k).ok())
+}
+
+#[doc(hidden)]
+pub fn global_read_from_vars(mut var: impl FnMut(&str) -> Option<String>) -> Option<ReadIoBackend> {
+    var("RBITCOIN_IO").as_deref().and_then(parse_read_token)
 }
 
 #[doc(hidden)]
 pub fn global_write_from_env() -> Option<WriteIoBackend> {
-    std::env::var("RBITCOIN_IO")
-        .ok()
-        .and_then(|s| global_write_from_env_str(&s))
+    global_write_from_vars(|k| std::env::var(k).ok())
+}
+
+#[doc(hidden)]
+pub fn global_write_from_vars(
+    mut var: impl FnMut(&str) -> Option<String>,
+) -> Option<WriteIoBackend> {
+    var("RBITCOIN_IO").as_deref().and_then(parse_write_token)
 }
 
 #[inline]
