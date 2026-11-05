@@ -403,11 +403,12 @@ fn should_poll_peer_headers_skips_behind_and_weaker_fork() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A session that starts after the tip moved still announces that tip once.
-#[test]
-fn session_start_announces_unsent_tip_once() {
-    use bitcoin::p2p::message_network::VersionMessage;
-    use bitcoin::p2p::ServiceFlags;
+/// `peer_session_with` announces a tip that moved before subscribe. SendHeaders
+/// has not been read, so the announcement is an inv, and that inv is the mark
+/// that keeps a second catch-up quiet.
+#[tokio::test]
+async fn session_start_announces_unsent_tip_once() {
+    use rbitcoin_net::v2::read_v2_frame;
 
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unsent-tip");
     hub.ensure_genesis().unwrap();
@@ -415,64 +416,58 @@ fn session_start_announces_unsent_tip_once() {
         .unwrap();
     assert_eq!(hub.tip_height(), Some(3));
     let tip = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
     let peers = rbitcoin_net::peers::PeerHub::new();
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
-    let ver = VersionMessage {
-        version: 70016,
-        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-        timestamp: 0,
-        receiver: Address::new(&addr, ServiceFlags::NONE),
-        sender: Address::new(&addr, ServiceFlags::NONE),
-        nonce: 7,
-        user_agent: "/rbitcoin:test/".into(),
-        start_height: 0,
-        relay: true,
-    };
-    let session = peers.register(
-        addr,
-        addr,
-        &ver,
-        false,
-        rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-    );
-    assert_eq!(session.header_marks().0, None);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-    let mut follow = PeerFollowState::new();
-    follow.wants_headers = true;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
-        announce_unsent_tip(&hub, &out_tx, &mut follow, Some(session.as_ref()))
-            .await
-            .unwrap();
-        match out_rx.try_recv().unwrap().expect_msg() {
-            NetworkMessage::Headers(hs) => {
-                assert_eq!(
-                    hs.last().map(|h| h.block_hash()),
-                    Some(tip),
-                    "session start queues the current tip"
-                );
-            }
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18470).await;
+    assert_eq!(sess.live.header_marks().0, None);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_inv = false;
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame =
+            match tokio::time::timeout(left, read_v2_frame(&mut sess.reader, sess.magic)).await {
+                Ok(Ok(frame)) => frame,
+                _ => break,
+            };
+        match frame.decode().payload() {
             NetworkMessage::Inv(inv) => {
                 assert!(
                     inv.iter()
                         .any(|i| matches!(i, Inventory::Block(h) if *h == tip)),
-                    "session start queues the current tip"
+                    "session start queues an inv of the current tip"
+                );
+                saw_inv = true;
+                break;
+            }
+            NetworkMessage::Headers(hs) => {
+                assert_ne!(
+                    hs.last().map(|h| h.block_hash()),
+                    Some(tip),
+                    "session start has not read sendheaders, so the tip is an inv"
                 );
             }
-            other => panic!("expected a tip announcement, got {other:?}"),
+            _ => {}
         }
-        assert!(out_rx.try_recv().is_err(), "one announcement");
-        announce_unsent_tip(&hub, &out_tx, &mut follow, Some(session.as_ref()))
-            .await
-            .unwrap();
-        assert!(
-            out_rx.try_recv().is_err(),
-            "a marked tip is not announced again"
-        );
-    });
+    }
+    assert!(
+        saw_inv,
+        "peer_session_with announces the tip it already missed"
+    );
+    assert_eq!(
+        sess.live.header_marks().0,
+        Some(tip),
+        "the inv marks the tip sent"
+    );
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    announce_unsent_tip(hub.as_ref(), &out_tx, &mut follow, Some(sess.live.as_ref()))
+        .await
+        .unwrap();
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a marked tip is not announced again"
+    );
+    sess.session.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
 

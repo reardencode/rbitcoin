@@ -1906,6 +1906,9 @@ pub async fn on_tip_event(
         TipAnnounce::Skip => {}
         TipAnnounce::Inv(h) => {
             queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::Block(h)]))?;
+            if let Some(s) = session {
+                s.note_best_header_sent(h);
+            }
         }
         TipAnnounce::Headers(hs) => {
             if let Some(last) = hs.last() {
