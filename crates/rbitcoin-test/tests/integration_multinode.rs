@@ -3220,10 +3220,10 @@ async fn pin_blocksonly_seeder_tx_disconnects(
 /// while connected. `max_run_secs=0` stays a node-crate unit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn node_run_p2p_short() {
-    // Same budget as the outer timeout. A fixed 60s exit under coverage
-    // drops the seeder while this pin is still reading it, and the redial
-    // handshake has no tip inv yet.
-    let wall = llvm_cov_wall(60, 180);
+    // The node cap is past this deadline. An equal cap drops the seeder
+    // while the pin is still reading it, and the redial handshake has no
+    // tip inv yet. A fast run still ends on `stop`.
+    let wall = llvm_cov_wall(120, 180);
     let fut = async {
         use rbitcoin_node::{run_p2p, NodeConfig};
         use rbitcoin_primitives::Network;
@@ -3259,7 +3259,7 @@ async fn node_run_p2p_short() {
             )
             .unwrap();
         }
-        cfg.max_run_secs = Some(wall.as_secs());
+        cfg.max_run_secs = Some(wall.as_secs().saturating_add(30));
         cfg.connect_redial = rbitcoin_net::REDIAL_INTERVAL_TEST;
         cfg.mempool.blocksonly = true;
         cfg.max_tip_age_secs = Some(u64::MAX);
