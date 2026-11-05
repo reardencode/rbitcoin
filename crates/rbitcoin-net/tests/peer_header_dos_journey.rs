@@ -1640,7 +1640,7 @@ fn discover_from_peers_announces_the_reported_address() {
     };
 
     assert!(
-        announced_ips(&reporting_peer(&hub(false), clearnet, Out, seen)).is_empty(),
+        &reporting_peer(&hub(false), clearnet, Out, seen).take_self_announce_msg().is_none(),
         "off by default: a peer's report is never announced"
     );
     let on = hub(true);
@@ -1659,7 +1659,9 @@ fn discover_from_peers_announces_the_reported_address() {
         IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 7)),
     ] {
         assert!(
-            announced_ips(&reporting_peer(&on, clearnet, Out, bad)).is_empty(),
+            reporting_peer(&on, clearnet, Out, bad)
+                .take_self_announce_msg()
+                .is_none(),
             "an unroutable or CJDNS report {bad} is not announced"
         );
     }
@@ -1668,7 +1670,7 @@ fn discover_from_peers_announces_the_reported_address() {
             .parse()
             .unwrap();
     assert!(
-        announced_ips(&reporting_peer(&on, onion, Out, seen)).is_empty(),
+        &reporting_peer(&on, onion, Out, seen).take_self_announce_msg().is_none(),
         "an onion peer never gets a clearnet IP"
     );
     let proxied = hub(true);
@@ -1677,7 +1679,7 @@ fn discover_from_peers_announces_the_reported_address() {
         i2p_sam: None,
     });
     assert!(
-        announced_ips(&reporting_peer(&proxied, clearnet, Out, seen)).is_empty(),
+        &reporting_peer(&proxied, clearnet, Out, seen).take_self_announce_msg().is_none(),
         "a peer dialled through the proxy sees the exit, and gets nothing"
     );
 
@@ -1699,10 +1701,10 @@ fn discover_from_peers_announces_the_reported_address() {
 
     let no_discover = hub(true);
     no_discover.set_discover(false);
-    assert!(announced_ips(&reporting_peer(&no_discover, clearnet, Out, seen)).is_empty());
+    assert!(&reporting_peer(&no_discover, clearnet, Out, seen).take_self_announce_msg().is_none());
     let no_listen = hub(true);
     no_listen.set_clearnet_listen(false);
-    assert!(announced_ips(&reporting_peer(&no_listen, clearnet, Out, seen)).is_empty());
+    assert!(&reporting_peer(&no_listen, clearnet, Out, seen).take_self_announce_msg().is_none());
 }
 
 /// A peer gossips this node's own onion, I2P and external addresses back.
