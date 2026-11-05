@@ -150,7 +150,8 @@ pub fn follow_connect_timeout(dialer: &Dialer, peer: rbitcoin_net::NetAddr) -> D
     dialer.connect_timeout(peer, Duration::from_secs(FOLLOW_CONNECT_SECS))
 }
 
-/// Install SIGTERM / SIGINT (and Ctrl+C) handlers that trip `shutdown`.
+/// Install one handler for SIGTERM, SIGINT, SIGHUP, SIGUSR1, and SIGUSR2.
+/// Each trips the same `shutdown` as Ctrl+C. There is no second handler.
 #[doc(hidden)]
 pub fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     tokio::spawn(async move {
@@ -171,9 +172,33 @@ pub fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
                     return;
                 }
             };
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("signal: failed to install SIGHUP handler: {e}");
+                    return;
+                }
+            };
+            let mut sigusr1 = match signal(SignalKind::user_defined1()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("signal: failed to install SIGUSR1 handler: {e}");
+                    return;
+                }
+            };
+            let mut sigusr2 = match signal(SignalKind::user_defined2()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("signal: failed to install SIGUSR2 handler: {e}");
+                    return;
+                }
+            };
             tokio::select! {
                 _ = sigterm.recv() => info!("signal: received SIGTERM"),
                 _ = sigint.recv() => info!("signal: received SIGINT"),
+                _ = sighup.recv() => info!("signal: received SIGHUP"),
+                _ = sigusr1.recv() => info!("signal: received SIGUSR1"),
+                _ = sigusr2.recv() => info!("signal: received SIGUSR2"),
             }
         }
         #[cfg(not(unix))]

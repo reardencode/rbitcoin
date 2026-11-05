@@ -985,6 +985,108 @@ async fn cancelled_completes_after_request() {
     j.await.unwrap();
 }
 
+/// SIGHUP, SIGUSR1, and SIGUSR2 take the same shutdown as SIGTERM, including
+/// the spend-durable flush. The pin is that file, not a log line.
+///
+/// The node is a child process. A signal in this process would also hit every
+/// other test the suite is running.
+#[cfg(unix)]
+#[tokio::test]
+async fn termination_signals_run_the_shutdown_flush() {
+    // Re-exec of this test. The parent sends the signal after tip follow.
+    if std::env::var("RBTC_TEST_TERM_SIGNAL").is_ok() {
+        let dir = std::env::var("RBTC_TEST_TERM_DIR").expect("term datadir");
+        let mut cfg = tiny_regtest(&dir);
+        cfg.listen.use_seeds = false;
+        cfg.apply_kv("listen", "127.0.0.1:0")
+            .expect("ephemeral listen");
+        run_p2p(cfg).await.expect("signal shutdown");
+        return;
+    }
+
+    for sig in [libc::SIGHUP, libc::SIGUSR1, libc::SIGUSR2] {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-sig-{sig}-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .env("RBTC_TEST_TERM_SIGNAL", sig.to_string())
+            .env("RBTC_TEST_TERM_DIR", &dir)
+            .arg("--exact")
+            .arg("run::termination_signals_run_the_shutdown_flush")
+            .arg("--test-threads=1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn node");
+        let (tx, rx) = std::sync::mpsc::channel();
+        fn forward(pipe: impl std::io::Read + Send + 'static, tx: std::sync::mpsc::Sender<String>) {
+            std::thread::spawn(move || {
+                let reader = std::io::BufReader::new(pipe);
+                for line in std::io::BufRead::lines(reader) {
+                    if tx.send(line.unwrap_or_default()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        forward(child.stdout.take().expect("stdout"), tx.clone());
+        forward(child.stderr.take().expect("stderr"), tx.clone());
+        drop(tx);
+        let mut saw_follow = false;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(40) {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) if line.contains("catch-up complete") => {
+                    saw_follow = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(status) = child.try_wait().expect("try_wait") {
+                        panic!("signal {sig} child exited before tip follow: {status}");
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(saw_follow, "signal {sig} child never reached tip follow");
+        // The handler is installed before that log. Park it, then signal.
+        std::thread::sleep(Duration::from_millis(50));
+        // SAFETY: `child` is the node process this test spawned. `sig` is
+        // SIGHUP, SIGUSR1, or SIGUSR2, and the child installs a handler for it.
+        let rc = unsafe { libc::kill(child.id() as i32, sig) };
+        assert_eq!(rc, 0, "signal {sig} kill");
+        let status = {
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().expect("try_wait") {
+                    break status;
+                }
+                if start.elapsed() > Duration::from_secs(30) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("signal {sig} did not finish shutdown");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        assert!(
+            status.success(),
+            "signal {sig} must shut down cleanly, status {status}"
+        );
+        let marker = dir.join("store").join("spend_durable");
+        assert!(
+            marker.is_file(),
+            "signal {sig} must run the spend-durable flush, missing {}",
+            marker.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// The `IbdConfig` literal in `run_ibd_or_skip` is not built by the config
 /// journey, so this drives `run_p2p`. A refused connect must flush a fail
 /// mark into the saved book, and the SOCKS proxy must be the socket dialed.
