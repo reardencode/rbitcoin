@@ -818,6 +818,73 @@ async fn queued_decode_holds_block_requests_across_heartbeat() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// Past the 10s getdata stall, a hash the download timer still owns stays
+/// in flight, so the ping suspend holds. The peer drops when that window
+/// reaches one block interval, not at the stall clock. The stall clock is
+/// wall time, so this waits it out.
+#[tokio::test]
+async fn getdata_stall_keeps_a_hash_the_download_timer_owns() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("getdata-keeps-window");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let asked = peers.now_secs();
+    peers.set_mock_now(asked);
+    let peer = outbound_test_peer(&peers, 18451);
+    let hash = BlockHash::from_byte_array([0x46; 32]);
+    hub.note_asked_block(hash);
+    peer.note_blocks_requested(&[hash]);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut since = Some(std::time::Instant::now());
+    tokio::time::sleep(BLOCK_GETDATA_TIMEOUT + Duration::from_secs(1)).await;
+    for _ in 0..2 {
+        on_heartbeat(
+            &hub,
+            &out_tx,
+            &mut follow,
+            Some(peer.as_ref()),
+            &mut since,
+            &mut None,
+            &mut None,
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        follow.requested_blocks.contains(&hash),
+        "the stall clock forgot a hash the download timer still owns"
+    );
+    assert!(
+        hub.already_have_or_asked_block(&hash),
+        "asked_blocks dropped while the download window was open"
+    );
+    assert!(
+        !peer.stop.load(Ordering::SeqCst),
+        "the peer disconnected inside the download window"
+    );
+    let interval = hub.params.btc.pow_target_spacing;
+    peers.set_mock_now(asked.saturating_add(interval).saturating_add(1));
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        peer.stop.load(Ordering::SeqCst),
+        "the block-interval timeout did not disconnect"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// The block-download window must not drop a peer whose body is already in
 /// `decode_q`. That frame is still the oldest block in flight.
 #[tokio::test]

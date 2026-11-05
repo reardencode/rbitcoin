@@ -1317,6 +1317,16 @@ impl LivePeer {
         }
     }
 
+    /// `hash` is still the download window's, so the 10s getdata stall must
+    /// not forget it. A hash the window has already dropped is not owned.
+    pub fn block_download_owns(&self, hash: &BlockHash) -> bool {
+        let d = self
+            .block_download
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        d.since.is_some() && d.queue.contains(hash)
+    }
+
     /// Core's ping timeout, which bitcoin/bitcoin#36080 moved out of
     /// `MaybeSendPing`. The caller suspends this while the peer still has
     /// blocks in flight. The last block it delivered leaves it a minute to
