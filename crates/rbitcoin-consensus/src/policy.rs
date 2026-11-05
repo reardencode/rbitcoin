@@ -18,6 +18,13 @@ pub const MIN_RELAY_FEE_RATE_SAT_PER_KVB: u64 = 100;
 /// Absolute weight cap for a single transaction (4_000_000 = block weight).
 pub const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 
+/// BIP 431 TRUC: the `nVersion` that opts in (Core `TRUC_VERSION`).
+pub const TRUC_VERSION: i32 = 3;
+/// Largest TRUC tx, in sigop-adjusted vbytes (Core `TRUC_MAX_VSIZE`).
+pub const TRUC_MAX_VSIZE: u64 = 10_000;
+/// Largest TRUC tx with an unconfirmed parent (Core `TRUC_CHILD_MAX_VSIZE`).
+pub const TRUC_CHILD_MAX_VSIZE: u64 = 1_000;
+
 /// Result of a policy check (not consensus).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyResult {

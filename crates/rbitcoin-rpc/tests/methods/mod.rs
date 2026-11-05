@@ -4457,6 +4457,17 @@ fn rpc_submit_nonstandard_version_is_version() {
         ctx.mempool.as_ref().unwrap().contains(&v3.compute_txid()),
         "version 3 must enter the mempool"
     );
+    let mut onto_v2 = child.clone();
+    onto_v2.version = TxVersion::non_standard(3);
+    let truc = dispatch(
+        &ctx,
+        "testmempoolaccept",
+        vec![json!([rbitcoin_primitives::hex_encode(serialize(
+            &onto_v2
+        ))])],
+    )
+    .unwrap();
+    assert_eq!(truc[0]["reject-reason"], json!("TRUC-violation"), "{truc}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn one_sat_spend(prev: bitcoin::OutPoint) -> String {

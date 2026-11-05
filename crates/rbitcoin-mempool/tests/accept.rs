@@ -537,6 +537,141 @@ fn dust_and_op_true_allowed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn ver_tx(inputs: &[OutPoint], version: i32, outputs: Vec<TxOut>) -> Transaction {
+    Transaction {
+        version: Version::non_standard(version),
+        lock_time: LockTime::ZERO,
+        input: inputs
+            .iter()
+            .map(|&previous_output| TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: outputs,
+    }
+}
+
+fn pay(value: u64) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(value),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+fn out_of(tx: &Transaction, vout: u32) -> OutPoint {
+    OutPoint {
+        txid: tx.compute_txid(),
+        vout,
+    }
+}
+
+/// A 0-value `OP_RETURN` padded to `n` script bytes, to grow a tx's size.
+fn return_pad(n: usize) -> TxOut {
+    let mut script = vec![0x6a];
+    script.resize(1 + n, 0);
+    TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(script),
+    }
+}
+
+fn assert_truc_violation(r: Result<AcceptResult, AcceptError>) {
+    let err = r.unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("TRUC-violation")),
+        "{err}"
+    );
+}
+
+/// BIP 431: a version-3 tx has at most one unconfirmed parent and one
+/// unconfirmed child, both version 3, and its size caps apply.
+#[test]
+fn truc_topology_and_sizes() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[500_000, 500_000, 500_000, 500_000, 500_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+
+    let v2_parent = ver_tx(&[ops[0]], 2, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&v2_parent, &utxos, TIP_OK).unwrap();
+    let onto_v2 = ver_tx(&[out_of(&v2_parent, 0)], 3, vec![pay(150_000)]);
+    assert_truc_violation(mp.accept_tx(&onto_v2, &utxos, TIP_OK));
+
+    let v3_parent = ver_tx(&[ops[1]], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&v3_parent, &utxos, TIP_OK)
+        .expect("version 3 spending a confirmed output");
+    let v2_child = ver_tx(&[out_of(&v3_parent, 0)], 2, vec![pay(150_000)]);
+    assert_truc_violation(mp.accept_tx(&v2_child, &utxos, TIP_OK));
+
+    let child = ver_tx(&[out_of(&v3_parent, 0)], 3, vec![pay(150_000)]);
+    mp.accept_tx(&child, &utxos, TIP_OK)
+        .expect("one version-3 child");
+    let sibling = ver_tx(&[out_of(&v3_parent, 1)], 3, vec![pay(150_000)]);
+    assert_truc_violation(mp.accept_tx(&sibling, &utxos, TIP_OK));
+    let grandchild = ver_tx(&[out_of(&child, 0)], 3, vec![pay(100_000)]);
+    assert_truc_violation(mp.accept_tx(&grandchild, &utxos, TIP_OK));
+    let left = ver_tx(&[ops[3]], 3, vec![pay(400_000)]);
+    let right = ver_tx(&[ops[4]], 3, vec![pay(400_000)]);
+    mp.accept_tx(&left, &utxos, TIP_OK).unwrap();
+    mp.accept_tx(&right, &utxos, TIP_OK).unwrap();
+    let two_parents = ver_tx(
+        &[out_of(&left, 0), out_of(&right, 0)],
+        3,
+        vec![pay(700_000)],
+    );
+    assert_truc_violation(mp.accept_tx(&two_parents, &utxos, TIP_OK));
+
+    let replacement = ver_tx(&[out_of(&v3_parent, 0)], 3, vec![pay(100_000)]);
+    mp.accept_tx(&replacement, &utxos, TIP_OK)
+        .expect("replacing the only child is not a second child");
+    assert!(!mp.graph.contains(&child.compute_txid()));
+    assert!(mp.graph.contains(&replacement.compute_txid()));
+
+    let huge = ver_tx(&[ops[2]], 3, vec![pay(100_000), return_pad(40_100)]);
+    assert_truc_violation(mp.accept_tx(&huge, &utxos, TIP_OK));
+    let v3_lone = ver_tx(&[ops[2]], 3, vec![pay(450_000)]);
+    mp.accept_tx(&v3_lone, &utxos, TIP_OK).unwrap();
+    let wide_child = ver_tx(
+        &[out_of(&v3_lone, 0)],
+        3,
+        vec![pay(300_000), return_pad(4_100)],
+    );
+    assert_truc_violation(mp.accept_tx(&wide_child, &utxos, TIP_OK));
+    let wide_v2 = ver_tx(
+        &[out_of(&v2_parent, 1)],
+        2,
+        vec![pay(100_000), return_pad(4_100)],
+    );
+    mp.accept_tx(&wide_v2, &utxos, TIP_OK)
+        .expect("the TRUC child cap is only for version 3");
+}
+
+/// Two children staged before either commits: the second commit still sees
+/// the first, so a version-3 parent never ends up with two children.
+#[test]
+fn truc_child_limit_holds_across_staged_admits() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(500_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[op], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let a = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(150_000)]);
+    let b = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
+    let opts = || PrepareOpts {
+        fee_delta: 0,
+        report_orphans: false,
+        min_relay: None,
+        waive: false,
+    };
+    let prep_a = mp.prepare_admit(&a, &utxos, TIP_OK, opts()).unwrap();
+    let prep_b = mp.prepare_admit(&b, &utxos, TIP_OK, opts()).unwrap();
+    mp.commit_after_script(&a, prep_a).unwrap();
+    assert_truc_violation(mp.commit_after_script(&b, prep_b));
+    assert!(!mp.graph.contains(&b.compute_txid()));
+}
+
 /// `n` bare `OP_CHECKMULTISIG` outputs: legacy cost `n × 20 × 4`.
 fn multisig_outputs_tx(op: OutPoint, n: usize) -> Transaction {
     let mut tx = spend_tx(op, 1);

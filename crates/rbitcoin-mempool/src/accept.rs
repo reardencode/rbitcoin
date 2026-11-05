@@ -1597,6 +1597,53 @@ impl ActiveMempool {
         Ok(())
     }
 
+    /// BIP 431 TRUC, as Core `SingleTRUCChecks` without sibling eviction.
+    ///
+    /// Runs under the commit lock, so two children staged together cannot
+    /// both pass against a parent that has neither yet.
+    fn check_truc(
+        &self,
+        tx: &Transaction,
+        vsize: u64,
+        scan: &ConflictScan,
+    ) -> Result<(), AcceptError> {
+        const VIOLATION: AcceptError = AcceptError::Policy("TRUC-violation");
+        let is_truc = tx.version.0 == policy::TRUC_VERSION;
+        for id in &scan.parent_txids {
+            let body = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("parent body missing".into()))?;
+            if (body.version.0 == policy::TRUC_VERSION) != is_truc {
+                return Err(VIOLATION);
+            }
+        }
+        if !is_truc {
+            return Ok(());
+        }
+        if vsize > policy::TRUC_MAX_VSIZE || scan.parent_txids.len() > 1 {
+            return Err(VIOLATION);
+        }
+        let Some(parent) = scan.parent_txids.first() else {
+            return Ok(());
+        };
+        let entry = self
+            .graph
+            .get(parent)
+            .ok_or_else(|| AcceptError::Durable("parent entry missing".into()))?;
+        if !entry.parents.is_empty() || vsize > policy::TRUC_CHILD_MAX_VSIZE {
+            return Err(VIOLATION);
+        }
+        let child_replaced = entry
+            .children
+            .iter()
+            .any(|c| scan.direct_conflicts.contains(c));
+        if !entry.children.is_empty() && !child_replaced {
+            return Err(VIOLATION);
+        }
+        Ok(())
+    }
+
     /// Returns (conflict set, fee, sigop-adjusted weight).
     #[doc(hidden)]
     pub fn plan_after_script(
@@ -1629,6 +1676,7 @@ impl ActiveMempool {
         let fee_sat = prep.fee_sat;
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
+        self.check_truc(tx, weight.div_ceil(4), &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
