@@ -670,16 +670,106 @@ fn max_sh_creates_and_esplora_block_template_cli_hyphens() {
     let off = ready_config(["rbitcoin-node", "--esplora-block-template=0"]);
     assert!(!off.esplora_block_template);
     let d = NodeConfig::default();
-    assert!(d.electrum_onion && d.esplora_onion && d.electrum_i2p && d.esplora_i2p);
-    let onion_off = ready_config(["rbitcoin-node", "--esplora-onion=0"]);
-    assert!(!onion_off.esplora_onion);
-    assert!(onion_off.electrum_onion && onion_off.electrum_i2p && onion_off.esplora_i2p);
-    let off = ready_config(["rbitcoin-node", "--electrum-onion=0"]);
-    assert!(!off.electrum_onion && off.esplora_onion && off.electrum_i2p && off.esplora_i2p);
-    let off = ready_config(["rbitcoin-node", "--electrum-i2p=0"]);
-    assert!(!off.electrum_i2p && off.esplora_i2p && off.electrum_onion && off.esplora_onion);
-    let off = ready_config(["rbitcoin-node", "--esplora-i2p=0"]);
-    assert!(!off.esplora_i2p && off.electrum_i2p && off.electrum_onion && off.esplora_onion);
+    assert!(!d.electrum_onion && !d.esplora_onion && !d.electrum_i2p && !d.esplora_i2p);
+    let tor = [
+        "rbitcoin-node",
+        "--tor-control",
+        "--electrum-listen",
+        "--esplora-listen",
+    ];
+    let on = ready_config(tor.into_iter().chain(["--electrum-onion"]));
+    assert!(on.electrum_onion && !on.esplora_onion && !on.electrum_i2p && !on.esplora_i2p);
+    let on = ready_config(tor.into_iter().chain(["--esplora-onion=1"]));
+    assert!(on.esplora_onion && !on.electrum_onion && !on.electrum_i2p && !on.esplora_i2p);
+    let sam = [
+        "rbitcoin-node",
+        "--i2p-sam",
+        "--electrum-listen",
+        "--esplora-listen",
+    ];
+    let on = ready_config(sam.into_iter().chain(["--electrum-i2p"]));
+    assert!(on.electrum_i2p && !on.esplora_i2p && !on.electrum_onion && !on.esplora_onion);
+    let on = ready_config(sam.into_iter().chain(["--esplora-i2p", "--electrum-i2p=0"]));
+    assert!(on.esplora_i2p && !on.electrum_i2p && !on.electrum_onion && !on.esplora_onion);
+}
+
+/// Each wallet overlay switch needs its overlay, its listener, and a TCP
+/// bind that `127.0.0.1:<port>` reaches, since Tor and SAM forward there.
+#[test]
+fn wallet_overlay_switches_refuse_what_they_cannot_publish() {
+    for (flag, key, listen, listen_key, overlay, overlay_key) in [
+        (
+            "electrum-onion",
+            "electrum_onion",
+            "--electrum-listen",
+            "electrum_listen",
+            "--tor-control",
+            "tor_control",
+        ),
+        (
+            "esplora-onion",
+            "esplora_onion",
+            "--esplora-listen",
+            "esplora_listen",
+            "--tor-control",
+            "tor_control",
+        ),
+        (
+            "electrum-i2p",
+            "electrum_i2p",
+            "--electrum-listen",
+            "electrum_listen",
+            "--i2p-sam",
+            "i2p_sam",
+        ),
+        (
+            "esplora-i2p",
+            "esplora_i2p",
+            "--esplora-listen",
+            "esplora_listen",
+            "--i2p-sam",
+            "i2p_sam",
+        ),
+    ] {
+        let mut c = NodeConfig::default();
+        c.validate().unwrap();
+        c.apply_kv(key, "1").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains(&format!("{flag} requires {overlay}")), "{err}");
+        c.apply_kv(overlay_key, "").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains(&format!("{flag} requires {listen}")), "{err}");
+        for unreached in [
+            "10.0.0.5:50001",
+            "127.0.0.2:50001",
+            "[::1]:50001",
+            "[::]:50001",
+        ] {
+            c.apply_kv(listen_key, unreached).unwrap();
+            let err = c.validate().unwrap_err().to_string();
+            assert!(err.contains("not reachable"), "{flag} {unreached}: {err}");
+        }
+        c.apply_kv(listen_key, "0.0.0.0:50001").unwrap();
+        c.validate().unwrap();
+        c.apply_kv(listen_key, "").unwrap();
+        c.validate().unwrap();
+        // Off again, any bind is fine: the switch is the only thing refused.
+        c.apply_kv(listen_key, "10.0.0.5:50001").unwrap();
+        c.apply_kv(key, "0").unwrap();
+        c.validate().unwrap();
+    }
+    #[cfg(unix)]
+    for key in ["esplora_onion", "esplora_i2p"] {
+        let mut c = NodeConfig::default();
+        c.apply_kv("tor_control", "").unwrap();
+        c.apply_kv("i2p_sam", "").unwrap();
+        c.apply_kv("esplora_listen", "/run/rbitcoin/esplora.sock")
+            .unwrap();
+        c.validate().unwrap();
+        c.apply_kv(key, "1").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("unix socket"), "{key}: {err}");
+    }
 }
 
 include!("overlay_config_journey.rs");

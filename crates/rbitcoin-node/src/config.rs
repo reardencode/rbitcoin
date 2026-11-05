@@ -459,13 +459,13 @@ pub struct NodeConfig {
     pub esplora_block_template: bool,
     /// Prometheus `GET /metrics` on the health listener. Default off.
     pub metrics: bool,
-    /// ADD_ONION for `--electrum-listen` when `--tor-control` is set. Default on.
+    /// ADD_ONION for `--electrum-listen` through `--tor-control`. Default off.
     pub electrum_onion: bool,
-    /// ADD_ONION for `--esplora-listen` when `--tor-control` is set. Default on.
+    /// ADD_ONION for `--esplora-listen` through `--tor-control`. Default off.
     pub esplora_onion: bool,
-    /// SAM `STREAM FORWARD` to `--electrum-listen` with `--i2p-accept-incoming`. Default on.
+    /// SAM destination and `STREAM FORWARD` for `--electrum-listen` through `--i2p-sam`. Default off.
     pub electrum_i2p: bool,
-    /// SAM `STREAM FORWARD` to `--esplora-listen` with `--i2p-accept-incoming`. Default on.
+    /// SAM destination and `STREAM FORWARD` for `--esplora-listen` through `--i2p-sam`. Default off.
     pub esplora_i2p: bool,
     /// SV2 Template Provider bind (`--sv2-tp-listen`). Default off.
     pub sv2_tp_listen: Option<SocketAddr>,
@@ -613,10 +613,10 @@ impl Default for NodeConfig {
             store_read_budget: None,
             esplora_block_template: false,
             metrics: false,
-            electrum_onion: true,
-            esplora_onion: true,
-            electrum_i2p: true,
-            esplora_i2p: true,
+            electrum_onion: false,
+            esplora_onion: false,
+            electrum_i2p: false,
+            esplora_i2p: false,
             sv2_tp_listen: None,
             sv2_tp_authority_sec: None,
             sv2_tp_cert_validity_secs: 3600,
@@ -881,6 +881,7 @@ impl NodeConfig {
         self.validate_trust_peer()?;
         self.validate_hidden_inbound()?;
         self.validate_v1_bind()?;
+        self.validate_wallet_overlays()?;
         self.validate_rpc_cookie()
     }
 
@@ -1114,6 +1115,84 @@ impl NodeConfig {
                 return Err(NodeError::Config(
                     "listen-onion requires --tor-control".into(),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `--electrum-onion`, `--esplora-onion`, `--electrum-i2p`, `--esplora-i2p`.
+    /// Tor and SAM forward to `127.0.0.1:<port>`, so the listener must be a TCP
+    /// bind that address reaches.
+    #[doc(hidden)]
+    pub fn validate_wallet_overlays(&self) -> Result<(), NodeError> {
+        let electrum = self.listen.electrum.map(Some);
+        let esplora = self.listen.esplora.as_ref().map(|l| match l {
+            rbitcoin_esplora::EsploraListen::Tcp(a) => Some(*a),
+            #[cfg(unix)]
+            rbitcoin_esplora::EsploraListen::Unix(_) => None,
+        });
+        for (flag, on, listen, listen_flag, overlay, overlay_flag) in [
+            (
+                "electrum-onion",
+                self.electrum_onion,
+                electrum,
+                "--electrum-listen",
+                self.tor.control.is_some(),
+                "--tor-control",
+            ),
+            (
+                "esplora-onion",
+                self.esplora_onion,
+                esplora,
+                "--esplora-listen",
+                self.tor.control.is_some(),
+                "--tor-control",
+            ),
+            (
+                "electrum-i2p",
+                self.electrum_i2p,
+                electrum,
+                "--electrum-listen",
+                self.listen.i2p_sam.is_some(),
+                "--i2p-sam",
+            ),
+            (
+                "esplora-i2p",
+                self.esplora_i2p,
+                esplora,
+                "--esplora-listen",
+                self.listen.i2p_sam.is_some(),
+                "--i2p-sam",
+            ),
+        ] {
+            if !on {
+                continue;
+            }
+            if !overlay {
+                return Err(NodeError::Config(format!("{flag} requires {overlay_flag}")));
+            }
+            let addr = match listen {
+                None => {
+                    return Err(NodeError::Config(format!("{flag} requires {listen_flag}")));
+                }
+                Some(None) => {
+                    return Err(NodeError::Config(format!(
+                        "{flag} needs a TCP {listen_flag}; a unix socket has no 127.0.0.1 port to forward to"
+                    )));
+                }
+                Some(Some(a)) => a,
+            };
+            let reached = match addr.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    ip == std::net::Ipv4Addr::LOCALHOST || ip.is_unspecified()
+                }
+                std::net::IpAddr::V6(_) => false,
+            };
+            if !reached {
+                return Err(NodeError::Config(format!(
+                    "{flag} forwards to 127.0.0.1:{port}; {listen_flag} {addr} is not reachable there (bind 127.0.0.1 or 0.0.0.0)",
+                    port = addr.port()
+                )));
             }
         }
         Ok(())
