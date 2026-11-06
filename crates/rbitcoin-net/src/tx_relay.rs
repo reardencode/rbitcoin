@@ -913,6 +913,52 @@ pub struct AdmitSpec {
     pub sibling_eviction: rbitcoin_mempool::SiblingEviction,
 }
 
+/// Who admits through [`MempoolHub::accept_with_utxo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcceptPath {
+    /// Relay or a local submit: trims, pairs or parks an orphan, records a
+    /// failure, and may evict a TRUC sibling.
+    Relay,
+    /// A lifted member put back after its package failed: as [`Self::Relay`],
+    /// but it does not evict a TRUC sibling the rollback just restored.
+    PutBack,
+    /// A `submitpackage` member. The caller trims afterwards, and an orphan
+    /// comes back instead of being paired or parked.
+    PackageMember,
+    /// A multi-tx `testmempoolaccept` member, removed again afterwards. As a
+    /// package member, and any prepare failure comes back unrecorded, so the
+    /// dry run leaves no extra-pool body for a later child to pair with. No
+    /// TRUC sibling eviction (Core allows no replacement there).
+    TestPackageMember,
+}
+
+impl AcceptPath {
+    fn defer_trim(self) -> bool {
+        matches!(
+            self,
+            AcceptPath::PackageMember | AcceptPath::TestPackageMember
+        )
+    }
+
+    fn sibling_eviction(self) -> rbitcoin_mempool::SiblingEviction {
+        match self {
+            AcceptPath::Relay | AcceptPath::PackageMember => rbitcoin_mempool::SiblingEviction::On,
+            AcceptPath::PutBack | AcceptPath::TestPackageMember => {
+                rbitcoin_mempool::SiblingEviction::Off
+            }
+        }
+    }
+
+    /// The prepare failure goes straight back to the caller.
+    fn returns_failure(self, e: &AcceptError) -> bool {
+        match self {
+            AcceptPath::Relay | AcceptPath::PutBack => false,
+            AcceptPath::PackageMember => matches!(e, AcceptError::Orphaned { .. }),
+            AcceptPath::TestPackageMember => true,
+        }
+    }
+}
+
 /// Local-origin txids. With isolated broadcast on, each is queued once for
 /// the one-shot loop, in submit order. An entry leaves with its tx
 /// ([`MempoolHub::unindex_txid`]), so the queue never outgrows the set and
@@ -2601,7 +2647,13 @@ impl MempoolHub {
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
         let utxo = self.utxo_provider();
-        self.accept_with_utxo(tx, &utxo, TxOrigin::Relay(None), true, &[], false)
+        self.accept_with_utxo(
+            tx,
+            &utxo,
+            TxOrigin::Relay(None),
+            AcceptPath::TestPackageMember,
+            &[],
+        )
     }
 
     /// Accept from `origin`. A relayed tx that parks records its peer as an
@@ -2612,7 +2664,8 @@ impl MempoolHub {
         origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        let result = self.accept_with_utxo(tx, &self.utxo_provider(), origin, false, &[], true);
+        let result =
+            self.accept_with_utxo(tx, &self.utxo_provider(), origin, AcceptPath::Relay, &[]);
         if let (TxOrigin::Local, Ok(r)) = (origin, &result) {
             self.kick_isolated_if_live(&[r.txid]);
         }
@@ -2626,7 +2679,13 @@ impl MempoolHub {
     /// reconsiderable error so the parent can be retried with it.
     #[doc(hidden)]
     pub fn accept_tx_defer_trim(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo(tx, &self.utxo_provider(), TxOrigin::Local, true, &[], true)
+        self.accept_with_utxo(
+            tx,
+            &self.utxo_provider(),
+            TxOrigin::Local,
+            AcceptPath::PackageMember,
+            &[],
+        )
     }
 
     /// Hand each local tx still in the pool to the isolated broadcast loop.
@@ -2895,10 +2954,10 @@ impl MempoolHub {
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         origin: TxOrigin,
-        defer_trim: bool,
+        path: AcceptPath,
         announcers: &[u64],
-        sibling_eviction: bool,
     ) -> Result<AcceptResult, AcceptError> {
+        let defer_trim = path.defer_trim();
         utxo.note_spender(tx);
         let from = origin.peer();
         let t0 = Instant::now();
@@ -2913,16 +2972,12 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive,
-            sibling_eviction: if sibling_eviction {
-                rbitcoin_mempool::SiblingEviction::On
-            } else {
-                rbitcoin_mempool::SiblingEviction::Off
-            },
+            sibling_eviction: path.sibling_eviction(),
         };
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(e) => {
-                if defer_trim && matches!(e, AcceptError::Orphaned { .. }) {
+                if path.returns_failure(&e) {
                     let us = t0.elapsed().as_micros() as u64;
                     self.meter_accept_stages(lock_us, stages);
                     return self.finish_accept_err(us, e);
@@ -3358,9 +3413,8 @@ impl MempoolHub {
                 &item.tx,
                 &utxo,
                 TxOrigin::Relay(from),
-                false,
+                AcceptPath::PutBack,
                 &item.announcers,
-                false,
             );
             self.forget_taken_orphan(id, item.taken_gen);
         }
@@ -3423,9 +3477,8 @@ impl MempoolHub {
                 .accept_with_utxo_async(
                     item.tx,
                     TxOrigin::Relay(from),
-                    false,
+                    AcceptPath::PutBack,
                     item.announcers,
-                    false,
                 )
                 .await;
             let hub = Arc::clone(self);
@@ -3807,9 +3860,8 @@ impl MempoolHub {
                                     .accept_with_utxo_async(
                                         child.tx,
                                         TxOrigin::Relay(from),
-                                        false,
+                                        AcceptPath::Relay,
                                         child.announcers,
-                                        true,
                                     )
                                     .await;
                                 let hub = Arc::clone(self);
@@ -3850,9 +3902,8 @@ impl MempoolHub {
                 &child.tx,
                 utxo,
                 TxOrigin::Relay(from),
-                false,
+                AcceptPath::Relay,
                 &child.announcers,
-                true,
             );
             // Admitted or rejected without a repark. A repark already consumed
             // this generation. A newer take of the same txid keeps its own.
@@ -3905,7 +3956,7 @@ impl MempoolHub {
         origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
         let result = self
-            .accept_with_utxo_async(tx, origin, false, Vec::new(), true)
+            .accept_with_utxo_async(tx, origin, AcceptPath::Relay, Vec::new())
             .await;
         if let (TxOrigin::Local, Ok(r)) = (origin, &result) {
             let txid = r.txid;
@@ -3916,18 +3967,20 @@ impl MempoolHub {
     }
 
     /// One member of a multi-tx `testmempoolaccept`, which removes it again.
-    /// Core allows no replacement there, so no sibling eviction either: an
-    /// evicted sibling would not come back. Nor 1p1c or parking (the
-    /// `defer_trim` path): a parent admitted with its child would stay in the
-    /// pool after the caller removes the members it got back.
+    /// See [`AcceptPath::TestPackageMember`].
     pub async fn accept_test_package_member_async(
         self: &Arc<Self>,
         tx: Transaction,
     ) -> Result<AcceptResult, AcceptError> {
         let hub = Arc::clone(self);
         crate::reactor::spawn_with_store_budget(async move {
-            hub.accept_with_utxo_async(tx, TxOrigin::Relay(None), true, Vec::new(), false)
-                .await
+            hub.accept_with_utxo_async(
+                tx,
+                TxOrigin::Relay(None),
+                AcceptPath::TestPackageMember,
+                Vec::new(),
+            )
+            .await
         })
         .await
         .expect("tx admit")
@@ -3955,7 +4008,7 @@ impl MempoolHub {
         self: &Arc<Self>,
         tx: Transaction,
     ) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo_async(tx, TxOrigin::Local, true, Vec::new(), true)
+        self.accept_with_utxo_async(tx, TxOrigin::Local, AcceptPath::PackageMember, Vec::new())
             .await
     }
 
@@ -3963,10 +4016,10 @@ impl MempoolHub {
         self: &Arc<Self>,
         tx: Transaction,
         origin: TxOrigin,
-        defer_trim: bool,
+        path: AcceptPath,
         announcers: Vec<u64>,
-        sibling_eviction: bool,
     ) -> Result<AcceptResult, AcceptError> {
+        let defer_trim = path.defer_trim();
         let from = origin.peer();
         let t0 = Instant::now();
         let hub = Arc::clone(self);
@@ -3980,11 +4033,7 @@ impl MempoolHub {
                 time_prepare_lock: false,
                 min_relay: None,
                 waive,
-                sibling_eviction: if sibling_eviction {
-                    rbitcoin_mempool::SiblingEviction::On
-                } else {
-                    rbitcoin_mempool::SiblingEviction::Off
-                },
+                sibling_eviction: path.sibling_eviction(),
             }
         })
         .await;
@@ -3998,7 +4047,7 @@ impl MempoolHub {
             Err(e) => {
                 return self
                     .accept_prepare_failed_async(
-                        tx, origin, defer_trim, announcers, e, stages, lock_us, t0,
+                        tx, origin, path, announcers, e, stages, lock_us, t0,
                     )
                     .await;
             }
@@ -4087,14 +4136,14 @@ impl MempoolHub {
         self: &Arc<Self>,
         tx: Transaction,
         origin: TxOrigin,
-        defer_trim: bool,
+        path: AcceptPath,
         announcers: Vec<u64>,
         e: AcceptError,
         stages: rbitcoin_mempool::AcceptStageUs,
         lock_us: u64,
         t0: Instant,
     ) -> Result<AcceptResult, AcceptError> {
-        if defer_trim && matches!(e, AcceptError::Orphaned { .. }) {
+        if path.returns_failure(&e) {
             let hub = Arc::clone(self);
             return crate::reactor::off_pool(move || {
                 let us = t0.elapsed().as_micros() as u64;

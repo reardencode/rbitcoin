@@ -186,7 +186,7 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset (`isvalid` only) |
 | `rpc_invalid_address_message.py` | `rpc-dialect` | same; no `error` / `error_locations` |
 | `mempool_truc.py` | `rpc-dialect` | TRUC and sibling eviction shipped. Core checks TRUC across the package first (`package_msg`, `package-error`); reject text lacks Core's details; a reorg re-add still checks TRUC |
-| `mempool_ephemeral_dust.py` | `rpc-dialect` | ephemeral dust shipped. Multi-tx `testmempoolaccept` admits members one at a time, not as a package; reject text lacks Core's details |
+| `mempool_ephemeral_dust.py` | `rpc-dialect` | ephemeral dust shipped. Multi-tx `testmempoolaccept` calls the child of a failed parent `missing-inputs`, where Core leaves it unvalidated, so the harness blanks the parent's row; reject text lacks Core's details; a reorg does not put a 0-fee dust parent back |
 | `mempool_persist.py` | `rpc-dialect` | `savemempool` / `importmempool` speak Core `mempool.dat`, but a restart reloads our `{datadir}/mempool/`, not `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).

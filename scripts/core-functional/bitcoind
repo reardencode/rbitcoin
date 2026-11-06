@@ -81,7 +81,7 @@ _SH_INDEX_TESTS = frozenset(
 
 
 def wants_sh_index(datadir: Path) -> bool:
-    """True when this Core datadir belongs to a history-reading run test."""
+    """True when this Core datadir belongs to a history-reading test."""
     match = re.fullmatch(r"(.+)_(\d+)", datadir.parent.name)
     if match is None:
         return False

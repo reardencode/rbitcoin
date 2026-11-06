@@ -4506,6 +4506,11 @@ fn testmempoolaccept_package_leaves_no_parent_behind() {
     let mp = ctx.mempool.as_ref().unwrap();
     assert!(!mp.contains(&parent.compute_txid()), "{rows}");
     assert!(!mp.contains(&child.compute_txid()), "{rows}");
+    // The dry run keeps no copy of the parent that a later child could
+    // pair with: the child alone is still missing its input.
+    let err = dispatch(&ctx, "sendrawtransaction", vec![json!(hex(&child))]).unwrap_err();
+    assert_eq!(err["message"], "bad-txns-inputs-missingorspent", "{err}");
+    assert!(!mp.contains(&parent.compute_txid()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

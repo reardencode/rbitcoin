@@ -1551,7 +1551,7 @@ fn commit_refuses_a_coin_spent_during_script_check() {
         hits: AtomicUsize::new(0),
     };
     let err = hub
-        .accept_with_utxo(&tx, &utxo, TxOrigin::Relay(None), false, &[], true)
+        .accept_with_utxo(&tx, &utxo, TxOrigin::Relay(None), AcceptPath::Relay, &[])
         .unwrap_err();
     assert!(
         matches!(err, AcceptError::MissingPrevout(missing) if missing == op),
@@ -5446,7 +5446,7 @@ fn accept_rechecks_confirmed_input_under_write() {
         write_hits: Arc::clone(&hits),
     };
     let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-    hub.accept_with_utxo(&tx, &probe, TxOrigin::Relay(None), false, &[], true)
+    hub.accept_with_utxo(&tx, &probe, TxOrigin::Relay(None), AcceptPath::Relay, &[])
         .expect("accept");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -5456,7 +5456,7 @@ fn accept_rechecks_confirmed_input_under_write() {
     hits.store(0, Ordering::Relaxed);
     let held = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x52]));
     let _view = q.store().hold_utxo_view();
-    hub.accept_with_utxo(&held, &probe, TxOrigin::Relay(None), false, &[], true)
+    hub.accept_with_utxo(&held, &probe, TxOrigin::Relay(None), AcceptPath::Relay, &[])
         .expect("accept while the view is held");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -5520,7 +5520,7 @@ fn contains_wtxid_during_slow_utxo_prepare() {
     };
     let h = Arc::clone(&hub);
     let join = thread::spawn(move || {
-        h.accept_with_utxo(&tx, &stall, TxOrigin::Relay(None), false, &[], true)
+        h.accept_with_utxo(&tx, &stall, TxOrigin::Relay(None), AcceptPath::Relay, &[])
     });
     let start = Instant::now();
     while !entered.load(Ordering::Acquire) {
@@ -5976,7 +5976,7 @@ fn trust_peer_admit_staged_script() {
     rbitcoin_log::capture_logs(false);
     rbitcoin_log::capture_logs(true);
     let off = hub
-        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(None), false, &[], true)
+        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(None), AcceptPath::Relay, &[])
         .unwrap_err();
     assert!(matches!(off, AcceptError::Script(_)), "{off}");
     let off_log = rbitcoin_log::take_logs()
@@ -5996,9 +5996,8 @@ fn trust_peer_admit_staged_script() {
             &tx,
             &utxos,
             TxOrigin::Relay(Some(session)),
-            false,
+            AcceptPath::Relay,
             &[],
-            true,
         )
         .expect("peer admit");
     assert_eq!(got.fee_sat, 1_000);

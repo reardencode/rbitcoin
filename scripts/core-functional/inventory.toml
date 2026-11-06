@@ -483,7 +483,7 @@ reason = "policy-libre"
 name = "mempool_ephemeral_dust.py"
 status = "skip"
 reason = "rpc-dialect"
-analog = "ephemeral dust shipped (#1407); multi-tx testmempoolaccept is not a package evaluation, and reject text lacks Core details"
+analog = "ephemeral dust shipped (#1407); multi-tx testmempoolaccept calls the child of a failed parent missing-inputs, so the harness blanks the parent row; reject text lacks Core details (dust, missing-ephemeral-spends, unspent-dust); a reorg does not put a 0-fee dust parent back"
 
 [[test]]
 name = "mempool_expiry.py"
