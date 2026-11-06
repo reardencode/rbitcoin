@@ -72,7 +72,10 @@ proxy rewrites multi-tx `testmempoolaccept` abort-class rows
 4× `-maxmempool` map makes that number match Core. A `generateblock` spend of
 an unspendable output still fails the script on the node; the proxy rewrites
 that error to Core's `CheckTxInputs` missing-input sentence
-(`feature_block.py`). The proxy answers MiniWallet `scantxoutset`
+(`feature_block.py`). A one-transaction `generateblock` whose input is
+missing stays `-25` and `bad-txns-inputs-missingorspent` on the node, and
+that message does not contain `CheckTxInputs:`. The same proxy rewrite adds
+the clause. `feature_block.py` stays skip. The proxy answers MiniWallet `scantxoutset`
 `raw(HEX)` from Esplora `/scripthash/:hash/utxo` (confirmed rows,
 coinbase from `/tx/:txid`, genesis coinbase omitted). It does not expand
 descriptors. `rpc_scantxoutset.py` and `rpc_signrawtransactionwithkey.py`

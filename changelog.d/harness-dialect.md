@@ -6,3 +6,7 @@ Changed
   the debug-log map. Package dialect and the tip-idle wait stay off unless
   the harness sets them. A peer fee filter that is above a transaction
   still drops that transaction for the session, as Core does.
+- **A one-transaction `generateblock` with a missing input no longer quotes
+  Core's `CheckTxInputs` clause.** The code stays `-25` and the reason
+  stays `bad-txns-inputs-missingorspent`, and the message still names the
+  transaction. The functional RPC proxy adds the clause.

@@ -464,8 +464,9 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
 
 /// Core `generateblock` after `TestBlockValidity`: `-25 TestBlockValidity failed: <reason>`.
 ///
-/// A single submitted transaction whose inputs are not coins includes Core's
-/// `CheckTxInputs` debug text (`feature_block.py`).
+/// A single submitted transaction whose inputs are not coins names that
+/// transaction. Core's `CheckTxInputs` clause is the functional proxy's,
+/// not this message.
 #[doc(hidden)]
 pub fn generateblock_missing_input_error(e: &str, extra: &[Transaction]) -> Value {
     let s = e.strip_prefix("consensus: ").unwrap_or(e);
@@ -474,7 +475,7 @@ pub fn generateblock_missing_input_error(e: &str, extra: &[Transaction]) -> Valu
         return rpc_error(
             ERR_VERIFY_ERROR,
             format!(
-                "TestBlockValidity failed: bad-txns-inputs-missingorspent, CheckTxInputs: inputs missing/spent in transaction {txid}"
+                "TestBlockValidity failed: bad-txns-inputs-missingorspent in transaction {txid}"
             ),
         );
     }

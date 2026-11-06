@@ -6920,6 +6920,27 @@ fn getmininginfo_reports_the_last_assembled_block() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// One submitted transaction with a missing input is `-25` and names the
+/// token. The node message does not carry Core's `CheckTxInputs` clause.
+#[test]
+fn generateblock_one_missing_input_omits_checktxinputs_clause() {
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let e = generateblock_missing_input_error(
+        "bad-txns-inputs-missingorspent",
+        std::slice::from_ref(&tx),
+    );
+    assert_eq!(e["code"], ERR_VERIFY_ERROR);
+    let msg = e["message"].as_str().expect("message");
+    assert!(msg.contains("bad-txns-inputs-missingorspent"), "{msg}");
+    assert!(!msg.contains("CheckTxInputs:"), "{msg}");
+    assert!(msg.contains(&tx.compute_txid().to_string()), "{msg}");
+}
+
 /// `generateblock` mines the transactions it was given, not a pool
 /// assembly, so mining them leaves the last assembly as it was.
 #[test]

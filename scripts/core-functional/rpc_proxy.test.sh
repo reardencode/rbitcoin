@@ -69,6 +69,33 @@ other_method = {
 }
 assert not rewrite_unspendable_spend("submitblock", other_method)
 assert "script too large" in other_method["error"]["message"]
+missing_input = {
+    "result": None,
+    "error": {
+        "code": -25,
+        "message": (
+            "TestBlockValidity failed: bad-txns-inputs-missingorspent "
+            f"in transaction {txid}"
+        ),
+    },
+    "id": 1,
+}
+assert "CheckTxInputs:" not in missing_input["error"]["message"]
+assert rewrite_unspendable_spend("generateblock", missing_input)
+assert missing_input["error"]["message"] == (
+    "TestBlockValidity failed: bad-txns-inputs-missingorspent, "
+    f"CheckTxInputs: inputs missing/spent in transaction {txid}"
+), missing_input
+plain_missing = {
+    "result": None,
+    "error": {
+        "code": -25,
+        "message": "TestBlockValidity failed: bad-txns-inputs-missingorspent",
+    },
+    "id": 1,
+}
+assert not rewrite_unspendable_spend("generateblock", plain_missing)
+assert plain_missing["error"]["message"].endswith("bad-txns-inputs-missingorspent")
 
 seq = {
     "result": [
