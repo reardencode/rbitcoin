@@ -1840,6 +1840,11 @@ fn regtest_ctx(
     relay: bool,
 ) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), hub.query.clone(), max_wu).unwrap();
+    // The node names the network genesis before it serves RPC. Unset, that
+    // height-0 coinbase stays an ordinary output (synthetic chains).
+    hub.query.set_genesis_coinbase_txid(
+        rbitcoin_consensus::ChainParams::regtest().genesis_coinbase_txid,
+    );
     // The node attaches this pool before it serves RPC. Connects and
     // disconnects move the template mark on that same pool.
     assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
@@ -3714,6 +3719,32 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
     let archived_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(archived)]).unwrap_err();
     assert_eq!(archived_fee["code"], ERR_VERIFY_REJECTED, "{archived_fee}");
     assert_eq!(archived_fee["message"], "missing-inputs", "{archived_fee}");
+
+    // OP_RETURN was never a coin. Once the spendable output is spent, the
+    // resubmit stays missing-inputs. Treating the OP_RETURN as unspent is -27.
+    let parent_sat = generated_coinbase_value(&ctx, 5) - 1_000;
+    let (_, mut parent) =
+        spend_generated_coinbase(&ctx, 5, parent_sat, ScriptBuf::from_bytes(vec![0x51]));
+    parent.output.push(bitcoin::TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+    });
+    let parent_hex =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&parent));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex.clone())]).unwrap();
+    let child = child_of(&parent, 1_000);
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(rbitcoin_primitives::hex_encode(
+            bitcoin::consensus::encode::serialize(&child)
+        ))],
+    )
+    .unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let parent_again = dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex)]).unwrap_err();
+    assert_eq!(parent_again["code"], ERR_VERIFY_REJECTED, "{parent_again}");
+    assert_eq!(parent_again["message"], "missing-inputs", "{parent_again}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8588,6 +8619,18 @@ fn request_task_methods_answer_as_core() {
         err["message"],
         format!("TX decode failed: {superfluous_witness} Make sure the tx has at least one input."),
         "{err}"
+    );
+
+    // HTTP `sendrawtransaction` is this path. A confirmed output still in
+    // the set is -27 here, not only on the sync `dispatch` path.
+    let (hex, _) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    assert!(call("sendrawtransaction", vec![json!(hex.clone())]).is_ok());
+    assert!(call("generate", vec![json!(1)]).is_ok());
+    let again = call("sendrawtransaction", vec![json!(hex)]).unwrap_err();
+    assert_eq!(again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{again}");
+    assert_eq!(
+        again["message"], "Transaction outputs already in utxo set",
+        "{again}"
     );
 }
 

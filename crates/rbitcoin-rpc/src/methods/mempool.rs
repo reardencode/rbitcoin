@@ -1180,21 +1180,9 @@ fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<boo
     if txid == genesis_coinbase_txid(ctx) {
         return Ok(false);
     }
-    let Some(fk) = ctx
-        .query
-        .tx_fk_by_txid_tip(&txid)
-        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
-    else {
+    let Some(fk) = confirmed_tip_fk(ctx, &txid)? else {
         return Ok(false);
     };
-    if !ctx
-        .query
-        .store()
-        .is_confirmed_strong(fk)
-        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
-    {
-        return Ok(false);
-    }
     let vouts: Vec<u32> = tx
         .output
         .iter()
@@ -1703,15 +1691,27 @@ pub fn package_error_rows(txs: &[Transaction], msg: &str) -> Value {
 
 #[doc(hidden)]
 pub fn tx_confirmed_on_active_chain(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
-    let txid = tx.compute_txid().to_byte_array();
-    match ctx.query.tx_fk_by_txid_tip(&txid) {
-        Ok(None) => Ok(false),
-        Ok(Some(fk)) => ctx
-            .query
-            .store()
-            .is_confirmed_strong(fk)
-            .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}"))),
-        Err(e) => Err(rpc_error(ERR_MISC, format!("query failed: {e}"))),
+    Ok(confirmed_tip_fk(ctx, &tx.compute_txid().to_byte_array())?.is_some())
+}
+
+/// Confirmed-strong create on the active chain, if this txid has one.
+fn confirmed_tip_fk(ctx: &RpcContext, txid: &[u8; 32]) -> Result<Option<Fk>, Value> {
+    let Some(fk) = ctx
+        .query
+        .tx_fk_by_txid_tip(txid)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    else {
+        return Ok(None);
+    };
+    if ctx
+        .query
+        .store()
+        .is_confirmed_strong(fk)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    {
+        Ok(Some(fk))
+    } else {
+        Ok(None)
     }
 }
 

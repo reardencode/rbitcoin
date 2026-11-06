@@ -531,8 +531,17 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
             Ok(flag) => flag,
             Err(_) => return ChainPrevout::KnownUnavailable,
         };
-        // Height 0 is the genesis block. Its coinbase is not a coin.
-        if create_height == 0 {
+        // Height 0 without a coinbase flag is not a coin. The named network
+        // genesis coinbase is not a coin either. Unset, a height-0 coinbase
+        // stays spendable for synthetic chains.
+        if create_height == 0
+            && (!is_coinbase
+                || self
+                    .query
+                    .genesis_coinbase_txid
+                    .get()
+                    .is_some_and(|g| op.txid.to_byte_array() == *g))
+        {
             return ChainPrevout::KnownUnavailable;
         }
         let create_mtp = if !self.need_create_mtp.load(Ordering::Relaxed) {
