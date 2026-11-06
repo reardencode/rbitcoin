@@ -70,6 +70,9 @@ Full `/tx/:txid` JSON still has `vin[]`. Electrum has no outspend-vin surface.
 
 ## Intentional differences
 
+When a Core functional script is red, whether the node or the harness
+changes is [When a script is red](./docs/core-functional.md#when-a-script-is-red).
+
 | Area | This node | Bitcoin Core |
 |------|-----------|--------------|
 | Chainstore | Relational **map-free** archive (fd tables; see [`docs/io-modality.md`](./docs/io-modality.md)) | blocks/undo + LevelDB chainstate |

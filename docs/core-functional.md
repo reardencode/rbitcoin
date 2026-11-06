@@ -80,6 +80,17 @@ are inventory skips. The node implements neither `scantxoutset` nor
 `gettxoutsetinfo`. `rpc_packages.py` `run` includes the package-dialect
 shim (same honesty as `WAIT_TIP_IDLE`).
 
+## When a script is red
+
+Fix the node only when a real peer would miss a block or a transaction, or
+a documented RPC code would change. Message counts and grepped sentences
+stay in the shim, the RPC proxy, or `debuglog_map.toml`. An intentional
+difference stays default-off. `RBITCOIN_RPC_PACKAGE_DIALECT` and
+`RBITCOIN_RPC_WAIT_TIP_IDLE` are that kind of difference: the shim sets
+them, and production leaves them unset. A peer `feefilter` above a
+transaction still drops that transaction for the rest of the session, the
+same relay Core uses, so a later lower filter does not offer it again.
+
 ```bash
 ./scripts/core-functional/bitcoind.test.sh
 # live cookie (mirrored from rpc.token) + getblockcount==0 (needs a built node):
