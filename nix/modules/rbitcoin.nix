@@ -650,14 +650,20 @@ in
       type = types.nullOr types.str;
       default = null;
       example = "/run/rbitcoin/alert";
-      description = "Pass `--alert-notify CMD`. The node substitutes `%s` with the warning and runs the command once.";
+      description = ''
+        Pass `--alert-notify CMD`. The node substitutes `%s` with the warning and runs the command once.
+        The unit writes each `%` as `%%` so systemd leaves it for the node.
+      '';
     };
 
     startupNotify = mkOption {
       type = types.nullOr types.str;
       default = null;
       example = "/run/rbitcoin/ready";
-      description = "Pass `--startup-notify CMD`. The node runs it once the process is ready.";
+      description = ''
+        Pass `--startup-notify CMD`. The node runs it once the process is ready.
+        The unit writes each `%` as `%%` so systemd leaves it for the node.
+      '';
     };
 
     inhibitSuspend = mkOption {
@@ -1387,7 +1393,11 @@ in
       environment = cfg.environment;
 
       serviceConfig = {
-        ExecStart = concatStringsSep " " (map escapeShellArg command);
+        # systemd expands % in ExecStart before it splits words, quotes included.
+        # %% is one percent, so the node still sees %s in alert-notify.
+        ExecStart = concatStringsSep " " (
+          map (arg: escapeShellArg (lib.replaceStrings [ "%" ] [ "%%" ] arg)) command
+        );
         User = cfg.user;
         Group = cfg.group;
         Restart = "on-failure";

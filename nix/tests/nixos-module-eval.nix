@@ -685,6 +685,10 @@ assert builtins.match ".*--max-tip-age 0.*" execStart != null;
 assert builtins.match ".*--check-blocks 0.*" execStart != null;
 assert builtins.match ".*--alert-notify /run/rbitcoin/alert.*" execStart != null;
 assert builtins.match ".*--startup-notify /run/rbitcoin/ready.*" execStart != null;
+# systemd eats %s on ExecStart. The unit must contain %% so the node still sees %s.
+assert builtins.match ".*--alert-notify 'logger %%s'.*" (execOf { alertNotify = "logger %s"; }) != null;
+assert builtins.match ".*--startup-notify 'touch %%s'.*" (execOf { startupNotify = "touch %s"; }) != null;
+assert builtins.match ".*'echo %%s'.*" (execOf { extraArgs = [ "echo %s" ]; }) != null;
 assert builtins.match ".*--inhibit-suspend.*" execStart != null;
 assert builtins.match ".*--proxy 127.0.0.1:9050.*" execStart != null;
 assert builtins.match ".*--onion 127.0.0.1:9050.*" execStart != null;
