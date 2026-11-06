@@ -586,6 +586,11 @@ for needle in ("package-for", "dependents", "dependent-timeout", "reconcile-miss
 no_prog = text.find("dependents made no progress")
 advance = text.find("advance-side")
 assert 0 < no_prog < advance, (no_prog, advance)
+phase2 = text.find("reconcile-missed --phase1 \"$log\" --phase2")
+assert no_prog < phase2 < advance, (no_prog, phase2, advance)
+between = text[text.find("deps_started=0"):phase2]
+assert "deps_started == 1" in between
+assert "[[ -f \"$deps_log\" ]]" not in text
 assert "--test-workspace" not in text
 assert "workspace-baseline.log" in text
 ' "$NIGHTLY"

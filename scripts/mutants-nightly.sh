@@ -246,8 +246,6 @@ while ((SECONDS < deadline)); do
       echo "mutants-nightly: dependents made no progress (exit $deps_ec); same queue next night"
       break
     fi
-  fi
-  if [[ -f "$deps_log" ]]; then
     python3 "$ROOT/scripts/mutants_queue.py" reconcile-missed --phase1 "$log" --phase2 "$deps_log" \
       --slice "$slice" >>"$OUT/missed.txt"
   else
