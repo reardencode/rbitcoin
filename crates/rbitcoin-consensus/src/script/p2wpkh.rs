@@ -105,7 +105,10 @@ pub fn verify_interpreted(
 ) -> Result<(), ConsensusError> {
     let witness = &tx.input[input_index.get()].witness;
     if witness.len() != 2 {
-        return Err(ConsensusError::Script("p2wpkh witness len".into()));
+        // Core `VerifyWitnessProgram`: 20-byte v0 with a stack size other than
+        // 2 is WITNESS_PROGRAM_MISMATCH, including empty. Empty-witness 39 is
+        // P2WSH and Taproot only. The typed path keeps its own string.
+        return Err(ConsensusError::Script("WITNESS_PROGRAM_MISMATCH".into()));
     }
     let mut script_code = Vec::with_capacity(25);
     script_code.extend_from_slice(&rbitcoin_primitives::P2PKH_PREFIX);

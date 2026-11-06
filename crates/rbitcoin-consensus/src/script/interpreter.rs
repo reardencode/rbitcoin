@@ -435,10 +435,10 @@ pub fn require_clean_true(stack: &[Vec<u8>]) -> Result<(), ConsensusError> {
 /// **Not** cleanstack — BIP62 CLEANSTACK was never activated for non-witness
 /// consensus. Requiring `len==1` falsely rejected valid P2SH (signet 219477).
 pub fn require_true_top(stack: &[Vec<u8>]) -> Result<(), ConsensusError> {
-    if stack.is_empty() || !bitcoin::script::read_scriptbool(stack.last().unwrap()) {
-        return Err(ConsensusError::Script("script false".into()));
+    match stack.last() {
+        Some(top) if bitcoin::script::read_scriptbool(top) => Ok(()),
+        _ => Err(ConsensusError::Script("script false".into())),
     }
-    Ok(())
 }
 
 /// Evaluate scriptSig as push-only onto `stack` (BIP16 P2SH / SIGPUSHONLY).
@@ -609,7 +609,7 @@ pub fn eval_script(
                         if executing {
                             let v = pop(stack)?;
                             if minimal_if && !is_minimal_if_arg(&v) {
-                                return Err(ConsensusError::Script("MINIMALIF".into()));
+                                return Err(minimal_if_error(ctx));
                             }
                             cond = bitcoin::script::read_scriptbool(&v);
                         }
@@ -621,7 +621,7 @@ pub fn eval_script(
                         if executing {
                             let v = pop(stack)?;
                             if minimal_if && !is_minimal_if_arg(&v) {
-                                return Err(ConsensusError::Script("MINIMALIF".into()));
+                                return Err(minimal_if_error(ctx));
                             }
                             cond = !bitcoin::script::read_scriptbool(&v);
                         }
@@ -742,8 +742,8 @@ pub fn eval_script(
                     }
                     0x73 => {
                         require_n(stack, 1)?;
-                        if bitcoin::script::read_scriptbool(stack.last().unwrap()) {
-                            let v = stack.last().unwrap().clone();
+                        if bitcoin::script::read_scriptbool(stack_last(stack)?) {
+                            let v = stack_last(stack)?.clone();
                             push(stack, altstack.len(), v)?;
                         }
                     }
@@ -756,7 +756,7 @@ pub fn eval_script(
                     }
                     0x76 => {
                         require_n(stack, 1)?;
-                        let v = stack.last().unwrap().clone();
+                        let v = stack_last(stack)?.clone();
                         push(stack, altstack.len(), v)?;
                     }
                     0x77 => {
@@ -807,7 +807,7 @@ pub fn eval_script(
                     }
                     0x82 => {
                         require_n(stack, 1)?;
-                        let sz = stack.last().unwrap().len() as i64;
+                        let sz = stack_last(stack)?.len() as i64;
                         push(stack, altstack.len(), scriptnum_encode(sz))?;
                     }
                     0x87 => {
@@ -951,7 +951,7 @@ pub fn eval_script(
                         }
                         require_n(stack, 1)?;
                         // BIP65 locktime: 5-byte script integer, minimal encoding when required.
-                        let locktime = scriptnum_decode_width(stack.last().unwrap(), 5, rm)?;
+                        let locktime = scriptnum_decode_width(stack_last(stack)?, 5, rm)?;
                         if locktime < 0 {
                             return Err(ConsensusError::Script("CLTV negative".into()));
                         }
@@ -975,7 +975,7 @@ pub fn eval_script(
                             continue;
                         }
                         require_n(stack, 1)?;
-                        let csv = scriptnum_decode_width(stack.last().unwrap(), 5, rm)?;
+                        let csv = scriptnum_decode_width(stack_last(stack)?, 5, rm)?;
                         if csv < 0 {
                             return Err(ConsensusError::Script("CSV negative".into()));
                         }
@@ -1521,7 +1521,9 @@ pub fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(),
     }
     if ctx.low_s {
         // LOW_S already required BIP66 encoding above, so the lax parse hits.
-        let (ecdsa, _) = crypto::parse_der_sig(sig, false).expect("BIP66 signature parses");
+        // BIP66 already passed. A parse miss is still a signature failure, not an abort.
+        let (ecdsa, _) = crypto::parse_der_sig(sig, false)
+            .map_err(|_| ConsensusError::Script("SIG_DER".into()))?;
         if !crypto::is_low_der_s(&ecdsa) {
             return Err(ConsensusError::Script("SIG_HIGH_S".into()));
         }
@@ -1544,20 +1546,22 @@ pub fn checksig_schnorr(
         (sig, bitcoin::sighash::TapSighashType::Default)
     } else if sig.len() == 65 {
         // BIP342: sighash byte must not be 0x00.
+        // Core CheckSchnorrSignature: 0x00 and an unknown type are hashtype
+        // failures, not a false CHECKSIG result.
         if sig[64] == 0x00 {
-            return Ok(false);
+            return Err(ConsensusError::Script("SCHNORR_SIG_HASHTYPE".into()));
         }
         let ty = bitcoin::sighash::TapSighashType::from_consensus_u8(sig[64])
-            .map_err(|_| ConsensusError::Script("tapscript sighash".into()))?;
+            .map_err(|_| ConsensusError::Script("SCHNORR_SIG_HASHTYPE".into()))?;
         (&sig[..64], ty)
     } else {
-        return Ok(false);
+        return Err(ConsensusError::Script("SCHNORR_SIG_SIZE".into()));
     };
     let xonly = bitcoin::key::XOnlyPublicKey::from_slice(pubkey)
         .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
     // `from_slice` rejects only a length other than 64. `sig_bytes` is that long.
     let schnorr = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes)
-        .expect("64-byte schnorr slice");
+        .map_err(|_| ConsensusError::Script("SCHNORR_SIG_SIZE".into()))?;
     let exec = ctx.tapscript.as_ref().ok_or_else(|| {
         ConsensusError::Script("invariant: tapscript spend without tapleaf hash".into())
     })?;
@@ -1620,6 +1624,13 @@ pub fn require_n(stack: &[Vec<u8>], n: usize) -> Result<(), ConsensusError> {
     Ok(())
 }
 
+/// Top stack item. Empty is the same script error as [`require_n`].
+pub fn stack_last(stack: &[Vec<u8>]) -> Result<&Vec<u8>, ConsensusError> {
+    stack
+        .last()
+        .ok_or_else(|| ConsensusError::Script("stack empty".into()))
+}
+
 #[doc(hidden)]
 pub fn decode_i64(
     v: &[u8],
@@ -1632,6 +1643,16 @@ pub fn decode_i64(
 #[doc(hidden)]
 pub fn is_minimal_if_arg(v: &[u8]) -> bool {
     v.is_empty() || v == [0x01]
+}
+
+/// Tapscript minimal-if is consensus. Witness v0 minimal-if is the policy flag.
+fn minimal_if_error(ctx: &EvalContext<'_>) -> ConsensusError {
+    let token = if ctx.sig_version == SigVersion::TapScript {
+        "TAPSCRIPT_MINIMALIF"
+    } else {
+        "MINIMALIF"
+    };
+    ConsensusError::Script(token.into())
 }
 
 #[doc(hidden)]

@@ -42,15 +42,32 @@ pub fn verify_tx_scripts_detached(
     prevouts: Vec<bitcoin::TxOut>,
     tx: bitcoin::Transaction,
 ) -> Result<(), ConsensusError> {
-    verify_tx_scripts_detached_forks(prevouts, tx, true, true, true, true, true)
+    verify_tx_scripts_mode(prevouts, tx, false)
+}
+
+/// [`verify_tx_scripts_detached`] with the interpreter forced for standard
+/// P2PKH and P2WPKH spends when `interpreter_only` is set.
+pub fn verify_tx_scripts_mode(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    interpreter_only: bool,
+) -> Result<(), ConsensusError> {
+    verify_tx_scripts_forks_mode(
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        interpreter_only,
+    )
 }
 
 fn verify_scripts_with_flags(
     prevouts: Vec<bitcoin::TxOut>,
     tx: bitcoin::Transaction,
     flags: crate::block::ScriptVerifyFlags,
+    interpreter_only: bool,
 ) -> Result<(), ConsensusError> {
-    let job = ScriptCheckJob::try_new(prevouts, tx, flags)?;
+    let mut job = ScriptCheckJob::try_new(prevouts, tx, flags)?;
+    job.interpreter_only = interpreter_only;
     crate::script::verify_job_all_inputs(&job)
 }
 
@@ -64,18 +81,28 @@ pub fn verify_tx_scripts_detached_forks(
     bip16_active: bool,
     taproot_active: bool,
 ) -> Result<(), ConsensusError> {
+    verify_tx_scripts_forks_mode(
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(
+            bip65_active,
+            bip112_active,
+            bip66_active,
+            bip16_active,
+            taproot_active,
+        ),
+        false,
+    )
+}
+
+fn verify_tx_scripts_forks_mode(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    flags: crate::block::ScriptVerifyFlags,
+    interpreter_only: bool,
+) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        verify_scripts_with_flags(
-            prevouts,
-            tx,
-            crate::block::ScriptVerifyFlags::buried(
-                bip65_active,
-                bip112_active,
-                bip66_active,
-                bip16_active,
-                taproot_active,
-            ),
-        )
+        verify_scripts_with_flags(prevouts, tx, flags, interpreter_only)
     })
     .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }
@@ -88,11 +115,21 @@ pub async fn verify_tx_scripts_cpu(
     prevouts: Vec<bitcoin::TxOut>,
     tx: bitcoin::Transaction,
 ) -> Result<(), ConsensusError> {
+    verify_tx_scripts_cpu_mode(prevouts, tx, false).await
+}
+
+/// [`verify_tx_scripts_cpu`] with [`verify_tx_scripts_mode`]'s interpreter switch.
+pub async fn verify_tx_scripts_cpu_mode(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    interpreter_only: bool,
+) -> Result<(), ConsensusError> {
     script_pool::run_cpu(move || {
         verify_scripts_with_flags(
             prevouts,
             tx,
             crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+            interpreter_only,
         )
     })
     .await
@@ -109,8 +146,20 @@ pub fn verify_tx_scripts_with_flags(
     tx: bitcoin::Transaction,
     flags: crate::block::ScriptVerifyFlags,
 ) -> Result<(), ConsensusError> {
-    script_pool::run_detached_join(move || verify_scripts_with_flags(prevouts, tx, flags))
-        .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
+    verify_tx_scripts_with_flags_mode(prevouts, tx, flags, false)
+}
+
+/// [`verify_tx_scripts_with_flags`] with [`verify_tx_scripts_mode`]'s interpreter switch.
+pub fn verify_tx_scripts_with_flags_mode(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    flags: crate::block::ScriptVerifyFlags,
+    interpreter_only: bool,
+) -> Result<(), ConsensusError> {
+    script_pool::run_detached_join(move || {
+        verify_scripts_with_flags(prevouts, tx, flags, interpreter_only)
+    })
+    .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }
 
 pub use block::validate_block_structure_hashed;

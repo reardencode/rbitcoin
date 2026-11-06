@@ -120,6 +120,7 @@ Clean smoke:
 | `--mempool-expiry HOURS` | `mempool_expiry=` | unset — hub default; min 1 |
 | `--blocks-only` | `blocks_only=` | off |
 | `--prefill-compact[=0\|1]` | `prefill_compact=` | **on** — extra BIP152 compact prefills (10 KiB cap); `=0` disables |
+| `--script-interpreter-only[=0\|1]` | `script_interpreter_only=` | **off** — default keeps the typed fast paths for standard P2PKH, P2WPKH, and nested P2SH-P2WPKH. `=1` sends those spends through the script interpreter. The Taproot key path stays specialized. Milestone script skip is unchanged |
 | `--persist-mempool[=0\|1]` | `persist_mempool=` | on |
 | `--trusted` | `trusted=` | off — inbound is not evicted/banned |
 | `--always-relay` | `always_relay=` | off — always announce inbound txs |

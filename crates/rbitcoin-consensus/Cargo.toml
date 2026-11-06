@@ -20,6 +20,8 @@ default = ["corpus"]
 corpus = ["dep:serde_json"]
 # Nightly cargo-mutants only. Off for the node build.
 mutants = ["dep:mutants"]
+# Pure consensus proof entry. Off for the node build.
+equiv = []
 
 
 [dependencies]

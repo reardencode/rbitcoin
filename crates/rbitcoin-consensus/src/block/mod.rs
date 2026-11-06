@@ -985,6 +985,10 @@ pub struct ScriptCheckJob {
     pub flags: ScriptVerifyFlags,
     /// Lookup/structure `TxPrecompute`. Set on the confirm path; tests lazy-`from_tx`.
     pub pre: std::sync::OnceLock<JobPre>,
+    /// Standard P2PKH, P2WPKH, and nested P2SH-P2WPKH use the interpreter.
+    /// The taproot key path stays specialized. Default off, so confirm keeps
+    /// the typed fast paths.
+    pub interpreter_only: bool,
 }
 
 impl Deref for ScriptCheckJob {
@@ -1098,6 +1102,7 @@ impl ScriptCheckJob {
             tx,
             flags,
             pre: std::sync::OnceLock::new(),
+            interpreter_only: false,
         }
     }
 

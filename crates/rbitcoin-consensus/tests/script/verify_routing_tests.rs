@@ -74,6 +74,51 @@ fn false_witness_program_is_eval_false() {
     assert!(format!("{err}").contains("EVAL_FALSE"), "{err}");
 }
 
+fn script_token(err: ConsensusError) -> String {
+    match err {
+        ConsensusError::Script(msg) => msg.split(" txid=").next().unwrap_or(&msg).to_string(),
+        other => panic!("expected a script error, got {other}"),
+    }
+}
+
+/// Core `VerifyScript` finishes scriptSig and scriptPubKey before witness checks.
+#[test]
+fn witness_checks_follow_the_script_result() {
+    let mut zeros = vec![0x00, 0x14];
+    zeros.extend([0u8; 20]);
+    let err = verify_job_all_inputs(&witness_job(zeros.clone(), vec![0x51], vec![]))
+        .expect_err("false program with scriptSig");
+    assert_eq!(script_token(err), "EVAL_FALSE");
+
+    let err = verify_job_all_inputs(&witness_job(
+        vec![0x60, 0x02, 0x00, 0x01],
+        vec![0x67],
+        vec![],
+    ))
+    .expect_err("scriptSig OP_ELSE");
+    assert_eq!(script_token(err), "OP_ELSE");
+
+    let err = verify_job_all_inputs(&witness_job(zeros, vec![0x67], vec![]))
+        .expect_err("scriptSig fails before the false program");
+    assert_eq!(script_token(err), "OP_ELSE");
+
+    let err = verify_job_all_inputs(&witness_job(vec![0x00], vec![], vec![vec![0x01]]))
+        .expect_err("bare false with a witness");
+    assert_eq!(script_token(err), "script false");
+
+    // scriptSig fills the stack. The program push is the overflow, which Core
+    // reports before malleation.
+    let mut program = vec![0x00, 0x14];
+    program.extend([0u8; 20]);
+    let err = verify_job_all_inputs(&witness_job(
+        program,
+        vec![0x51; interpreter::MAX_STACK_SIZE],
+        vec![],
+    ))
+    .expect_err("stack overflow before malleation");
+    assert_eq!(script_token(err), "stack size");
+}
+
 #[test]
 fn verify_job_uses_stashed_pre_for_bip143() {
     use bitcoin::sighash::{EcdsaSighashType, SighashCache};

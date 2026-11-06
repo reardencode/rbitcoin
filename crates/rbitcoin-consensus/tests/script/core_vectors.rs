@@ -250,6 +250,7 @@ fn run_script_row(
     amount: Amount,
     flags: &CoreFlags,
     shape: SpendShape,
+    interpreter_only: bool,
 ) -> Result<(), String> {
     // DISCOURAGE: NOP1/4–10 outside IF regions (see has_discouraged_nop_outside_if).
     if flags.discourage_upgradable_nops
@@ -285,7 +286,8 @@ fn run_script_row(
         );
     }
 
-    let job = script_row_job(script_sig, script_pubkey, witness, amount, flags, shape);
+    let mut job = script_row_job(script_sig, script_pubkey, witness, amount, flags, shape);
+    job.interpreter_only = interpreter_only;
     verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
 }
 
@@ -454,7 +456,7 @@ struct RowStats {
     failures: Vec<String>,
 }
 
-fn run_all_script_rows() -> RowStats {
+fn run_all_script_rows(interpreter_only: bool) -> RowStats {
     let root = load_json();
     let arr = root.as_array().expect("script_tests root array");
     let mut st = RowStats {
@@ -554,6 +556,7 @@ fn run_all_script_rows() -> RowStats {
             amount,
             &flags,
             SpendShape::default(),
+            interpreter_only,
         );
         let ok = outcome_matches(expect_s, &got);
 
@@ -573,9 +576,8 @@ fn run_all_script_rows() -> RowStats {
 }
 
 /// Full Core `script_tests.json` corpus: every data row via shipped verify path.
-#[test]
-fn core_script_tests_all_rows() {
-    let st = run_all_script_rows();
+fn assert_core_script_rows(interpreter_only: bool) {
+    let st = run_all_script_rows(interpreter_only);
     eprintln!(
         "core script_tests: total={total} ran={ran} pass={pass} fail={fail}",
         total = st.total,
@@ -603,11 +605,20 @@ fn core_script_tests_all_rows() {
     );
 }
 
+#[test]
+fn core_script_tests_all_rows() {
+    assert_core_script_rows(false);
+}
+
+#[test]
+fn core_script_tests_all_rows_interpreter_only() {
+    assert_core_script_rows(true);
+}
+
 /// Our script corpus, in addition to Core's JSON. Each `row` is Core
 /// `script_tests.json` form. The v32.1 oracle in `script-oracle/` runs the
 /// same file.
-#[test]
-fn script_corpus_rows_match_our_interpreter() {
+fn script_corpus_rows(interpreter_only: bool) {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/script_corpus/script_tests.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
@@ -655,12 +666,22 @@ fn script_corpus_rows_match_our_interpreter() {
         let flags = parse_flags(flags_s);
         let shape = super::core_script::spend_shape_from_json(row.get("spend"))
             .unwrap_or_else(|e| panic!("{id} spend: {e}"));
-        let got = run_script_row(&sig, &pk, witness, amount, &flags, shape);
+        let got = run_script_row(&sig, &pk, witness, amount, &flags, shape, interpreter_only);
         assert!(
             outcome_matches(expect, &got),
             "{id}: expect {expect} got {got:?}"
         );
     }
+}
+
+#[test]
+fn script_corpus_rows_match_our_interpreter() {
+    script_corpus_rows(false);
+}
+
+#[test]
+fn script_corpus_rows_interpreter_only() {
+    script_corpus_rows(true);
 }
 
 struct CorpusSpend {

@@ -492,6 +492,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         node.hub.set_max_tip_age_secs(secs);
     }
     node.hub.set_prefill_compact(config.prefill_compact);
+    node.hub
+        .query
+        .set_script_interpreter_only(config.script_interpreter_only);
     node.hub.set_rpc_wait_tip_idle(config.rpc.wait_tip_idle);
     if let Some(t) = config.mock_time {
         node.hub.clock.set_mock(t);
@@ -536,6 +539,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let expiry_hours = config.mempool.expiry_hours;
     let table = config.finalized_net_perms();
     let immediate_relay = config.trusted;
+    let script_interpreter_only = config.script_interpreter_only;
     let hub = Arc::clone(&node.hub);
     let (mempool, mp_gen, mp_live) = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
@@ -559,6 +563,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         if let Some(h) = expiry_hours {
             mp.set_expiry_hours(h);
         }
+        mp.set_script_interpreter_only(script_interpreter_only);
         hub.attach_mempool(mp.clone())
             .map_err(|_| "mempool already attached".to_string())?;
         let gen = mp.generation();

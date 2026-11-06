@@ -6,6 +6,8 @@
 
 #[doc(hidden)]
 pub mod classify;
+#[cfg(feature = "equiv")]
+pub mod equiv;
 #[doc(hidden)]
 pub mod interpreter;
 #[doc(hidden)]
@@ -18,6 +20,8 @@ pub mod p2tr;
 pub mod p2wpkh;
 #[doc(hidden)]
 pub mod p2wsh;
+#[doc(hidden)]
+pub mod script_fail;
 
 #[cfg(feature = "corpus")]
 pub mod core_script;
@@ -120,15 +124,12 @@ pub fn verify_input<'a>(
     }
 
     let kind = classify::classify(spk);
-    if job.witness_active && has_witness && !(matches!(kind, ScriptKind::P2sh) && job.bip16_active)
-    {
-        return Err(ConsensusError::Script("WITNESS_UNEXPECTED".into()));
-    }
 
     match kind {
         ScriptKind::P2pkh => {
             if needs_interpreted_ecdsa(job) {
-                return verify_bare(job, input_index, tx);
+                verify_bare(job, input_index, tx)?;
+                return reject_unexpected_witness(job, has_witness);
             }
             // Fast path: exact `<sig> <pubkey>` scriptSig. Historical mainnet has
             // non-standard P2PKH scriptSigs that still leave a valid stack for
@@ -136,16 +137,20 @@ pub fn verify_input<'a>(
             // only for scriptSig *shape* errors (not DER/ECDSA), so bip66 failure
             // codes stay.
             match p2pkh::verify(job, input_index, tx, sighash_cache(cache, tx)) {
-                Ok(()) => Ok(()),
-                Err(e) if p2pkh_scriptsig_shape_error(&e) => verify_bare(job, input_index, tx),
-                Err(e) => Err(e),
+                Ok(()) => {}
+                Err(e) if p2pkh_scriptsig_shape_error(&e) => {
+                    verify_bare(job, input_index, tx)?;
+                }
+                Err(e) => return Err(e),
             }
+            reject_unexpected_witness(job, has_witness)
         }
         ScriptKind::P2sh => {
             // Pre-BIP16: HASH160/EQUAL is a bare script (push data, hash, equal) —
             // do **not** treat the last push as a redeemScript. Mainnet 170060.
             if !job.bip16_active {
-                return verify_bare(job, input_index, tx);
+                verify_bare(job, input_index, tx)?;
+                return reject_unexpected_witness(job, has_witness);
             }
             let stack = nested::p2sh_script_sig_stack(job, input_index, tx)?;
             if let Some(res) = nested::try_p2sh_nested_segwit(
@@ -158,22 +163,39 @@ pub fn verify_input<'a>(
             ) {
                 return res;
             }
-            if job.witness_active && has_witness {
-                return Err(ConsensusError::Script("WITNESS_UNEXPECTED".into()));
-            }
-            nested::verify_p2sh_legacy(job, input_index, tx, stack)
+            nested::verify_p2sh_legacy(job, input_index, tx, stack)?;
+            // Redeem was not a witness program. A witness is unexpected only
+            // after that redeem succeeded.
+            reject_unexpected_witness(job, has_witness)
         }
         ScriptKind::Bare | ScriptKind::P2wpkh | ScriptKind::P2wsh | ScriptKind::P2tr => {
-            verify_bare(job, input_index, tx)
+            verify_bare(job, input_index, tx)?;
+            reject_unexpected_witness(job, has_witness)
         }
     }
+}
+
+/// Core reports `WITNESS_UNEXPECTED` only after scriptPubKey (and a P2SH
+/// redeem) has succeeded. A failing script keeps its own error.
+fn reject_unexpected_witness(
+    job: &ScriptCheckJob,
+    has_witness: bool,
+) -> Result<(), ConsensusError> {
+    if job.witness_active && has_witness {
+        return Err(ConsensusError::Script("WITNESS_UNEXPECTED".into()));
+    }
+    Ok(())
 }
 
 /// Core `IsPayToAnchor`: witness v1 program `Ns`.
 #[doc(hidden)]
 pub const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = rbitcoin_primitives::P2A_PROGRAM;
 
-/// BIP141 native witness program (any version). `scriptSig` must be empty.
+/// BIP141 native witness program (any version).
+///
+/// Core runs scriptSig, then scriptPubKey, and only then the witness checks.
+/// A script failure or a false program is that script error. A non-empty
+/// scriptSig on a true program is `WITNESS_MALLEATED`.
 ///
 /// Policy: a v1 32-byte program before Taproot and pay-to-anchor succeed
 /// without DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM, as in Core.
@@ -188,13 +210,35 @@ pub fn verify_native_witness(
     version: u8,
     program: &[u8],
 ) -> Result<(), ConsensusError> {
-    if !tx.input[input_index.get()].script_sig.is_empty() {
-        return Err(ConsensusError::Script("WITNESS_MALLEATED".into()));
+    let input = &tx.input[input_index.get()];
+    let mut stack = Vec::new();
+    let script_sig = input.script_sig.as_script();
+    if !script_sig.as_bytes().is_empty() {
+        let ctx_sig = interpreter::EvalContext::from_job(
+            job,
+            tx,
+            input_index,
+            script_sig,
+            interpreter::SigVersion::Base,
+        )?;
+        let _ = interpreter::eval_script(script_sig, &mut stack, &ctx_sig)?;
     }
-    // Core runs the scriptPubKey first. A false program is EVAL_FALSE for every
-    // version, including unknown ones, before anyone-can-spend success.
-    if !bitcoin::script::read_scriptbool(program) {
+    let spk = bitcoin::script::Script::from_bytes(job.prevout_script(input_index)?);
+    let ctx = interpreter::EvalContext::from_job(
+        job,
+        tx,
+        input_index,
+        spk,
+        interpreter::SigVersion::Base,
+    )?;
+    let _ = interpreter::eval_script(spk, &mut stack, &ctx)?;
+    // The program push is the scriptPubKey result. False, for every version,
+    // is EVAL_FALSE before malleation or anyone-can-spend success.
+    if !bitcoin::script::read_scriptbool(stack.last().map(Vec::as_slice).unwrap_or(&[])) {
         return Err(ConsensusError::Script("EVAL_FALSE".into()));
+    }
+    if !input.script_sig.is_empty() {
+        return Err(ConsensusError::Script("WITNESS_MALLEATED".into()));
     }
     match (version, program.len()) {
         (0, 20) if needs_interpreted_ecdsa(job) => {
@@ -221,9 +265,11 @@ pub fn verify_native_witness(
 
 /// LOW_S / STRICTENC / NULLFAIL are interpreter policy. The typed P2PKH and
 /// P2WPKH paths do not apply them, so those jobs use the interpreter.
+/// `interpreter_only` forces the same route for a proof or a cautious
+/// operator, including when those policy bits are off.
 #[doc(hidden)]
 pub fn needs_interpreted_ecdsa(job: &ScriptCheckJob) -> bool {
-    job.low_s || job.strictenc || job.nullfail
+    job.interpreter_only || job.low_s || job.strictenc || job.nullfail
 }
 
 /// True when the P2PKH fast path failed because scriptSig is not exactly two

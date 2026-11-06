@@ -469,6 +469,9 @@ pub struct Query {
     pub confirm_cancel: std::sync::atomic::AtomicBool,
     /// `--trust-peer`: consensus faults warn and the plan's apply-class still connects.
     pub trust_peer: std::sync::atomic::AtomicBool,
+    /// `--script-interpreter-only`: confirm stamps this onto script jobs.
+    /// Default off, so typed P2PKH and P2WPKH fast paths stay on.
+    pub script_interpreter_only: std::sync::atomic::AtomicBool,
     /// One header read returns [`StoreError::Cancelled`]. Tests only.
     #[cfg(debug_assertions)]
     pub header_read_cancel: std::sync::atomic::AtomicBool,
@@ -675,6 +678,7 @@ impl Query {
             index_mode_cell: std::sync::atomic::AtomicU8::new(IndexMode::Tip as u8),
             confirm_cancel: std::sync::atomic::AtomicBool::new(false),
             trust_peer: std::sync::atomic::AtomicBool::new(false),
+            script_interpreter_only: std::sync::atomic::AtomicBool::new(false),
             #[cfg(debug_assertions)]
             header_read_cancel: std::sync::atomic::AtomicBool::new(false),
             height_by_hash: Mutex::new(HeightByHashIndex::default()),
@@ -1598,6 +1602,17 @@ impl Query {
 
     pub fn trust_peer(&self) -> bool {
         self.trust_peer.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `--script-interpreter-only`. Confirm copies this onto each script job.
+    pub fn set_script_interpreter_only(&self, on: bool) {
+        self.script_interpreter_only
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn script_interpreter_only(&self) -> bool {
+        self.script_interpreter_only
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Enable/disable durable spend-annotation writes on confirm

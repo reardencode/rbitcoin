@@ -427,6 +427,16 @@ fn operator_conf_and_argv() {
         args.extend_from_slice(argv);
         assert_eq!(ready_config(args).prefill_compact, want, "{argv:?}");
     }
+    assert!(!ready_config(["rbitcoin-node"]).script_interpreter_only);
+    for (argv, want) in [
+        (&["--script-interpreter-only=0"][..], false),
+        (&["--script-interpreter-only"], true),
+        (&["--script-interpreter-only=1"], true),
+    ] {
+        let mut args = vec!["rbitcoin-node"];
+        args.extend_from_slice(argv);
+        assert_eq!(ready_config(args).script_interpreter_only, want, "{argv:?}");
+    }
     for (arg, stored, window) in [
         ("--check-blocks=6", 6, 6),
         ("--check-blocks=0", 0, 0),

@@ -7,13 +7,17 @@ mod core_sighash;
 mod core_tx_vectors;
 mod core_vectors;
 mod der_tests;
+#[cfg(feature = "equiv")]
+mod equiv;
 mod interpreter;
+mod interpreter_only;
 mod nested;
 mod opcode_bytes;
 mod p2pkh;
 mod p2tr;
 mod p2wpkh;
 mod p2wsh;
+mod script_errors;
 mod tests_flag_parity;
 mod tests_verify;
 mod verify_routing_tests;

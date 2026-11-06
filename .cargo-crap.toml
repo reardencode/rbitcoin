@@ -2,6 +2,10 @@
 # allow = current production functions with CRAP > 30 (2026-09-16 snapshot).
 # Remove a name when that function scores ≤ 30. Names are unique in this set.
 # Bench and *_tests.rs / tests.rs / testutil.rs are excluded from the walk.
+# ScriptFail::token and consensus_ordinal are the Core ScriptError catalog.
+# Their match stays one table (CC stays above 30). equiv_verify is the proof
+# entry; the coverage build leaves the equiv feature off, so that file has
+# no LCOV lines.
 threshold = 30.0
 exclude = [
   "**/crates/rbitcoin-bench/**",
@@ -13,12 +17,15 @@ exclude = [
 ]
 allow = [
   "NodeConfig::apply_kv",
+  "ScriptFail::token",
   "TxTable::open_seqsigwit",
   "UringSession::submit_and_wait_one",
   "cli_main",
+  "consensus_ordinal",
   "decode_cmd_payload",
   "dispatch_inner",
   "dispatch_pinned",
+  "equiv_verify",
   "eval_script",
   "ibd_cancellable",
   "pread_batch_on_session_inner",

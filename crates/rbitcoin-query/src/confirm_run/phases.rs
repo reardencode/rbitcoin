@@ -217,7 +217,7 @@ pub fn assemble_run(
         let t_connect = Instant::now();
         let build_script_jobs =
             !crate::milestone_gate::skips_on_query(milestone, query, height.0, &block_hash);
-        let (script_jobs, spends, fees, block_fees, meters) = assemble_block_prevouts(
+        let (mut script_jobs, spends, fees, block_fees, meters) = assemble_block_prevouts(
             block.as_ref(),
             &ctx,
             Some(&meta.tx_fks),
@@ -235,6 +235,11 @@ pub fn assemble_run(
             build_script_jobs,
             preverified,
         )?;
+        if query.script_interpreter_only() {
+            for job in &mut script_jobs {
+                job.interpreter_only = true;
+            }
+        }
         meters.acc.flush(query.confirm_stats());
         crate::note_confirm(&query.confirm_stats().asm_prevout_ns, meters.prev_ns);
         crate::note_confirm(&query.confirm_stats().asm_job_ns, meters.job_ns);
