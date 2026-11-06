@@ -1,5 +1,6 @@
 use rbitcoin_cli::*;
 use rbitcoin_primitives::Network;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -62,6 +63,10 @@ fn spawn_rpc_mock(token: &str, result_json: &str) -> (u16, thread::JoinHandle<()
         }
     });
     (port, h)
+}
+
+fn os_args(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
 }
 
 #[test]
@@ -267,4 +272,44 @@ fn rpc_socket_reaches_a_socket_outside_the_datadir() {
         "--rpc-socket getblockcount must succeed, got {code:?}"
     );
     let _ = h.join();
+}
+
+#[test]
+fn parse_args_negative_numbers_are_params() {
+    match parse_args(&os_args(&[
+        "rbitcoin-cli",
+        "getnetworkhashps",
+        "-1",
+        "-0.5",
+    ])) {
+        Ok(Action::Call(cfg)) => {
+            assert_eq!(cfg.command.as_deref(), Some("getnetworkhashps"));
+            assert_eq!(cfg.params, vec!["-1".to_string(), "-0.5".to_string()]);
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => panic!("expected Action::Call, got Help or Version"),
+    }
+}
+
+#[test]
+fn parse_args_dash_alpha_is_still_rejected() {
+    for bad in ["-bogus", "-x"] {
+        let err = match parse_args(&os_args(&["rbitcoin-cli", bad])) {
+            Ok(_) => panic!("{bad} should have been rejected"),
+            Err(e) => e,
+        };
+        assert!(err.contains("unknown argument"), "{bad} -> {err}");
+    }
+}
+
+#[test]
+fn parse_args_double_dash_ends_option_parsing() {
+    match parse_args(&os_args(&["rbitcoin-cli", "getblockhash", "--", "-1"])) {
+        Ok(Action::Call(cfg)) => {
+            assert_eq!(cfg.command.as_deref(), Some("getblockhash"));
+            assert_eq!(cfg.params, vec!["-1".to_string()]);
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => panic!("expected Action::Call, got Help or Version"),
+    }
 }

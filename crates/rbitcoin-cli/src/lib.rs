@@ -80,44 +80,56 @@ pub fn flag_name_and_eq(raw: &str) -> Option<(&str, Option<&str>)> {
     }
 }
 
+fn is_negative_number(a: &str) -> bool {
+    a.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+}
+
 #[doc(hidden)]
 pub fn parse_args(args: &[OsString]) -> Result<Action, String> {
     let mut cfg = CliConfig::default();
+    let mut positional_only = false;
     let mut i = 1usize;
     while i < args.len() {
         let a = args[i].to_string_lossy();
-        if a == "--help" || a == "-h" {
-            return Ok(Action::Help);
-        }
-        if a == "--version" || a == "-V" {
-            return Ok(Action::Version);
-        }
-        if a.starts_with('-') && !a.starts_with("--") {
-            return Err(format!("unknown argument `{a}`"));
-        }
-        if let Some((name, eq)) = flag_name_and_eq(a.as_ref()) {
-            let val = match eq {
-                Some(v) => {
-                    if v.is_empty() {
-                        return Err(format!("--{name} requires a value"));
-                    }
-                    v.to_string()
-                }
-                None => take_value(args, &mut i, &format!("--{name}"))?,
-            };
-            match name {
-                "datadir" => cfg.datadir = PathBuf::from(val),
-                "network" => {
-                    cfg.network =
-                        Network::parse(&val).map_err(|e| format!("invalid --network: {e}"))?;
-                }
-                "rpc-url" => cfg.rpc_url = Some(val),
-                "rpc-socket" => cfg.socket = Some(PathBuf::from(val)),
-                "rpc-token-file" => cfg.token_file = Some(PathBuf::from(val)),
-                other => return Err(format!("unknown argument `--{other}`")),
+        if !positional_only {
+            if a == "--help" || a == "-h" {
+                return Ok(Action::Help);
             }
-            i += 1;
-            continue;
+            if a == "--version" || a == "-V" {
+                return Ok(Action::Version);
+            }
+            if a == "--" {
+                positional_only = true;
+                i += 1;
+                continue;
+            }
+            if a.starts_with('-') && !a.starts_with("--") && !is_negative_number(a.as_ref()) {
+                return Err(format!("unknown argument `{a}`"));
+            }
+            if let Some((name, eq)) = flag_name_and_eq(a.as_ref()) {
+                let val = match eq {
+                    Some(v) => {
+                        if v.is_empty() {
+                            return Err(format!("--{name} requires a value"));
+                        }
+                        v.to_string()
+                    }
+                    None => take_value(args, &mut i, &format!("--{name}"))?,
+                };
+                match name {
+                    "datadir" => cfg.datadir = PathBuf::from(val),
+                    "network" => {
+                        cfg.network =
+                            Network::parse(&val).map_err(|e| format!("invalid --network: {e}"))?;
+                    }
+                    "rpc-url" => cfg.rpc_url = Some(val),
+                    "rpc-socket" => cfg.socket = Some(PathBuf::from(val)),
+                    "rpc-token-file" => cfg.token_file = Some(PathBuf::from(val)),
+                    other => return Err(format!("unknown argument `--{other}`")),
+                }
+                i += 1;
+                continue;
+            }
         }
         if cfg.command.is_none() {
             cfg.command = Some(a.into_owned());
