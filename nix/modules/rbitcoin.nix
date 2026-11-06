@@ -88,6 +88,8 @@ let
   ++ optional (cfg.rpc.cookieFile != null) (toString cfg.rpc.cookieFile)
   ++ optional (cfg.rpc.cookiePerms != null) "--rpc-cookie-perms"
   ++ optional (cfg.rpc.cookiePerms != null) cfg.rpc.cookiePerms
+  ++ optional (cfg.rpc.clientVersion != null) "--rpc-client-version"
+  ++ optional (cfg.rpc.clientVersion != null) (toString cfg.rpc.clientVersion)
   ++ optional cfg.electrum.enable "--electrum-listen"
   ++ optional cfg.electrum.enable (socket cfg.electrum.address cfg.electrum.port)
   ++ optional (cfg.electrum.enable && cfg.electrum.maxSubs != null) "--electrum-max-subs"
@@ -503,6 +505,18 @@ in
           group write. `all` allows world read (0644) and refuses group or world
           write. The check is Unix mode bits. Requires `cookieFile`. Omitted from the unit
           argv when null, so the default service command does not grow a flag.
+        '';
+      };
+
+      clientVersion = mkOption {
+        type = types.nullOr (types.ints.between 1 1000000);
+        default = null;
+        example = 310000;
+        description = ''
+          Pass `--rpc-client-version`: the integer `getnetworkinfo.version` reports.
+          `null` leaves the node default (190000, the Core 0.19 response shapes).
+          Only that integer changes; no RPC is added. Bark's captaind needs 310000.
+          Omitted from the unit argv when null.
         '';
       };
     };
