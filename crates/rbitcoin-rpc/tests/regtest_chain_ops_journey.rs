@@ -4315,3 +4315,106 @@ fn rpc_regtest_pow_bits_overlay() {
     assert_eq!(tip_count(&ctx), 5);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Mines `n` blocks, `spacing` seconds apart on the mock clock, and returns
+/// their headers.
+fn mine_spaced(ctx: &RpcContext, t: &mut u64, spacing: u64, n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|_| {
+            *t += spacing;
+            dispatch(ctx, "setmocktime", vec![json!(*t)]).unwrap();
+            let hash = dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+            let hdr = dispatch(ctx, "getblockheader", vec![hash[0].clone()]).unwrap();
+            assert_eq!(hdr["time"].as_u64(), Some(*t));
+            hdr
+        })
+        .collect()
+}
+
+/// Regtest retargeting toward 10 s blocks every 2 blocks, so each period
+/// measures one spacing against a 20 s timespan. The first period keeps the
+/// start bits. Fast blocks raise the difficulty and slow ones lower it, up to
+/// the 4x clamp and then the ceiling. The template, `generate` and
+/// `submitblock` agree at a retarget height, and there is no min-difficulty
+/// exception.
+#[test]
+fn rpc_regtest_retarget_journey() {
+    const START: u32 = 0x1f0f_ffff;
+    const CEILING: u32 = 0x2003_3333; // (2^256 - 1) / 80, four 20 s timespans
+    const LIMIT: u32 = 0x207f_ffff;
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.apply_regtest_pow_bits(START).unwrap();
+    params.apply_regtest_retarget(10, 2).unwrap();
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let (_addr, p2wpkh) = p2wpkh_regtest();
+    let bits = |hdr: &Value| u32::from_str_radix(hdr["bits"].as_str().unwrap(), 16).unwrap();
+    let diff = |hdr: &Value| hdr["difficulty"].as_f64().unwrap();
+    let submit = |block: &Block| dispatch(&ctx, "submitblock", vec![json!(block_hex(block))]);
+    let mut t = 1_800_000_000u64;
+
+    // Heights 1 and 2 keep the start bits, the first retarget height included:
+    // its period would begin at the 2011 genesis.
+    for hdr in mine_spaced(&ctx, &mut t, 10, 2) {
+        assert_eq!(bits(&hdr), START, "{hdr}");
+    }
+
+    // Height 3 comes 9 s after height 2: 9 s against a 20 s timespan.
+    let fast = mine_spaced(&ctx, &mut t, 9, 1).remove(0);
+    assert_eq!(bits(&fast), START);
+    t += 9;
+    dispatch(&ctx, "setmocktime", vec![json!(t)]).unwrap();
+    let tmpl = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let harder = u32::from_str_radix(tmpl["bits"].as_str().unwrap(), 16).unwrap();
+    assert_ne!(harder, START);
+    let mining = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(mining["next"]["bits"], tmpl["bits"]);
+    assert_eq!(mining["next"]["height"], 4);
+    let stale = rbitcoin_consensus::mine_regtest_paying_bits(
+        hub.tip_hash().unwrap(),
+        t as u32,
+        4,
+        p2wpkh.clone(),
+        vec![],
+        bitcoin::CompactTarget::from_consensus(START),
+    );
+    assert_eq!(submit(&stale).unwrap(), "bad-diffbits");
+    t -= 9;
+    let at4 = mine_spaced(&ctx, &mut t, 9, 1).remove(0);
+    assert_eq!(bits(&at4), harder);
+    let up = diff(&at4) / diff(&fast);
+    assert!((up - 20.0 / 9.0).abs() < 0.01, "difficulty rose {up}x");
+
+    // Mainnet has no min-difficulty exception: the pow limit two spacings
+    // late is still the wrong bits.
+    let late = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        (t + 21) as u32,
+        5,
+        p2wpkh.clone(),
+        vec![],
+    );
+    assert_eq!(late.header.bits.to_consensus(), LIMIT);
+    assert_eq!(submit(&late).unwrap(), "bad-diffbits");
+
+    // Heights 5 and 6, 36 s apart: 36 s against 20 s lowers it 1.8x.
+    let slow = mine_spaced(&ctx, &mut t, 36, 2);
+    assert_eq!(bits(&slow[0]), harder);
+    let down = diff(&slow[1]) / diff(&slow[0]);
+    assert!((down - 20.0 / 36.0).abs() < 0.01, "difficulty fell to {down}");
+
+    // 100 s blocks: 100 s against 20 s is clamped to a 4x drop.
+    let slower = mine_spaced(&ctx, &mut t, 100, 2);
+    let clamped = diff(&slower[1]) / diff(&slower[0]);
+    assert!((clamped - 0.25).abs() < 0.01, "difficulty fell to {clamped}");
+
+    // Three more slow periods: the target stops at the ceiling, where four
+    // timespans still fit 256 bits, rather than at the pow limit.
+    for _ in 0..3 {
+        let period = mine_spaced(&ctx, &mut t, 100, 2);
+        assert_ne!(bits(&period[1]), LIMIT);
+    }
+    let tip = dispatch(&ctx, "getblockheader", vec![best_hash(&ctx)]).unwrap();
+    assert_eq!(bits(&tip), CEILING);
+    assert_eq!(tip_count(&ctx), 14);
+    let _ = std::fs::remove_dir_all(&dir);
+}

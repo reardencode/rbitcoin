@@ -942,7 +942,7 @@ async fn same_prev_hash_template_keeps_the_sent_bits() {
     // past prev + 20 min expects the limit, an earlier one the padding bits.
     let mut params = ChainParams::regtest();
     params.pow_limit = Target::from_compact(CompactTarget::from_consensus(0x2100_ffff));
-    let tc = padded_chain_with("sv2-sent-bits", 0, params);
+    let tc = padded_chain_with("sv2-sent-bits", 100, params);
     let FirstTemplate {
         tp,
         mut c,
@@ -1302,7 +1302,7 @@ fn template_time_holds_the_last_of_period_floor() {
     let mut params = ChainParams::regtest();
     params.btc.pow_target_timespan = 16 * params.btc.pow_target_spacing;
     assert_eq!(params.difficulty_adjustment_interval(), 16);
-    let tc = padded_chain_with("sv2-period-floor", 0, params);
+    let tc = padded_chain_with("sv2-period-floor", 100, params);
     let genesis = tc.tip_time - 600 * 100;
     let first_time = genesis + 200_000;
     let mut prev = tc.chain.tip_header().expect("tip").block_hash();
@@ -1334,7 +1334,7 @@ async fn template_target_follows_the_regtest_pow_overlay() {
     const OVERLAY: u32 = 0x200f_ffff;
     let mut params = ChainParams::regtest();
     params.apply_regtest_pow_bits(OVERLAY).unwrap();
-    let tc = padded_chain_with("sv2-pow-overlay", 0, params);
+    let tc = padded_chain_with("sv2-pow-overlay", 100, params);
     let FirstTemplate {
         tp,
         mut c,
@@ -1372,7 +1372,7 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
     const OVERLAY: u32 = 0x200f_ffff;
     let mut params = ChainParams::regtest();
     params.apply_regtest_pow_bits(OVERLAY).unwrap();
-    let tc = padded_chain_with("sv2-pow-gap-drop", 0, params);
+    let tc = padded_chain_with("sv2-pow-gap-drop", 100, params);
     tc.chain.set_prefill_compact(true);
     let FirstTemplate {
         tp,
@@ -1402,6 +1402,49 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
         "a gap timestamp must not reach accept_block"
     );
     tc.chain.set_prefill_compact(false);
+
+    tp.shutdown().await;
+}
+
+/// Under regtest retargeting the template at a retarget height carries the
+/// retargeted bits, and a solution ground against them becomes the tip. The
+/// pad's 600 s blocks are 60x the 10 s spacing, so height 18 takes the 4x
+/// clamp: `0x1f00ffff` becomes `0x1f03fffc`. Height 18 is the first
+/// retarget height above 16; below 17 the BIP34 push is one byte, and this
+/// file's coinbase, the bare prefix, would be `bad-cb-length`.
+#[tokio::test(flavor = "multi_thread")]
+async fn template_target_follows_a_regtest_retarget() {
+    const START: u32 = 0x1f00_ffff;
+    const EASIER: u32 = 0x1f03_fffc;
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(START).unwrap();
+    params.apply_regtest_retarget(10, 9).unwrap();
+    let tc = padded_chain_with("sv2-retarget", 17, params);
+    assert_eq!(tc.chain.tip_height(), Some(17));
+    assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), START);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    assert_eq!(header.bits.to_consensus(), EASIER);
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), EASIER);
 
     tp.shutdown().await;
 }

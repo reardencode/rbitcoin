@@ -284,8 +284,18 @@ pub fn retarget_bits(
     } else {
         prev_bits
     };
+    // A regtest retarget target times the timespan must fit 256 bits.
+    let base = match params.regtest_retarget {
+        Some(r) if Target::from_compact(base) > r.ceiling => r.ceiling.to_compact_lossy(),
+        _ => base,
+    };
     let timespan = u64::from(prev_time.saturating_sub(first.time));
-    CompactTarget::from_next_work_required(base, timespan, &params.btc)
+    let bits = CompactTarget::from_next_work_required(base, timespan, &params.btc);
+    // Integer division rounds a tiny target to zero, which no hash meets.
+    match params.regtest_retarget {
+        Some(r) if Target::from_compact(bits) < r.floor => r.floor.to_compact_lossy(),
+        _ => bits,
+    }
 }
 
 /// Core min-difficulty rule: a block more than 2 spacings after its parent may
@@ -300,7 +310,9 @@ pub fn min_diff_gap(params: &ChainParams, prev_time: u32, header_time: u32) -> b
 /// bits become the overlay unless Core would still require those bits. That is
 /// the min-difficulty time gap, or a retarget boundary: regtest does not
 /// retarget, so the parent bits stand, including the pow limit. Ignored unless
-/// `params` is regtest. Every next-work path must end here.
+/// `params` is regtest. With regtest retargeting on, heights 1 through the
+/// first retarget height carry the start bits and later heights keep `bits`.
+/// Every next-work path must end here.
 #[doc(hidden)]
 pub fn apply_regtest_pow_overlay(
     params: &ChainParams,
@@ -309,12 +321,20 @@ pub fn apply_regtest_pow_overlay(
     prev_time: u32,
     header_time: u32,
 ) -> CompactTarget {
-    let Some(overlay) = params.regtest_pow_bits_overlay else {
-        return bits;
-    };
     if params.network != bitcoin::Network::Regtest {
         return bits;
     }
+    if let Some(retarget) = params.regtest_retarget {
+        let first_retarget = params.difficulty_adjustment_interval();
+        return if (1..=first_retarget).contains(&height) {
+            retarget.start_bits
+        } else {
+            bits
+        };
+    }
+    let Some(overlay) = params.regtest_pow_bits_overlay else {
+        return bits;
+    };
     if height == 0 || bits != params.pow_limit.to_compact_lossy() {
         return bits;
     }

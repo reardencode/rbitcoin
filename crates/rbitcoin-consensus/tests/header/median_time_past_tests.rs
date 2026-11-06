@@ -573,3 +573,57 @@ fn regtest_pow_overlay_follows_next_work() {
     assert_eq!(at(&plain, 7, overlay, 1, None), overlay);
     assert_eq!(at(&other, 7, overlay, 1, None), overlay);
 }
+
+/// The shortest regtest retarget period Core's clamp can carry is 4 s: its
+/// lower bound is `timespan / 4`, which is zero below that, and a period with
+/// no elapsed time would then retarget to a zero target. At 4 s such a period
+/// is the 4x step instead, and a target near zero stops at the floor.
+#[test]
+fn regtest_retarget_refuses_a_period_the_clamp_cannot_carry() {
+    let t = 1_000_000u32;
+    for (block_time, interval) in [(1, 2), (1, 3), (3, 1)] {
+        let mut short = ChainParams::regtest();
+        assert!(
+            short.apply_regtest_retarget(block_time, interval).is_err(),
+            "{block_time} s x {interval}"
+        );
+        assert_eq!(short.regtest_retarget, None);
+    }
+    // At 4 s the hardest step is a quarter and the floor is target 4. A start
+    // target below it is refused. Repeated no-elapsed periods from target 4
+    // or 8 would round to 2 or 1 and then zero; they stop at the floor.
+    let mut tiny = ChainParams::regtest();
+    tiny.apply_regtest_pow_bits(0x0103_0000).unwrap();
+    assert!(tiny.apply_regtest_retarget(1, 4).is_err());
+    for start in [0x0104_0000, 0x0108_0000] {
+        let mut hard = ChainParams::regtest();
+        hard.apply_regtest_pow_bits(start).unwrap();
+        hard.apply_regtest_retarget(1, 4).unwrap();
+        let mut prev = CompactTarget::from_consensus(start);
+        for height in [8, 12, 16] {
+            let first = Some(PeriodFirst {
+                time: t,
+                bits: prev,
+            });
+            prev = next_work_bits(&hard, height, prev, t, t + 1, first, |_| None).unwrap();
+            assert_eq!(prev.to_consensus(), 0x0104_0000, "{start:#x} at {height}");
+        }
+    }
+
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(0x1f00_ffff).unwrap();
+    params.apply_regtest_retarget(1, 4).unwrap();
+    let prev = CompactTarget::from_consensus(0x1f00_ffff);
+    // Height 8 is the second boundary, so it retargets; the whole period
+    // landed in one second, and one with a parent older than its first block.
+    for first_time in [t, t + 1] {
+        let first = Some(PeriodFirst {
+            time: first_time,
+            bits: prev,
+        });
+        let bits = next_work_bits(&params, 8, prev, t, t + 1, first, |_| None).unwrap();
+        assert_ne!(bits.to_consensus(), 0, "first at {first_time}");
+        let step = difficulty_float(bits.to_consensus()) / difficulty_float(prev.to_consensus());
+        assert!((step - 4.0).abs() < 0.01, "difficulty rose {step}x");
+    }
+}
