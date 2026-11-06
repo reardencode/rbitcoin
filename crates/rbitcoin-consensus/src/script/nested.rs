@@ -1,7 +1,7 @@
 //! P2SH nested SegWit and legacy redeem scripts.
 
 use bitcoin::script::Script;
-use bitcoin::Transaction;
+use bitcoin::{Amount, Transaction};
 
 use bitcoin::sighash::SighashCache;
 
@@ -27,6 +27,7 @@ use crate::error::ConsensusError;
 /// [`verify_p2sh_legacy`] (legacy multisig multi-push, etc.).
 ///
 /// When `!job.witness_active`, always `None` (pre-segwit: redeem is ordinary Base script).
+#[allow(clippy::too_many_arguments)] // spent output is passed in; verify does not resolve it again
 pub fn try_p2sh_nested_segwit(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
@@ -34,6 +35,8 @@ pub fn try_p2sh_nested_segwit(
     _cache: &mut SighashCache<&Transaction>,
     pre: &crate::TxScriptPrecompute,
     items: &[Vec<u8>],
+    amount: Amount,
+    outer: &[u8],
 ) -> Option<Result<(), ConsensusError>> {
     if !job.witness_active {
         return None;
@@ -52,10 +55,6 @@ pub fn try_p2sh_nested_segwit(
         return Some(Err(ConsensusError::Script("WITNESS_MALLEATED_P2SH".into())));
     }
 
-    let outer = match job.prevout_script(input_index) {
-        Ok(s) => s,
-        Err(e) => return Some(Err(e)),
-    };
     if let Err(e) = check_p2sh_redeem_hash(outer, redeem) {
         return Some(Err(e));
     }
@@ -65,17 +64,15 @@ pub fn try_p2sh_nested_segwit(
 
     Some(match (version, program.len()) {
         (0, 20) if super::needs_interpreted_ecdsa(job) => {
-            p2wpkh::verify_interpreted(job, input_index, tx, program)
+            p2wpkh::verify_interpreted(job, input_index, tx, program, amount)
         }
         (0, 20) => {
-            let mut keyhash = [0u8; 20];
-            keyhash.copy_from_slice(program);
-            p2wpkh::verify_with_keyhash(job, input_index, tx, &keyhash, redeem, pre)
+            let keyhash: &[u8; 20] = program.try_into().expect("20-byte witness program");
+            p2wpkh::verify_with_keyhash(job, input_index, tx, keyhash, redeem, pre, amount)
         }
         (0, 32) => {
-            let mut scripthash = [0u8; 32];
-            scripthash.copy_from_slice(program);
-            p2wsh::verify_with_scripthash(job, input_index, tx, &scripthash)
+            let scripthash: &[u8; 32] = program.try_into().expect("32-byte witness program");
+            p2wsh::verify_with_scripthash(job, input_index, tx, scripthash, amount)
         }
         (0, _) => Err(ConsensusError::Script(
             "WITNESS_PROGRAM_WRONG_LENGTH".into(),
@@ -95,15 +92,24 @@ pub fn verify_p2sh_legacy(
     input_index: crate::block::InputIndex,
     tx: &Transaction,
     mut stack: Vec<Vec<u8>>,
+    amount: Amount,
+    outer: &[u8],
 ) -> Result<(), ConsensusError> {
     if stack.is_empty() {
         return Err(ConsensusError::Script("p2sh empty scriptSig".into()));
     }
     let redeem = stack.pop().unwrap();
-    check_p2sh_redeem_hash(job.prevout_script(input_index)?, &redeem)?;
+    check_p2sh_redeem_hash(outer, &redeem)?;
 
     let redeem_script = Script::from_bytes(&redeem);
-    let ctx = EvalContext::from_job(job, tx, input_index, redeem_script, SigVersion::Base)?;
+    let ctx = EvalContext::from_job(
+        job,
+        tx,
+        input_index,
+        amount,
+        redeem_script,
+        SigVersion::Base,
+    )?;
     // Base eval returns `Ok(true)` or `Err`. `Ok(false)` is tapscript OP_SUCCESS.
     // BIP16: true top unless CLEANSTACK. Witness nested paths clean separately.
     interpreter::eval_script(redeem_script, &mut stack, &ctx)?;
@@ -119,9 +125,10 @@ pub fn p2sh_script_sig_stack(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
     tx: &Transaction,
+    amount: Amount,
 ) -> Result<Vec<Vec<u8>>, ConsensusError> {
     let script_sig = tx.input[input_index.get()].script_sig.as_script();
-    let ctx = EvalContext::from_job(job, tx, input_index, script_sig, SigVersion::Base)?;
+    let ctx = EvalContext::from_job(job, tx, input_index, amount, script_sig, SigVersion::Base)?;
     let mut stack = Vec::new();
     let _ = interpreter::eval_script(script_sig, &mut stack, &ctx)?;
     require_room_for_p2sh_hash_push(&stack)?;

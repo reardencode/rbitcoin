@@ -395,10 +395,10 @@ impl<'a> EvalContext<'a> {
         job: &'a crate::block::ScriptCheckJob,
         tx: &'a Transaction,
         input_index: crate::block::InputIndex,
+        amount: Amount,
         script_code: &'a Script,
         sig_version: SigVersion,
     ) -> Result<Self, ConsensusError> {
-        let amount = job.prevout_amount(input_index)?;
         let pre = if sig_version == SigVersion::Base {
             Cow::Borrowed(base_sig_precompute())
         } else {

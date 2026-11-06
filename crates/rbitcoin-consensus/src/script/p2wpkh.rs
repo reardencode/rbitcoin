@@ -1,25 +1,14 @@
 //! Native P2WPKH verification (SegWit v0).
 
 use bitcoin::script::Script;
-use bitcoin::Transaction;
+use bitcoin::{Amount, Transaction};
 
 use super::{crypto, interpreter, p2wsh};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 use crate::TxScriptPrecompute;
 
-pub fn verify(
-    job: &ScriptCheckJob,
-    input_index: crate::block::InputIndex,
-    tx: &Transaction,
-    pre: &TxScriptPrecompute,
-) -> Result<(), ConsensusError> {
-    let spk = job.prevout_script(input_index)?;
-    debug_assert!(spk.len() == 22 && spk.starts_with(&rbitcoin_primitives::P2WPKH_PREFIX));
-    let mut keyhash = [0u8; 20];
-    keyhash.copy_from_slice(&spk[2..22]);
-
-    let input = &tx.input[input_index.get()];
+fn witness_pair(input: &bitcoin::TxIn) -> Result<(&[u8], &[u8]), ConsensusError> {
     if input.witness.len() != 2 {
         return Err(ConsensusError::Script("p2wpkh witness len".into()));
     }
@@ -31,10 +20,38 @@ pub fn verify(
         .witness
         .nth(1)
         .ok_or_else(|| ConsensusError::Script("p2wpkh witness".into()))?;
+    Ok((sig_raw, pubkey_raw))
+}
+
+pub fn verify(
+    job: &ScriptCheckJob,
+    input_index: crate::block::InputIndex,
+    tx: &Transaction,
+    pre: &TxScriptPrecompute,
+    spk: &[u8],
+    amount: Amount,
+) -> Result<(), ConsensusError> {
+    debug_assert!(spk.len() == 22 && spk.starts_with(&rbitcoin_primitives::P2WPKH_PREFIX));
+    let keyhash: &[u8; 20] = spk
+        .get(2..22)
+        .and_then(|slice| <&[u8; 20]>::try_from(slice).ok())
+        .ok_or_else(|| ConsensusError::Script("p2wpkh program".into()))?;
+
+    let (sig_raw, pubkey_raw) = witness_pair(&tx.input[input_index.get()])?;
     if sig_raw.is_empty() || pubkey_raw.is_empty() {
         return Err(ConsensusError::Script("p2wpkh empty witness item".into()));
     }
-    verify_with_keyhash(job, input_index, tx, &keyhash, spk, pre)
+    verify_loaded(
+        job,
+        input_index,
+        tx,
+        keyhash,
+        spk,
+        pre,
+        amount,
+        sig_raw,
+        pubkey_raw,
+    )
 }
 
 /// Nested P2SH-P2WPKH: `witness_program` is the 22-byte redeem (not outer P2SH spk).
@@ -45,19 +62,34 @@ pub fn verify_with_keyhash(
     keyhash: &[u8; 20],
     witness_program: &[u8],
     pre: &TxScriptPrecompute,
+    amount: Amount,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.input[input_index.get()];
-    if input.witness.len() != 2 {
-        return Err(ConsensusError::Script("p2wpkh witness len".into()));
-    }
-    let sig_raw = input
-        .witness
-        .nth(0)
-        .ok_or_else(|| ConsensusError::Script("p2wpkh witness".into()))?;
-    let pubkey_raw = input
-        .witness
-        .nth(1)
-        .ok_or_else(|| ConsensusError::Script("p2wpkh witness".into()))?;
+    let (sig_raw, pubkey_raw) = witness_pair(&tx.input[input_index.get()])?;
+    verify_loaded(
+        job,
+        input_index,
+        tx,
+        keyhash,
+        witness_program,
+        pre,
+        amount,
+        sig_raw,
+        pubkey_raw,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // witness items already read by the caller
+fn verify_loaded(
+    job: &ScriptCheckJob,
+    input_index: crate::block::InputIndex,
+    tx: &Transaction,
+    keyhash: &[u8; 20],
+    witness_program: &[u8],
+    pre: &TxScriptPrecompute,
+    amount: Amount,
+    sig_raw: &[u8],
+    pubkey_raw: &[u8],
+) -> Result<(), ConsensusError> {
     check_element_sizes(sig_raw, pubkey_raw)?;
 
     let pk_hash = crypto::hash160(pubkey_raw);
@@ -71,7 +103,6 @@ pub fn verify_with_keyhash(
     let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, job.bip66_active)?;
     let pubkey = crypto::parse_pubkey(pubkey_raw)?;
 
-    let amount = job.prevout_amount(input_index)?;
     let spk = bitcoin::script::Script::from_bytes(witness_program);
     let sighash =
         crypto::bip143_p2wpkh_signature_hash(tx, input_index, spk, amount, sighash_ty, pre)?;
@@ -102,6 +133,7 @@ pub fn verify_interpreted(
     input_index: crate::block::InputIndex,
     tx: &Transaction,
     keyhash: &[u8],
+    amount: Amount,
 ) -> Result<(), ConsensusError> {
     let witness = &tx.input[input_index.get()].witness;
     if witness.len() != 2 {
@@ -117,5 +149,6 @@ pub fn verify_interpreted(
         tx,
         Script::from_bytes(&script_code),
         witness.iter(),
+        amount,
     )
 }

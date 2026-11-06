@@ -57,7 +57,9 @@ fn witness_shape_errors() {
     let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx);
     assert!({
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &pre)
+        let spk = job.prevout_script(i).expect("spk");
+        let amount = job.prevout_amount(i).expect("amount");
+        verify(&job, i, &job.tx, &pre, spk, amount)
     }
     .is_err());
 
@@ -65,7 +67,9 @@ fn witness_shape_errors() {
     let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx);
     assert!({
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &pre)
+        let spk = job.prevout_script(i).expect("spk");
+        let amount = job.prevout_amount(i).expect("amount");
+        verify(&job, i, &job.tx, &pre, spk, amount)
     }
     .is_err());
 
@@ -73,7 +77,9 @@ fn witness_shape_errors() {
     let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx);
     assert!({
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &pre)
+        let spk = job.prevout_script(i).expect("spk");
+        let amount = job.prevout_amount(i).expect("amount");
+        verify(&job, i, &job.tx, &pre, spk, amount)
     }
     .is_err());
 
@@ -81,7 +87,9 @@ fn witness_shape_errors() {
     let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx);
     let err = {
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &pre)
+        let spk = job.prevout_script(i).expect("spk");
+        let amount = job.prevout_amount(i).expect("amount");
+        verify(&job, i, &job.tx, &pre, spk, amount)
     }
     .unwrap_err();
     assert!(format!("{err}").contains("p2wpkh"));
@@ -95,7 +103,8 @@ fn witness_shape_errors() {
     let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx);
     assert!({
         let i = job.inputs().next().unwrap();
-        verify_with_keyhash(&job, i, &job.tx, &[0u8; 20], &redeem, &pre)
+        let amount = job.prevout_amount(i).expect("amount");
+        verify_with_keyhash(&job, i, &job.tx, &[0u8; 20], &redeem, &pre, amount)
     }
     .is_err());
 }

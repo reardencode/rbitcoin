@@ -18,9 +18,9 @@ pub fn verify(
     input_index: crate::block::InputIndex,
     tx: &Transaction,
     cache: &mut SighashCache<&Transaction>,
+    spk: &[u8],
 ) -> Result<(), ConsensusError> {
     let _ = tx;
-    let spk = job.prevout_script(input_index)?;
     debug_assert!(spk.len() == 25);
     let keyhash = &spk[3..23];
 

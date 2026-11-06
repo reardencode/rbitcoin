@@ -758,20 +758,25 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let mut cache = SighashCache::new(&owned);
     {
         let i = job.inputs().next().unwrap();
-        p2pkh::verify(&job, i, &owned, &mut cache)
+        let spk = job.prevout_script(i).expect("prevout");
+        p2pkh::verify(&job, i, &owned, &mut cache, spk)
     }
     .expect("p2pkh typed accept");
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
     {
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_input(
             &job,
             i,
             tx,
             &mut dispatch_cache,
-            job.pre().expect("script precompute"),
+            pre,
             &tap,
+            Amount::from_sat(value),
+            script,
         )
     }
     .expect("p2pkh dispatch");
@@ -806,14 +811,18 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
     assert!({
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_input(
             &job,
             i,
             tx,
             &mut dispatch_cache,
-            job.pre().expect("script precompute"),
+            pre,
             &tap,
+            Amount::from_sat(value),
+            script,
         )
     }
     .is_err());
@@ -839,7 +848,8 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let mut cache = SighashCache::new(&owned);
     let err = {
         let i = job.inputs().next().unwrap();
-        p2pkh::verify(&job, i, &owned, &mut cache)
+        let spk = job.prevout_script(i).expect("prevout");
+        p2pkh::verify(&job, i, &owned, &mut cache, spk)
     }
     .expect_err("collision");
     assert!(
@@ -849,14 +859,18 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
     assert!({
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_input(
             &job,
             i,
             tx,
             &mut dispatch_cache,
-            job.pre().expect("script precompute"),
+            pre,
             &tap,
+            Amount::from_sat(value),
+            script,
         )
     }
     .is_err());
@@ -882,20 +896,26 @@ fn corpus_fast_paths_call_typed_verifiers() {
     assert!(!needs_interpreted_ecdsa(&job));
     let tx: &Transaction = &job.tx;
     {
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
-        p2wpkh::verify(&job, i, tx, job.pre().expect("script precompute"))
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        p2wpkh::verify(&job, i, tx, pre, script, Amount::from_sat(value))
     }
     .expect("p2wpkh typed accept");
     let mut dispatch_cache = None;
     {
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_input(
             &job,
             i,
             tx,
             &mut dispatch_cache,
-            job.pre().expect("script precompute"),
+            pre,
             &tap,
+            Amount::from_sat(value),
+            script,
         )
     }
     .expect("p2wpkh dispatch");
@@ -920,8 +940,10 @@ fn corpus_fast_paths_call_typed_verifiers() {
     assert_eq!((version, program.len()), (0, 20));
     let tx: &Transaction = &job.tx;
     assert!({
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
-        p2wpkh::verify(&job, i, tx, job.pre().expect("script precompute"))
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        p2wpkh::verify(&job, i, tx, pre, script, Amount::from_sat(value))
     }
     .is_err());
 
@@ -937,19 +959,24 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let tx: &Transaction = &job.tx;
     {
         let i = job.inputs().next().unwrap();
-        p2tr::verify(&job, i, tx, &tap)
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        p2tr::verify(&job, i, tx, &tap, Amount::from_sat(value), script)
     }
     .expect("key path typed accept");
     let mut dispatch_cache = None;
     {
+        let pre = job.pre().expect("script precompute");
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_input(
             &job,
             i,
             tx,
             &mut dispatch_cache,
-            job.pre().expect("script precompute"),
+            pre,
             &tap,
+            Amount::from_sat(value),
+            script,
         )
     }
     .expect("p2tr dispatch");
@@ -966,7 +993,8 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let tx: &Transaction = &job.tx;
     assert!({
         let i = job.inputs().next().unwrap();
-        p2tr::verify(&job, i, tx, &tap)
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        p2tr::verify(&job, i, tx, &tap, Amount::from_sat(value), script)
     }
     .is_err());
 
@@ -987,7 +1015,8 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let mut cache = SighashCache::new(&owned);
     let err = {
         let i = job.inputs().next().unwrap();
-        p2pkh::verify(&job, i, &owned, &mut cache)
+        let spk = job.prevout_script(i).expect("prevout");
+        p2pkh::verify(&job, i, &owned, &mut cache, spk)
     }
     .expect_err("bad hashtype");
     assert!(format!("{err}").contains("ecdsa"), "{err}");

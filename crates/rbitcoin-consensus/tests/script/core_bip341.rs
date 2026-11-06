@@ -191,13 +191,17 @@ fn core_bip341_wallet_vectors_all_rows() {
                     let job = taproot_job(tx, prevouts.clone());
                     let tx_ref: &Transaction = &job.tx;
                     let vin = job.inputs().nth(idx).expect("vin");
+                    let pre = job.pre().expect("script precompute");
+                    let (value, script) = job.prevout_parts(vin).expect("prevout");
                     match script::verify_input(
                         &job,
                         vin,
                         tx_ref,
                         &mut None,
-                        job.pre().expect("script precompute"),
+                        pre,
                         &Default::default(),
+                        Amount::from_sat(value),
+                        script,
                     ) {
                         Ok(()) => pass += 1,
                         Err(e) => {

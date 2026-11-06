@@ -1,7 +1,7 @@
 //! Native P2WSH verification (SegWit v0).
 
 use bitcoin::script::Script;
-use bitcoin::Transaction;
+use bitcoin::{Amount, Transaction};
 
 use super::crypto;
 use super::interpreter::{self, EvalContext, SigVersion};
@@ -12,12 +12,12 @@ pub fn verify(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
     tx: &Transaction,
+    spk: &[u8],
+    amount: Amount,
 ) -> Result<(), ConsensusError> {
-    let spk = job.prevout_script(input_index)?;
     debug_assert!(spk.len() == 34 && spk.starts_with(&rbitcoin_primitives::P2WSH_PREFIX));
-    let mut scripthash = [0u8; 32];
-    scripthash.copy_from_slice(&spk[2..34]);
-    verify_with_scripthash(job, input_index, tx, &scripthash)
+    let scripthash: &[u8; 32] = spk[2..34].try_into().expect("34-byte p2wsh script");
+    verify_with_scripthash(job, input_index, tx, scripthash, amount)
 }
 
 pub fn verify_with_scripthash(
@@ -25,6 +25,7 @@ pub fn verify_with_scripthash(
     input_index: crate::block::InputIndex,
     tx: &Transaction,
     scripthash: &[u8; 32],
+    amount: Amount,
 ) -> Result<(), ConsensusError> {
     let input = &tx.input[input_index.get()];
     if input.witness.is_empty() {
@@ -50,6 +51,7 @@ pub fn verify_with_scripthash(
         tx,
         Script::from_bytes(script_bytes),
         input.witness.iter().take(wit_len - 1),
+        amount,
     )
 }
 
@@ -61,6 +63,7 @@ pub fn execute_witness_v0<'w>(
     tx: &Transaction,
     script: &Script,
     items: impl Iterator<Item = &'w [u8]>,
+    amount: Amount,
 ) -> Result<(), ConsensusError> {
     let mut stack: Vec<Vec<u8>> = Vec::with_capacity(items.size_hint().0);
     for item in items {
@@ -69,7 +72,7 @@ pub fn execute_witness_v0<'w>(
         }
         stack.push(item.to_vec());
     }
-    let ctx = EvalContext::from_job(job, tx, input_index, script, SigVersion::WitnessV0)?;
+    let ctx = EvalContext::from_job(job, tx, input_index, amount, script, SigVersion::WitnessV0)?;
     // Witness v0 eval returns `Ok(true)` or `Err`. `Ok(false)` is tapscript OP_SUCCESS.
     interpreter::eval_script(script, &mut stack, &ctx)?;
     interpreter::require_clean_true(&stack)?;

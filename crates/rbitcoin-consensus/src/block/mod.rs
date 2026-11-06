@@ -985,6 +985,7 @@ pub struct ScriptCheckJob {
     pub flags: ScriptVerifyFlags,
     /// Lookup/structure `TxPrecompute`. Set on the confirm path; tests lazy-`from_tx`.
     pub pre: std::sync::OnceLock<JobPre>,
+    skip_segwit_midstates: bool,
 }
 
 impl Deref for ScriptCheckJob {
@@ -1092,13 +1093,23 @@ impl ScriptCheckJob {
         tx: JobTx,
         flags: ScriptVerifyFlags,
     ) -> Self {
+        // Recorded here so a script worker does not walk witnesses to
+        // learn that a legacy transaction has no BIP143 midstates.
+        let skip_segwit_midstates = !crate::tx_precompute::uses_segwit_serialization(&tx);
         Self {
             txid,
             prevouts,
             tx,
             flags,
             pre: std::sync::OnceLock::new(),
+            skip_segwit_midstates,
         }
+    }
+
+    /// No witness items. Verify uses the static base row and leaves [`Self::pre`] empty.
+    #[inline]
+    pub(crate) fn skips_segwit_midstates(&self) -> bool {
+        self.skip_segwit_midstates
     }
 
     /// Confirm assemble: `slice[idx]` by refcount only (no `TxPrecompute` clone).
@@ -1318,36 +1329,9 @@ pub fn reject_one_create(
     Ok(())
 }
 
-/// Whether this job can skip `verify_job_all_inputs`.
-///
-/// OP_TRUE scriptPubKey alone is **not** sufficient: scriptSig still runs
-/// (CLTV/CSV may live there). Only skip when every input is a pure ACS spend
-/// (empty scriptSig + empty witness + OP_TRUE spk).
-#[doc(hidden)]
-pub fn job_needs_script_check(job: &ScriptCheckJob) -> bool {
-    let tx: &bitcoin::Transaction = &job.tx;
-    for i in job.inputs() {
-        let Ok(spk) = job.prevout_script(i) else {
-            return true;
-        };
-        if !is_anyone_can_spend(Script::from_bytes(spk)) {
-            return true;
-        }
-        let vin = &tx.input[i.get()];
-        if !vin.script_sig.is_empty() || !vin.witness.is_empty() {
-            return true;
-        }
-    }
-    false
-}
-
 #[inline]
 pub fn verify_one_script_job(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
-    if job_needs_script_check(job) {
-        crate::script::verify_job_all_inputs(job)
-    } else {
-        Ok(())
-    }
+    crate::script::verify_job_all_inputs(job)
 }
 
 /// Halving subsidy. Regtest interval is 150; other networks 210_000 (Core).

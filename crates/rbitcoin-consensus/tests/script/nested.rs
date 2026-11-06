@@ -69,32 +69,40 @@ fn job_for(tx: Transaction, spk: ScriptBuf, witness_active: bool) -> ScriptCheck
     }
 }
 
+fn spent(job: &ScriptCheckJob) -> (Amount, Vec<u8>) {
+    let i = job.inputs().next().unwrap();
+    let (value, script) = job.prevout_parts(i).expect("prevout");
+    (Amount::from_sat(value), script.to_vec())
+}
+
 fn try_nested(
     job: &ScriptCheckJob,
     cache: &mut SighashCache<&Transaction>,
     pre: &rbitcoin_consensus::TxScriptPrecompute,
 ) -> Option<Result<(), ConsensusError>> {
+    let (amount, outer) = spent(job);
     let stack = {
         let i = job.inputs().next().unwrap();
-        p2sh_script_sig_stack(job, i, &job.tx)
+        p2sh_script_sig_stack(job, i, &job.tx, amount)
     };
     match stack {
         Err(e) => Some(Err(e)),
         Ok(items) => {
             let i = job.inputs().next().unwrap();
-            try_p2sh_nested_segwit(job, i, &job.tx, cache, pre, &items)
+            try_p2sh_nested_segwit(job, i, &job.tx, cache, pre, &items, amount, &outer)
         }
     }
 }
 
 fn verify_legacy(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
+    let (amount, outer) = spent(job);
     let stack = {
         let i = job.inputs().next().unwrap();
-        p2sh_script_sig_stack(job, i, &job.tx)
+        p2sh_script_sig_stack(job, i, &job.tx, amount)
     }?;
     {
         let i = job.inputs().next().unwrap();
-        verify_p2sh_legacy(job, i, &job.tx, stack)
+        verify_p2sh_legacy(job, i, &job.tx, stack, amount, &outer)
     }
 }
 
@@ -104,7 +112,8 @@ fn stack_for(ss: ScriptBuf) -> Result<Vec<Vec<u8>>, ConsensusError> {
     let job = job_for(tx, p2sh_spk(&[0x51]), true);
     {
         let i = job.inputs().next().unwrap();
-        p2sh_script_sig_stack(&job, i, &job.tx)
+        let amount = job.prevout_amount(i).expect("amount");
+        p2sh_script_sig_stack(&job, i, &job.tx, amount)
     }
 }
 
