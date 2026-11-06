@@ -192,6 +192,11 @@ pub fn render(status: &NodeStatus) -> String {
             "SV2 TP template build wall time in seconds.",
             seconds(us),
         );
+        out.gauge(
+            "rbitcoin_sv2_validations_running",
+            "SV2 TP proposal validations running on blocking threads now (tip: perf sv2_validating=).",
+            sv2.validations_running(),
+        );
     }
     let (blocks, bytes) = rbitcoin_net::serve_perf_totals();
     out.counter(

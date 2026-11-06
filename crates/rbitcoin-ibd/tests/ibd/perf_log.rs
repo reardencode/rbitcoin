@@ -242,6 +242,7 @@ fn tip_perf_json_is_timestamped() {
         sv2_builds: 2,
         sv2_build_avg_us: 30,
         sv2_build_max_us: 31,
+        sv2_validating: 3,
     });
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert!(v["ts"].as_u64().unwrap() > 0, "{line}");
@@ -254,4 +255,5 @@ fn tip_perf_json_is_timestamped() {
     assert_eq!(v["sv2_builds"], 2);
     assert_eq!(v["sv2_build_avg_us"], 30);
     assert_eq!(v["sv2_build_max_us"], 31);
+    assert_eq!(v["sv2_validating"], 3);
 }

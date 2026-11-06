@@ -3,19 +3,27 @@ use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
+use rbitcoin_sv2::messages::{
+    MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, REQUIRES_JOB_VALIDATION,
+};
 use rbitcoin_sv2::testutil::TpClient;
+use rbitcoin_sv2::transport::{
+    NoiseConn, MAX_CLIENT_PAYLOAD, MAX_PROPOSE_TEMPLATE_PAYLOAD,
+    MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD,
+};
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_IDLE_TIMEOUT, MAX_SESSIONS,
-    MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT,
+    MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, PROVIDE_TIMEOUT, SETUP_TIMEOUT,
     TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-
-use std::time::Instant;
-use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR;
+use std::time::{Duration, Instant};
+use template_distribution_sv2::{
+    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR, MESSAGE_TYPE_SUBMIT_SOLUTION,
+};
 
 const TDP: u8 = 2;
 
@@ -36,11 +44,22 @@ async fn expect_error(c: &mut TpClient, flags: u32, code: &str) {
     let e: SetupConnectionError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
     assert_eq!(e.flags, flags);
     assert_eq!(e.error_code.as_utf8_or_hex(), code);
+    assert_closed(c, "SetupConnection.Error").await;
+}
+
+async fn assert_closed(c: &mut TpClient, what: &str) {
     let closed = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
     assert!(
         matches!(closed, Ok(Err(_))),
-        "connection must close after SetupConnection.Error"
+        "{what} must close the session, got {:?}",
+        closed.map(|r| r.map(|f| f.msg_type))
     );
+}
+
+async fn expect_success(c: &mut TpClient) -> SetupConnectionSuccess {
+    let mut f = c.recv().await.expect("setup reply");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    binary_sv2::from_bytes(&mut f.payload).expect("decode")
 }
 
 #[tokio::test]
@@ -56,9 +75,11 @@ async fn setup_connection_success_errors_and_session_cap() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -68,9 +89,7 @@ async fn setup_connection_success_errors_and_session_cap() {
     for _ in 0..MAX_SESSIONS {
         let mut c = TpClient::connect(addr, pk).await.expect("handshake");
         c.setup_connection(TDP, 2, 2, 0).await.unwrap();
-        let mut f = c.recv().await.expect("setup reply");
-        assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
-        let ok: SetupConnectionSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+        let ok = expect_success(&mut c).await;
         assert_eq!((ok.used_version, ok.flags), (2, 0));
         live.push(c);
     }
@@ -90,8 +109,18 @@ async fn setup_connection_success_errors_and_session_cap() {
     drop(live);
 
     let mut c = connect_when_free(addr, pk).await;
+    c.setup_connection(TDP, 2, 2, REQUIRES_JOB_VALIDATION)
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_success(&mut c).await.flags,
+        REQUIRES_JOB_VALIDATION,
+        "REQUIRES_JOB_VALIDATION is accepted and echoed"
+    );
+
+    let mut c = connect_when_free(addr, pk).await;
     c.setup_connection(TDP, 2, 2, 0b101).await.unwrap();
-    expect_error(&mut c, 0b101, "unsupported-feature-flags").await;
+    expect_error(&mut c, 0b100, "unsupported-feature-flags").await;
 
     let mut c = connect_when_free(addr, pk).await;
     c.setup_connection(0, 2, 2, 0).await.unwrap();
@@ -121,9 +150,11 @@ async fn authority_key_prints_in_key_utils_base58check() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -136,9 +167,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         .await
         .expect("handshake against the printed key");
     c.setup_connection(TDP, 2, 2, 0).await.unwrap();
-    let mut f = c.recv().await.expect("setup reply");
-    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
-    let _: SetupConnectionSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    expect_success(&mut c).await;
     tp.shutdown().await;
 }
 
@@ -160,9 +189,11 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -183,8 +214,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
 
     let mut c = connect_when_free(addr, pk).await;
     c.setup_connection(TDP, 2, 2, 0).await.unwrap();
-    let f = c.recv().await.expect("setup reply");
-    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    expect_success(&mut c).await;
     tp.shutdown().await;
 }
 
@@ -205,9 +235,11 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -286,9 +318,11 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
         setup_timeout,
         idle_timeout: Some(setup_timeout),
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -310,6 +344,49 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
     tp.shutdown().await;
 }
 
+/// A session that set `REQUIRES_JOB_VALIDATION` is set up at
+/// `SetupConnection.Success`, so the opt-in idle deadline starts there and
+/// does not wait for `CoinbaseOutputConstraints` it may never send.
+#[tokio::test]
+async fn validation_only_session_silent_is_dropped_at_the_idle_deadline() {
+    let tc = shared_regtest(0);
+    let chain = Arc::clone(&tc.chain);
+    let idle_timeout = Duration::from_millis(300);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain,
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: Some(idle_timeout),
+        write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
+    })
+    .await
+    .expect("listen");
+
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(TDP, 2, 2, REQUIRES_JOB_VALIDATION)
+        .await
+        .unwrap();
+    expect_success(&mut c).await;
+
+    let closed =
+        tokio::time::timeout(idle_timeout * 10, async { while c.recv().await.is_ok() {} }).await;
+    assert!(
+        closed.is_ok(),
+        "a quiet validation-only session must be closed at the idle deadline"
+    );
+    tp.shutdown().await;
+}
+
 /// A client that floods requests and never reads jams the TP's writes; the
 /// write deadline must close the session instead of stalling it forever.
 #[tokio::test]
@@ -326,9 +403,11 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -376,51 +455,207 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
     tp.shutdown().await;
 }
 
-/// The largest legitimate client frame (a `SubmitSolution` with a full
-/// `B064K` coinbase) keeps the session; a larger frame closes it.
-#[tokio::test]
-async fn oversized_client_frame_closes_the_session() {
-    let tc = shared_regtest(0);
-    let chain = Arc::clone(&tc.chain);
-    let tp = run_sv2_tp(Sv2TpConfig {
+async fn start_tp(tc: &crate::test_chain::TestChain) -> rbitcoin_sv2::Sv2TpHandle {
+    run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
-        chain,
+        chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
-    .expect("listen");
+    .expect("listen")
+}
+
+/// `TpClient::send_bytes` frames its argument as a `B016M`: a 3-byte length
+/// then the bytes. This is the argument that makes the frame payload
+/// `payload` bytes.
+fn framed(payload: usize) -> Vec<u8> {
+    vec![0u8; payload - 3]
+}
+
+async fn client_after_setup(tp: &rbitcoin_sv2::Sv2TpHandle, flags: u32) -> TpClient {
     let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
         .await
         .expect("handshake");
-    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
-    c.recv().await.expect("setup reply");
+    c.setup_connection(TDP, 2, 2, flags).await.unwrap();
+    expect_success(&mut c).await;
+    c
+}
 
+/// The session is still serving: it answers a `RequestTransactionData`,
+/// after the `ProposeTemplate.Error` an all-zero proposal gets.
+async fn assert_open(c: &mut TpClient, what: &str) {
+    c.request_transaction_data(1).await.unwrap();
+    loop {
+        let f = c
+            .recv()
+            .await
+            .unwrap_or_else(|e| panic!("open after {what}: {e}"));
+        if f.msg_type == MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR {
+            return;
+        }
+        assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, "{what}");
+    }
+}
+
+/// A session reads frames up to the pre-feature `MAX_CLIENT_PAYLOAD` until
+/// `SetupConnection.Success` carries `REQUIRES_JOB_VALIDATION`; only then
+/// does it read the job-validation pair up to its own caps. A max-size
+/// `SubmitSolution` stays inside the old cap, anything bigger closes a
+/// session that did not negotiate the flag.
+#[tokio::test]
+async fn unflagged_session_reads_frames_up_to_the_pre_feature_cap() {
+    let tc = shared_regtest(0);
+    let tp = start_tp(&tc).await;
+
+    let mut c = client_after_setup(&tp, 0).await;
     let coinbase = vec![0u8; usize::from(u16::MAX)];
     c.submit_solution(1, 0, 0, 0, &coinbase).await.unwrap();
-    c.request_transaction_data(1).await.unwrap();
-    let f = c
-        .recv()
+    assert_open(&mut c, "a max-size SubmitSolution").await;
+    c.send_bytes(MESSAGE_TYPE_PROPOSE_TEMPLATE, &framed(MAX_CLIENT_PAYLOAD))
         .await
-        .expect("open after a max-size SubmitSolution");
-    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
-
-    let _ = c.send_bytes(0xff, &vec![0u8; 1 << 20]).await;
+        .unwrap();
+    assert_open(&mut c, "a ProposeTemplate at the pre-feature cap").await;
+    let _ = c
+        .send_bytes(
+            MESSAGE_TYPE_PROPOSE_TEMPLATE,
+            &framed(MAX_CLIENT_PAYLOAD + 1),
+        )
+        .await;
     c.request_transaction_data(1).await.ok();
-    let closed = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
-    assert!(
-        matches!(closed, Ok(Err(_))),
-        "an oversized frame must close the session, got {:?}",
-        closed.map(|r| r.map(|f| f.msg_type))
-    );
+    assert_closed(&mut c, "a ProposeTemplate over the pre-feature cap").await;
+
+    let mut c = client_after_setup(&tp, 0).await;
+    let _ = c
+        .send_bytes(
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+            &framed(MAX_CLIENT_PAYLOAD + 1),
+        )
+        .await;
+    c.request_transaction_data(1).await.ok();
+    assert_closed(&mut c, "a provide over the pre-feature cap").await;
+
+    let mut c = client_after_setup(&tp, 0).await;
+    let _ = c
+        .send_bytes(MESSAGE_TYPE_SUBMIT_SOLUTION, &framed(200 << 10))
+        .await;
+    c.request_transaction_data(1).await.ok();
+    assert_closed(&mut c, "a 200 KiB SubmitSolution").await;
     tp.shutdown().await;
+}
+
+/// Before `SetupConnection` the cap is the pre-feature one too.
+#[tokio::test]
+async fn frame_over_the_pre_feature_cap_before_setup_closes_the_session() {
+    let tc = shared_regtest(0);
+    let tp = start_tp(&tc).await;
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    let _ = c
+        .send_bytes(
+            MESSAGE_TYPE_PROPOSE_TEMPLATE,
+            &framed(MAX_CLIENT_PAYLOAD + 1),
+        )
+        .await;
+    assert_closed(&mut c, "a frame over the pre-feature cap before setup").await;
+    tp.shutdown().await;
+}
+
+/// A session that negotiated `REQUIRES_JOB_VALIDATION` reads a
+/// `ProposeTemplate` up to its cap and a `ProvideMissingTransactions.Success`
+/// up to its larger one; a byte over either closes it.
+#[tokio::test]
+async fn flagged_session_reads_the_job_validation_pair_up_to_their_caps() {
+    let tc = shared_regtest(0);
+    let tp = start_tp(&tc).await;
+
+    let mut c = client_after_setup(&tp, REQUIRES_JOB_VALIDATION).await;
+    c.send_bytes(
+        MESSAGE_TYPE_PROPOSE_TEMPLATE,
+        &framed(MAX_PROPOSE_TEMPLATE_PAYLOAD),
+    )
+    .await
+    .unwrap();
+    assert_open(&mut c, "a ProposeTemplate at its cap").await;
+    c.send_bytes(
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+        &framed(MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD),
+    )
+    .await
+    .unwrap();
+    assert_open(&mut c, "a provide at its cap").await;
+    let _ = c
+        .send_bytes(
+            MESSAGE_TYPE_PROPOSE_TEMPLATE,
+            &framed(MAX_PROPOSE_TEMPLATE_PAYLOAD + 1),
+        )
+        .await;
+    c.request_transaction_data(1).await.ok();
+    assert_closed(&mut c, "a ProposeTemplate over its cap").await;
+
+    let mut c = client_after_setup(&tp, REQUIRES_JOB_VALIDATION).await;
+    let _ = c
+        .send_bytes(
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+            &framed(MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD + 1),
+        )
+        .await;
+    c.request_transaction_data(1).await.ok();
+    assert_closed(&mut c, "a provide over its cap").await;
+    tp.shutdown().await;
+}
+
+/// The reader that serves a session before negotiation stops at the
+/// pre-feature cap while it reads, not after buffering the largest frame
+/// any session may send: a `ProposeTemplate`-typed frame past it is an
+/// error from `recv`, one at it is read.
+#[tokio::test]
+async fn reader_before_negotiation_refuses_a_frame_over_the_pre_feature_cap() {
+    let secret = [7u8; 32];
+    let keypair = bitcoin::secp256k1::Keypair::from_seckey_slice(
+        &bitcoin::secp256k1::Secp256k1::new(),
+        &secret,
+    )
+    .unwrap();
+    let pubkey = keypair.x_only_public_key().0.serialize();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let responder = noise_sv2::Responder::from_authority_kp(
+                &pubkey,
+                &secret,
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+            let mut conn = NoiseConn::accept(stream, responder, WRITE_TIMEOUT)
+                .await
+                .unwrap();
+            got.push(conn.recv().await.map(|f| f.payload.len()));
+        }
+        got
+    });
+    for payload in [MAX_CLIENT_PAYLOAD, MAX_CLIENT_PAYLOAD + 1] {
+        let mut c = TpClient::connect(addr, pubkey).await.unwrap();
+        let _ = c
+            .send_bytes(MESSAGE_TYPE_PROPOSE_TEMPLATE, &framed(payload))
+            .await;
+    }
+    let got = server.await.unwrap();
+    assert_eq!(got[0].as_ref().ok(), Some(&MAX_CLIENT_PAYLOAD));
+    assert!(got[1].is_err(), "a frame over the cap was read: {got:?}");
 }
 
 #[tokio::test]
@@ -453,13 +688,36 @@ async fn out_of_range_timing_refuses_to_start() {
             setup_timeout: SETUP_TIMEOUT,
             idle_timeout: None,
             write_timeout: WRITE_TIMEOUT,
+            provide_timeout: PROVIDE_TIMEOUT,
             fee_delta: FEE_DELTA,
             template_interval,
             constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+            validation_permits: 4,
         })
         .await
         .err()
         .expect("out-of-range config must not start");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+    }
+    for validation_permits in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+        let e = run_sv2_tp(Sv2TpConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            chain: Arc::clone(&chain),
+            authority_secret: [7; 32],
+            cert_validity: hour,
+            stale_grace: Duration::ZERO,
+            setup_timeout: SETUP_TIMEOUT,
+            idle_timeout: None,
+            write_timeout: WRITE_TIMEOUT,
+            provide_timeout: PROVIDE_TIMEOUT,
+            fee_delta: FEE_DELTA,
+            template_interval: TEMPLATE_INTERVAL,
+            constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+            validation_permits,
+        })
+        .await
+        .err()
+        .expect("out-of-range validation permits must not start");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
     let e = run_sv2_tp(Sv2TpConfig {
@@ -471,9 +729,11 @@ async fn out_of_range_timing_refuses_to_start() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: Some(MAX_IDLE_TIMEOUT + over),
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .err()

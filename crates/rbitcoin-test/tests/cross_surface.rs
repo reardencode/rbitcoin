@@ -3872,6 +3872,7 @@ async fn sv2_tp_bootstrap() {
         m["rbitcoin_sv2_template_build_seconds_total"] > 0.0,
         "{m:?}"
     );
+    assert_eq!(m["rbitcoin_sv2_validations_running"], 0.0, "{m:?}");
 
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;

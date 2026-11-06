@@ -1,0 +1,353 @@
+//! Custom job validation for a Job Declarator Server
+//! (docs/sv2-job-validation.md §4): resolve the declared wtxids, check the
+//! job as a block proposal on the tip, and shape it for retention.
+
+use crate::messages::ProposeTemplate;
+use crate::template::{self, Bits, Job};
+use binary_sv2::{Seq064K, B016M};
+use bitcoin::consensus::encode::{deserialize_partial, VarInt};
+use bitcoin::hashes::{sha256d, Hash};
+use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
+use rbitcoin_net::{ChainHub, ProposalError};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::time::Instant;
+
+/// `ProposeTemplate.Error.error_code` for a TP that cannot take the job now:
+/// the IBD gate, a tip read that failed, or a session at its admission bound.
+pub(crate) const UNAVAILABLE: &str = "job-validation-unavailable";
+
+pub(crate) enum Verdict {
+    /// 0-indexed positions in `wtxid_list` the mempool does not resolve,
+    /// the supplied ones included: the TP holds no transactions across the
+    /// round trip, so what it was given once it asks for again.
+    Missing(Vec<u16>),
+    /// Consensus-valid on the tip: the fee total, the job to retain, and
+    /// when its header timestamp was fixed.
+    Valid {
+        fees: u64,
+        job: Job,
+        validated_at: Instant,
+    },
+    /// `ProposeTemplate.Error.error_code`: a Core reject string or one of
+    /// the draft's own codes.
+    Rejected(String),
+}
+
+/// A `ProposeTemplate` as the session keeps it: owned, so it outlives its
+/// frame while the TP waits for the transactions it asked for. `excess_data`
+/// is not kept (opaque to the TP).
+pub(crate) struct Proposal {
+    pub request_id: u32,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
+    coinbase_suffix: Vec<u8>,
+    wtxids: Vec<[u8; 32]>,
+}
+
+/// Supplied transactions keyed by the wtxid of their bytes as sent.
+pub(crate) type Supplied = HashMap<[u8; 32], Vec<u8>>;
+
+impl Proposal {
+    /// `None`: the payload is not a `ProposeTemplate`.
+    pub(crate) fn decode(payload: &mut [u8]) -> Option<Self> {
+        let m: ProposeTemplate = binary_sv2::from_bytes(payload).ok()?;
+        Some(Self {
+            request_id: m.request_id,
+            version: m.version,
+            coinbase_prefix: m.coinbase_tx_prefix.as_ref().to_vec(),
+            coinbase_suffix: m.coinbase_tx_suffix.as_ref().to_vec(),
+            wtxids: m
+                .wtxid_list
+                .iter()
+                .map(|w| w.as_ref().try_into().expect("U256 is 32 bytes"))
+                .collect(),
+        })
+    }
+
+    /// Bytes the proposal holds while it waits or runs: its wtxids and the
+    /// coinbase split.
+    pub(crate) fn cost(&self) -> usize {
+        self.wtxids.len() * 32 + self.coinbase_prefix.len() + self.coinbase_suffix.len()
+    }
+
+    /// §4.1: `wtxid_list` has no duplicates. No chain read, so the session
+    /// runs it on arrival; [`validate`] runs it again and stays complete on
+    /// its own.
+    pub(crate) fn precheck(&self) -> Result<(), &'static str> {
+        let mut declared = HashSet::with_capacity(self.wtxids.len());
+        if self.wtxids.iter().all(|w| declared.insert(w)) {
+            Ok(())
+        } else {
+            Err("duplicate-wtxid")
+        }
+    }
+
+    /// §4.3: every supplied transaction hashes to a wtxid at one of the
+    /// positions the TP asked for, and every asked position is covered,
+    /// before any of them is decoded or copied. A bad provide costs one
+    /// hash per transaction it supplied up to the first bad one, or all of
+    /// them if it is short, and no owned copy. `Err` is the
+    /// `Error.error_code`.
+    pub(crate) fn accept_supplied(
+        &self,
+        missing: &[u16],
+        transaction_list: &Seq064K<'_, B016M<'_>>,
+    ) -> Result<Supplied, &'static str> {
+        let asked: HashSet<&[u8; 32]> = missing
+            .iter()
+            .filter_map(|&pos| self.wtxids.get(usize::from(pos)))
+            .collect();
+        let mut hashed: HashMap<[u8; 32], &[u8]> = HashMap::with_capacity(transaction_list.len());
+        for raw in transaction_list.iter() {
+            let raw = raw.as_ref();
+            let w = sha256d::Hash::hash(raw).to_byte_array();
+            if !asked.contains(&w) {
+                return Err("bad-missing-tx");
+            }
+            hashed.insert(w, raw);
+        }
+        if hashed.len() != asked.len() {
+            return Err("bad-missing-tx");
+        }
+        Ok(hashed
+            .into_iter()
+            .map(|(w, raw)| (w, raw.to_vec()))
+            .collect())
+    }
+}
+
+/// Reads the store and the mempool: blocking region only. A tip that cannot
+/// be read is [`UNAVAILABLE`], as a stale one is: a reorg pops the tip block
+/// by block (`Session::check_fees`), and the JDS asks again. Only a worker
+/// panic ends the session.
+pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> Verdict {
+    let rejected = |code: &str| Verdict::Rejected(code.into());
+    // Same gate as the templates: a stale tip validates nothing.
+    if chain.in_ibd() {
+        return rejected(UNAVAILABLE);
+    }
+    let next = match template::next_header(chain) {
+        Ok(next) => next,
+        Err(e) => {
+            rbitcoin_log::info!("sv2: proposal not validated ({e})");
+            return rejected(UNAVAILABLE);
+        }
+    };
+    let validated_at = Instant::now();
+    if let Err(code) = p.precheck() {
+        return rejected(code);
+    }
+    let Some(extranonce) = extranonce_len(&p.coinbase_prefix) else {
+        return rejected("bad-cb-decode");
+    };
+    let zeros = vec![0u8; extranonce];
+    let raw = [&p.coinbase_prefix[..], &zeros[..], &p.coinbase_suffix[..]].concat();
+    let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(&raw) else {
+        return rejected("bad-cb-decode");
+    };
+    let mut size = BlockSize::of_header(1 + p.wtxids.len() as u64);
+    if let Err(code) = size.add(&coinbase) {
+        return rejected(code);
+    }
+    let mut txs = Vec::with_capacity(p.wtxids.len());
+    let mut missing = Vec::new();
+    let mut provided = Vec::new();
+    for (pos, w) in p.wtxids.iter().enumerate() {
+        let pos = u16::try_from(pos).expect("Seq064K holds at most 65535");
+        let tx = match supplied.get(w) {
+            Some(raw) => match bitcoin::consensus::deserialize::<Transaction>(raw) {
+                Ok(tx) => {
+                    provided.push(pos);
+                    Some(Arc::new(tx))
+                }
+                Err(_) => return rejected("bad-missing-tx"),
+            },
+            None => chain
+                .mempool()
+                .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(*w))),
+        };
+        match tx {
+            Some(tx) => {
+                if let Err(code) = size.add(&tx) {
+                    return rejected(code);
+                }
+                txs.push(tx);
+            }
+            None => missing.push(pos),
+        }
+    }
+    if !missing.is_empty() {
+        missing.extend(provided);
+        missing.sort_unstable();
+        return Verdict::Missing(missing);
+    }
+    let mut leaves = Vec::with_capacity(1 + txs.len());
+    leaves.push(coinbase.compute_txid().to_byte_array());
+    leaves.extend(txs.iter().map(|tx| tx.compute_txid().to_byte_array()));
+    let header = block::Header {
+        version: block::Version::from_consensus(p.version as i32),
+        prev_blockhash: BlockHash::from_byte_array(next.prev_hash),
+        merkle_root: TxMerkleNode::from_byte_array(rbitcoin_store::merkle_root_from_txids(&leaves)),
+        time: next.time,
+        bits: next.bits,
+        nonce: 0,
+    };
+    let mut txdata = Vec::with_capacity(1 + txs.len());
+    txdata.push(coinbase);
+    txdata.extend(txs.iter().map(|tx| Transaction::clone(tx)));
+    let block = Block { header, txdata };
+    // CPU trade (CONTRIBUTING 9): one full proposal check per request
+    // (every spend against the chain, structure, weight, sigops, coinbase
+    // value, scripts; no PoW), on the blocking pool. A JDS sends one per
+    // declaration; a flood costs blocking threads, not the reactor.
+    let fees = match chain.check_block_proposal(&block) {
+        Ok(fees) => fees,
+        Err(ProposalError::Reject(code)) => return Verdict::Rejected(code),
+        Err(ProposalError::Unreadable(e)) => {
+            rbitcoin_log::info!("sv2: proposal not validated ({e})");
+            return rejected(UNAVAILABLE);
+        }
+    };
+    Verdict::Valid {
+        fees,
+        job: next.job(
+            rbitcoin_store::merkle_branch(&leaves, 0),
+            txs,
+            Bits::Consensus,
+        ),
+        validated_at,
+    }
+}
+
+/// What the block a proposal declares has used of the size limits, charged as
+/// the list resolves so an overweight job stops before the rest is fetched
+/// or decoded. Core's `CheckBlock` tests the stripped size first
+/// (`bad-blk-length`: it times the witness scale factor over the weight
+/// limit), then `GetBlockWeight` (`bad-blk-weight`).
+struct BlockSize {
+    base: u64,
+    weight: u64,
+}
+
+impl BlockSize {
+    fn of_header(tx_count: u64) -> Self {
+        let base = (80 + VarInt(tx_count).size()) as u64;
+        Self {
+            base,
+            weight: base * 4,
+        }
+    }
+
+    fn add(&mut self, tx: &Transaction) -> Result<(), &'static str> {
+        self.base = self.base.saturating_add(tx.base_size() as u64);
+        self.weight = self.weight.saturating_add(tx.weight().to_wu());
+        if self.base.saturating_mul(4) > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+            Err("bad-blk-length")
+        } else if self.weight > rbitcoin_consensus::MAX_BLOCK_WEIGHT {
+            Err("bad-blk-weight")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// `ProposeTemplate.Error.error_code` is a `Str0255`. Every code the proposal
+/// check produces is Core's short reject token; a longer one is cut on a
+/// character boundary rather than failing the encode, which would close the
+/// session. The cut keeps the leading reject token a JDS matches on.
+pub(crate) fn wire_code(code: &str) -> &str {
+    let mut end = code.len().min(255);
+    while !code.is_char_boundary(end) {
+        end -= 1;
+    }
+    &code[..end]
+}
+
+/// §4.1: `coinbase_tx_prefix` ends inside the scriptSig and
+/// `coinbase_tx_suffix` starts at nSequence, so the extranonce is the
+/// scriptSig length the prefix declares minus the scriptSig bytes it
+/// carries. `None`: not one input, a length outside the coinbase bounds
+/// (2..=100), or fewer bytes declared than present.
+fn extranonce_len(prefix: &[u8]) -> Option<usize> {
+    let mut at = 4;
+    // BIP144: a zero where the input count would be, then flag 1.
+    if prefix.get(4..6) == Some(&[0u8, 1][..]) {
+        at += 2;
+    }
+    let (inputs, n) = compact_size(prefix.get(at..)?)?;
+    if inputs != 1 {
+        return None;
+    }
+    at += n + 36;
+    let (len, n) = compact_size(prefix.get(at..)?)?;
+    at += n;
+    if !(2..=100).contains(&len) {
+        return None;
+    }
+    (len as usize).checked_sub(prefix.len() - at)
+}
+
+fn compact_size(bytes: &[u8]) -> Option<(u64, usize)> {
+    let (v, n) = deserialize_partial::<VarInt>(bytes).ok()?;
+    Some((v.0, n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extranonce_len, wire_code};
+
+    #[test]
+    fn a_reject_code_is_cut_to_the_wire_limit_on_a_char_boundary() {
+        assert_eq!(wire_code("bad-blk-weight"), "bad-blk-weight");
+        let exact = "x".repeat(255);
+        assert_eq!(wire_code(&exact), exact);
+        let long = format!("{exact}tail");
+        assert_eq!(wire_code(&long), exact);
+        let wide = format!("{}é", "x".repeat(254));
+        assert_eq!(wire_code(&wide), "x".repeat(254), "no split character");
+    }
+
+    fn prefix(segwit: bool, inputs: u8, len: u8, present: usize) -> Vec<u8> {
+        let mut p = vec![2, 0, 0, 0];
+        if segwit {
+            p.extend([0, 1]);
+        }
+        p.push(inputs);
+        p.extend([0; 32]);
+        p.extend([0xff; 4]);
+        p.push(len);
+        p.resize(p.len() + present, 0x51);
+        p
+    }
+
+    #[test]
+    fn extranonce_is_the_declared_script_sig_length_past_the_prefix() {
+        assert_eq!(extranonce_len(&prefix(false, 1, 11, 3)), Some(8));
+        assert_eq!(extranonce_len(&prefix(true, 1, 11, 3)), Some(8));
+        assert_eq!(extranonce_len(&prefix(true, 1, 3, 3)), Some(0));
+        assert_eq!(extranonce_len(&prefix(true, 1, 100, 0)), Some(100));
+        assert_eq!(extranonce_len(&prefix(true, 2, 11, 3)), None, "two inputs");
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 2, 3)),
+            None,
+            "shorter than present"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 101, 0)),
+            None,
+            "over the coinbase max"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 1, 0)),
+            None,
+            "under the coinbase min"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 11, 3)[..40]),
+            None,
+            "truncated"
+        );
+        assert_eq!(extranonce_len(&[]), None);
+    }
+}

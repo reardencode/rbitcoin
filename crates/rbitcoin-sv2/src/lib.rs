@@ -3,6 +3,9 @@
 //! Noise_NX over TCP is the only transport. Plan and constraints:
 //! `docs/sv2-template-provider.md`.
 
+mod job;
+#[doc(hidden)]
+pub mod messages;
 #[doc(hidden)]
 pub mod session;
 #[doc(hidden)]
@@ -15,6 +18,7 @@ use bitcoin::secp256k1::{Keypair, Secp256k1};
 use rbitcoin_net::{ChainHub, RequestMeter};
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -27,8 +31,10 @@ pub use transport::Frame;
 /// up to 64 templates sharing the mempool's tx bodies (about 24 KB of
 /// pointers per full template). Bodies that leave the pool stay alive while
 /// a template holds them: at most 64 × ~4 MB per session if every template's
-/// txs were replaced, ~2 GB across the cap, which costs the replacer
-/// replacement fees on every interval.
+/// txs were replaced, ~2 GB across the cap. Supplied custom-job bodies are
+/// private and can reach the same bound without paying replacement fees.
+/// Client frame buffers (transport.rs) and admitted proposal work
+/// (session.rs) are on top of that.
 pub const MAX_SESSIONS: usize = 8;
 
 /// Default [`Sv2TpConfig::setup_timeout`]. A session holds a slot from TCP
@@ -41,6 +47,10 @@ pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Default [`Sv2TpConfig::write_timeout`].
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default [`Sv2TpConfig::provide_timeout`]: a JDS relays the request to
+/// its JDC and the answer back, so the wait is two hops over the internet.
+pub const PROVIDE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default [`Sv2TpConfig::fee_delta`] (stratum-mining `sv2-tp`
 /// `-sv2feedelta`).
@@ -85,15 +95,26 @@ pub struct Sv2TpConfig {
     /// How long a template on a replaced prev hash still answers requests.
     pub stale_grace: Duration,
     /// Deadline from TCP accept through the Noise handshake,
-    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`.
+    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`; for a
+    /// session that set `REQUIRES_JOB_VALIDATION`, through
+    /// `SetupConnection.Success`.
     pub setup_timeout: Duration,
-    /// After the first `CoinbaseOutputConstraints`, a session that handles no
+    /// After the first `CoinbaseOutputConstraints` (after
+    /// `SetupConnection.Success` for a session that set
+    /// `REQUIRES_JOB_VALIDATION`), a session that handles no
     /// frame for this long is dropped. It moves only when a frame arrives;
-    /// tip and fee pushes do not refresh it. `None`: no idle deadline.
+    /// tip and fee pushes do not refresh it. `None`: no idle deadline. A
+    /// value under [`PROVIDE_TIMEOUT`] also closes a session that is quietly
+    /// waiting for its client to answer a `ProvideMissingTransactions`.
     pub idle_timeout: Option<Duration>,
     /// A socket write that makes no progress this long closes the session,
     /// so a client that stops reading cannot hold a slot.
     pub write_timeout: Duration,
+    /// How long a `ProposeTemplate` the node answered
+    /// `ProvideMissingTransactions` waits for the
+    /// `ProvideMissingTransactions.Success`; a later one is
+    /// `unknown-request-id`.
+    pub provide_timeout: Duration,
     /// With the tip unchanged, a rebuild is pushed only when its fees are at
     /// least this many sats above the session's last template.
     pub fee_delta: u64,
@@ -103,6 +124,13 @@ pub struct Sv2TpConfig {
     /// How long a changed coinbase budget waits after the previous template.
     /// The node passes [`CONSTRAINTS_COOLDOWN`].
     pub constraints_cooldown: Duration,
+    /// Proposal validations that may run at once across every session, from
+    /// 1 to [`Semaphore::MAX_PERMITS`]. CPU and thread trade (CONTRIBUTING 9):
+    /// each is one full proposal check on a blocking thread, so this reserves
+    /// that many blocking threads from proposals; it does not stop other users
+    /// of the pool. Internal sizing, not an operator flag: the node passes a
+    /// quarter of its blocking pool.
+    pub validation_permits: usize,
 }
 
 /// Template work across this listener's sessions, for `tip: perf` and
@@ -114,6 +142,29 @@ pub struct Sv2TpStats {
     pub fee_checks: RequestMeter,
     /// Template builds (constraints, tip, fee check), wall time each.
     pub builds: RequestMeter,
+    /// Proposal validations running on blocking threads now. Each holds a
+    /// listener permit, so it never exceeds `validation_permits`.
+    validations_running: AtomicU64,
+}
+
+impl Sv2TpStats {
+    /// Proposal validations running on blocking threads now.
+    pub fn validations_running(&self) -> u64 {
+        self.validations_running.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn enter_validation(self: &Arc<Self>) -> RunningValidation {
+        self.validations_running.fetch_add(1, Ordering::Relaxed);
+        RunningValidation(Arc::clone(self))
+    }
+}
+
+pub(crate) struct RunningValidation(Arc<Sv2TpStats>);
+
+impl Drop for RunningValidation {
+    fn drop(&mut self) {
+        self.0.validations_running.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 pub struct Sv2TpHandle {
@@ -183,6 +234,15 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             ),
         ));
     }
+    if !(1..=Semaphore::MAX_PERMITS).contains(&config.validation_permits) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "sv2 validation_permits: want 1 to {}",
+                Semaphore::MAX_PERMITS
+            ),
+        ));
+    }
     let keypair =
         Keypair::from_seckey_slice(&Secp256k1::new(), &config.authority_secret).map_err(|e| {
             io::Error::new(
@@ -197,6 +257,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let setup_timeout = config.setup_timeout;
     let idle_timeout = config.idle_timeout;
     let write_timeout = config.write_timeout;
+    let provide_timeout = config.provide_timeout;
     let fee_push = session::FeePush {
         delta: config.fee_delta,
         interval: config.template_interval,
@@ -208,6 +269,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let stats = Arc::new(Sv2TpStats::default());
     let slots = Arc::new(Semaphore::new(MAX_SESSIONS));
     let flight = Arc::new(template::TemplateFlight::new());
+    let permits = Arc::new(Semaphore::new(config.validation_permits));
     let sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let sessions_c = sessions.clone();
     let stats_c = Arc::clone(&stats);
@@ -248,6 +310,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             let chain = Arc::clone(&chain);
             let stats = Arc::clone(&stats_c);
             let flight = Arc::clone(&flight);
+            let permits = Arc::clone(&permits);
             let h = tokio::spawn(async move {
                 let _slot = slot;
                 match session::serve(
@@ -258,10 +321,12 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     setup_timeout,
                     idle_timeout,
                     write_timeout,
+                    provide_timeout,
                     fee_push,
                     constraints_cooldown,
                     stats,
                     flight,
+                    permits,
                 )
                 .await
                 {

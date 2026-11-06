@@ -286,7 +286,7 @@ is no plaintext mode.
 | `--sv2-tp-authority-sec KEY` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
 | `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate; 1 to 4294967295 (`u32::MAX`, the Noise cert field) |
 | `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; 0 to 86400 (one day), `0` retires them at once |
-| `--sv2-tp-idle-timeout SECS` (`sv2_tp_idle_timeout`) | 0 | Drops a session that sends no frame for SECS after its first `CoinbaseOutputConstraints`; 0 to 86400, `0` never. Only a frame the client sends moves it; template pushes do not. SRI pools and JDCs send nothing between shares, so leave it off for them |
+| `--sv2-tp-idle-timeout SECS` (`sv2_tp_idle_timeout`) | 0 | Drops a session that sends no frame for SECS after its first `CoinbaseOutputConstraints` (after `SetupConnection.Success` for a session that set `REQUIRES_JOB_VALIDATION`); 0 to 86400, `0` never. Only a frame the client sends moves it; template pushes do not. SRI pools and JDCs send nothing between shares, so leave it off for them. A value under the 30 s provide hold also closes a Job Declarator Server that is quietly waiting for its JDC to supply missing transactions |
 | `--sv2-tp-fee-delta SATS` (`sv2_tp_fee_delta`) | 1000 | Fee gain over a client's last template that pushes a new one on the same tip; `0` pushes any rebuild after a mempool change that did not lower the fees |
 | `--sv2-tp-template-interval SECS` (`sv2_tp_template_interval`) | 5 | Check period: each session checks for that gain every SECS, and a fee push never comes sooner than this after the client's last template. A gain can wait up to one more period than on sv2-tp, which rechecks every second after its interval; `1` matches that. 1 to 86400 |
 
@@ -297,7 +297,14 @@ client. No templates are sent while the node is in IBD.
 At most 8 sessions run at once. A connection that has not finished the
 Noise handshake and `SetupConnection` and sent its first
 `CoinbaseOutputConstraints` within 10 s is closed; after that a client may
-stay silent indefinitely unless `--sv2-tp-idle-timeout` is set. A client that stops reading is closed
+stay silent indefinitely unless `--sv2-tp-idle-timeout` is set. A session that
+set `REQUIRES_JOB_VALIDATION` is set up as soon as `SetupConnection.Success` is
+sent, so a Job Declarator Server that only validates (validation-only mode)
+may never send `CoinbaseOutputConstraints`: it gets no `NewTemplate` or
+`SetNewPrevHash`, and the 10 s deadline does not apply to it. The idle
+deadline, off by default, starts at `SetupConnection.Success` for such a
+session, so with the default a silent one holds its slot until it closes. A
+client that stops reading is closed
 once a write to it makes no progress for 30 s.
 A changed `CoinbaseOutputConstraints` within 1 s of the last template waits
 out the rest of that second; a client that keeps replacing a queued budget
@@ -315,6 +322,54 @@ different coinbase budget builds again. An undecodable
 that misses the template target is logged and dropped. A `header_timestamp`
 outside the sv2 rolling window (a miner clock running ahead) is logged and
 still submitted; block validation applies the consensus time rules.
+A client that sets `SetupConnection` flag bit 0 (`REQUIRES_JOB_VALIDATION`)
+can send `ProposeTemplate` (proposed TDP messages, sv2-spec discussion #239):
+the node checks a Job Declarator Server's declared job as a block on its tip,
+asks for the transactions it lacks, and retains a valid job under a template
+id that `SubmitSolution` accepts, naming the tip it validated on. The check
+is every consensus rule for a block except proof of work and the merkle
+root, including a script check of every non-coinbase transaction, the ones
+resolved from the mempool and the ones the JDS supplied alike, and no policy
+(standardness, relay fee) check. A repeated request id, a job past the
+admission bound below, and a repeated wtxid are refused as the frame arrives,
+before any chain read; a provide that does not cover what was asked, or
+carries a transaction nobody asked for, is refused before any of it is
+decoded or copied. The initial-block-download gate, the tip read, and the
+coinbase prefix check (`bad-cb-decode`) run in the validation itself, on a
+blocking thread. A job whose weight passes the block limit while it is being
+resolved is refused without asking for the rest. Without the flag the
+messages are ignored.
+A session's frame limit follows the setup: until `SetupConnection.Success`
+carries the flag, and for a session without it, a frame over 65557 bytes
+closes the session. A session with the flag may send a `ProposeTemplate` of up
+to ~2.3 MB and a `ProvideMissingTransactions.Success` of up to ~4.2 MB. Each
+session buffers at most four frames of its limit at once (the codec's
+encrypted and decrypted copies of the frame being read, one waiting, one being
+handled): ~17 MB for a flagged session and under 0.3 MB for any other, ~134 MB
+across 8 flagged sessions.
+A job's solution is rebuilt with the `nBits` consensus requires of a child of
+the job's parent at the submitted `ntime`, and proof of work is checked against
+that header, because the JDS's client hashed the bits its own template
+provider sent. A solution for a template the node pushed keeps the `nBits`
+announced with its `SetNewPrevHash`.
+Across all sessions, at most a quarter of the node's blocking-thread pool (at
+least one, so one at a time on a four-thread host) validates proposals at once.
+A validation that has started is not aborted when its client disconnects: it
+runs to the end holding its share until it returns. That reserves threads from
+proposals; other work can still fill the pool.
+`rbitcoin_sv2_validations_running` (`/metrics`) and `sv2_validating`
+(`tip: perf`) show the running count.
+A session holds at most 16 accepted proposals and 16 MiB of them
+(wtxids, coinbase split, supplied transactions) that are not yet answered; one past
+either bound is answered `job-validation-unavailable` and the session keeps serving.
+The same code answers a proposal while the node is in initial block download
+or cannot read its chain tip. There is no operator switch for any of this; the
+flag is per session.
+The jobs a session retains retire after `--sv2-tp-stale-grace` once the tip
+leaves their parent, whether or not the session ever sent
+`CoinbaseOutputConstraints`: a session that did not (validation-only) starts
+that grace when the node's tip changes, one that did starts it when it is sent
+the new prev hash.
 
 There is no client authentication. Noise NX proves the TP's authority key
 to the client, not the client to the TP, so anyone who can reach the port

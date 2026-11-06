@@ -2158,6 +2158,23 @@ impl ChainHub {
         ))
     }
 
+    /// The `nBits` consensus requires of a child of `parent` stamped `time`,
+    /// read along `parent`'s own ancestry: a parent off the best chain gets
+    /// its branch's answer, not the active chain's at that height. `None`:
+    /// the parent, or an ancestor the rule reads, is unknown.
+    #[doc(hidden)]
+    pub fn expected_child_bits(&self, parent: &BlockHash, time: u32) -> Option<CompactTarget> {
+        let parent_header = self.header_of(parent)?;
+        let parent_height = self.stored_header_height(parent)?;
+        let child = Header {
+            prev_blockhash: *parent,
+            time,
+            ..parent_header
+        };
+        self.expected_bits_off_tip(&child, &parent_header, parent_height, &HashMap::new())
+            .ok()
+    }
+
     fn expected_bits_off_tip_base(
         &self,
         header: &Header,
@@ -2517,8 +2534,8 @@ impl ChainHub {
 
     /// Core `TestBlockValidity` for a `getblocktemplate` proposal: no PoW, no
     /// UTXO write. `Ok` is the block fees in sat; `Err` is Core's reject
-    /// string.
-    pub fn check_block_proposal(&self, block: &Block) -> Result<u64, String> {
+    /// string, or the read that failed before a verdict could be reached.
+    pub fn check_block_proposal(&self, block: &Block) -> Result<u64, ProposalError> {
         check_block_proposal_with(
             &self.query,
             &self.params,
@@ -4784,6 +4801,41 @@ pub fn header_work_bits(bits: u32) -> Work {
     Target::from_compact(CompactTarget::from_consensus(bits)).to_work()
 }
 
+/// Why a block proposal was not priced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalError {
+    /// Consensus rejects the block: Core's reject string.
+    Reject(String),
+    /// A chain read failed or the tip is missing, so there is no verdict on
+    /// the block. Carries the failure's message, not a reject code.
+    Unreadable(String),
+}
+
+impl ProposalError {
+    fn unreadable(e: impl std::fmt::Display) -> Self {
+        Self::Unreadable(e.to_string())
+    }
+}
+
+impl From<String> for ProposalError {
+    fn from(code: String) -> Self {
+        Self::Reject(code)
+    }
+}
+
+impl From<&str> for ProposalError {
+    fn from(code: &str) -> Self {
+        Self::Reject(code.into())
+    }
+}
+
+impl std::fmt::Display for ProposalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Reject(text) | Self::Unreadable(text)) = self;
+        f.write_str(text)
+    }
+}
+
 /// [`ChainHub::check_block_proposal`] on explicit inputs, for a caller that
 /// holds a [`Query`] but no live hub.
 pub fn check_block_proposal_with(
@@ -4792,12 +4844,14 @@ pub fn check_block_proposal_with(
     milestone: Milestone,
     now: u32,
     block: &Block,
-) -> Result<u64, String> {
-    let tip_h = query.tip_height().ok_or("no tip")?;
+) -> Result<u64, ProposalError> {
+    let tip_h = query
+        .tip_height()
+        .ok_or_else(|| ProposalError::unreadable("no tip"))?;
     let (_, tip_rec) = query
         .header_at_height(tip_h)
-        .map_err(|e| e.to_string())?
-        .ok_or("tip header missing")?;
+        .map_err(ProposalError::unreadable)?
+        .ok_or_else(|| ProposalError::unreadable("tip header missing"))?;
     if block.header.prev_blockhash.to_byte_array() != tip_rec.hash {
         return Err("inconclusive-not-best-prevblk".into());
     }
@@ -4806,7 +4860,8 @@ pub fn check_block_proposal_with(
         rbitcoin_query::expected_next_bits(query, params, Height(height), block.header.time)
             .map(|c| c.to_consensus())
             .unwrap_or(tip_rec.bits);
-    let mtp = rbitcoin_query::median_time_past_store(query, tip_h).map_err(|e| e.to_string())?;
+    let mtp =
+        rbitcoin_query::median_time_past_store(query, tip_h).map_err(ProposalError::unreadable)?;
     let header = ProposalHeader {
         block,
         height,
@@ -4818,7 +4873,7 @@ pub fn check_block_proposal_with(
     proposal_header_checks(params, header)?;
     let vctx = rbitcoin_consensus::ValidationContext::at(params, Height(height), milestone);
     if let Err(e) = rbitcoin_consensus::validate_block_structure(block, &vctx) {
-        return Err(rbitcoin_consensus::block_reject_reason(&e));
+        return Err(rbitcoin_consensus::block_reject_reason(&e).into());
     }
     let lock_time_cutoff = rbitcoin_consensus::block::lock_time_cutoff(&vctx, block, mtp);
     let (fees, prevouts) = proposal_connect(query, params, block, height, mtp, lock_time_cutoff)?;
@@ -4859,7 +4914,7 @@ pub fn check_block_proposal_with(
             return Err("bad-blk-sigops".into());
         }
         if let Err(e) = rbitcoin_consensus::verify_tx_scripts_with_flags(ins, tx.clone(), flags) {
-            return Err(rbitcoin_consensus::block_reject_reason(&e));
+            return Err(rbitcoin_consensus::block_reject_reason(&e).into());
         }
     }
     Ok(fees)
@@ -4935,7 +4990,7 @@ pub fn proposal_connect(
     height: u32,
     mtp: u32,
     lock_time_cutoff: u32,
-) -> Result<(u64, Vec<Vec<TxOut>>), String> {
+) -> Result<(u64, Vec<Vec<TxOut>>), ProposalError> {
     if block.txdata.is_empty() {
         return Err("bad-blk-length".into());
     }
@@ -5034,7 +5089,7 @@ fn proposal_one_input(
     coins: &ProposalCoins<'_>,
     acc: &mut ProposalInAccum<'_>,
     op: &OutPoint,
-) -> Result<(TxOut, u32), String> {
+) -> Result<(TxOut, u32), ProposalError> {
     if !acc.spent.insert(*op) {
         return Err("bad-txns-inputs-missingorspent".into());
     }
@@ -5076,14 +5131,14 @@ fn proposal_tx_fee(paid: u64, out_val: u64) -> Result<u64, String> {
 
 /// BIP68 on a proposal, as at connect: a coin's time is the median time of
 /// the block before the one that created it, from confirmed headers only.
-/// A store fault reading it is the store error, not a reject.
+/// A store fault reading it is [`ProposalError::Unreadable`], not a reject.
 fn proposal_sequence_locks(
     query: &Query,
     tx: &Transaction,
     coin_heights: &[u32],
     height: u32,
     mtp: u32,
-) -> Result<(), String> {
+) -> Result<(), ProposalError> {
     if !rbitcoin_consensus::block::bip68_active_for_tx(tx) {
         return Ok(());
     }
@@ -5091,14 +5146,14 @@ fn proposal_sequence_locks(
     for (inp, &h) in tx.input.iter().zip(coin_heights) {
         let coin_mtp = if inp.sequence.is_time_locked() {
             rbitcoin_query::median_time_past_store(query, Height(h.saturating_sub(1)))
-                .map_err(|e| e.to_string())?
+                .map_err(ProposalError::unreadable)?
         } else {
             0
         };
         coin_mtps.push(coin_mtp);
     }
     rbitcoin_consensus::block::reject_sequence_locks(tx, coin_heights, &coin_mtps, height, mtp)
-        .map_err(|e| rbitcoin_consensus::block_reject_reason(&e))
+        .map_err(|e| rbitcoin_consensus::block_reject_reason(&e).into())
 }
 
 /// `op`'s unspent confirmed output: a per-input spentness probe, then the
@@ -5175,18 +5230,18 @@ pub fn coinbase_spend_is_immature(
     created_h: u32,
     spend_height: u32,
     maturity: u32,
-) -> Result<bool, String> {
+) -> Result<bool, ProposalError> {
     match query.store().tx_height_get(create_fk) {
         Ok(Some(h)) if h == created_h => {}
         Ok(_) => return Err("bad-txns-inputs-missingorspent".into()),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(ProposalError::unreadable(e)),
     }
     if spend_height >= created_h.saturating_add(maturity) {
         return Ok(false);
     }
     query
         .is_coinbase_create(create_fk, created_h)
-        .map_err(|e| e.to_string())
+        .map_err(ProposalError::unreadable)
 }
 
 pub fn accept_block_header_nodos_log(hash: impl std::fmt::Display) -> String {

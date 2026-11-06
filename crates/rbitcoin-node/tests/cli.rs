@@ -42,6 +42,21 @@ fn blocking_pool_is_capped_not_tokio_default() {
     assert!(blocking_pool_size() <= 512);
 }
 
+#[test]
+fn proposal_validations_use_a_quarter_of_the_blocking_pool() {
+    let pool = blocking_pool_size();
+    let permits = proposal_validation_permits();
+    assert!(permits >= 1, "a four-thread node runs one at a time");
+    assert!(
+        permits * 4 <= pool,
+        "at most a quarter of {pool}: {permits}"
+    );
+    assert!(
+        (permits + 1) * 4 > pool,
+        "the largest such count: {permits}"
+    );
+}
+
 fn ready_config<I, T>(args: I) -> NodeConfig
 where
     I: IntoIterator<Item = T>,

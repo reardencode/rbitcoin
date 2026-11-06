@@ -1334,7 +1334,7 @@ pub fn gbt_check_proposal(ctx: &RpcContext, block: &Block) -> Result<(), String>
             )
         }
     };
-    priced.map(|_fees| ())
+    priced.map(|_fees| ()).map_err(|e| e.to_string())
 }
 
 /// Where a [`during_next_mininginfo`] hook runs in each sample.

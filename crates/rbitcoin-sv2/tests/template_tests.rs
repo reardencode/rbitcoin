@@ -1,4 +1,5 @@
 use crate::test_chain::{padded_chain_with, shared_regtest, TestChain};
+use binary_sv2::{Seq064K, B016M, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{
@@ -13,16 +14,26 @@ use rbitcoin_consensus::{
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
+use rbitcoin_sv2::messages::{
+    ProposeTemplate, ProposeTemplateError, ProposeTemplateSuccess, ProvideMissingTransactions,
+    ProvideMissingTransactionsSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
+};
+use rbitcoin_sv2::session::{MAX_ADMITTED_BYTES, MAX_ADMITTED_PROPOSALS, MAX_PENDING_PROPOSALS};
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
-    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, SETUP_TIMEOUT,
-    TEMPLATE_INTERVAL, WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_TEMPLATE_INTERVAL,
+    PROVIDE_TIMEOUT, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::sync::Arc;
 use std::time::Duration;
 
 use template_distribution_sv2::{
-    NewTemplate, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_SET_NEW_PREV_HASH,
+    NewTemplate, RequestTransactionDataError, RequestTransactionDataSuccess, SetNewPrevHash,
+    MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
 };
 
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
@@ -192,9 +203,11 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -245,9 +258,11 @@ async fn holding_session_publishes_when_the_pool_is_maintained() {
         setup_timeout: Duration::from_secs(30),
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -298,9 +313,11 @@ async fn constraints_cooldown_publishes_the_next_budget() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -345,9 +362,11 @@ async fn template_resent_constraints_do_not_rebuild() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -389,9 +408,11 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -428,9 +449,11 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -484,9 +507,11 @@ async fn constraints_while_ibd_keep_the_last_budget() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -539,33 +564,18 @@ struct FirstTemplate {
     coinbase: Vec<u8>,
 }
 
-async fn first_template(tc: &TestChain) -> FirstTemplate {
-    first_template_every(tc, TEMPLATE_INTERVAL).await
+async fn first_template(tc: &TestChain, flags: u32) -> FirstTemplate {
+    first_template_every(tc, flags, TEMPLATE_INTERVAL).await
 }
 
 /// [`first_template`] on a session that checks fees every `template_interval`.
-async fn first_template_every(tc: &TestChain, template_interval: Duration) -> FirstTemplate {
+async fn first_template_every(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+) -> FirstTemplate {
     mock_live_tip(tc);
-    let tp = run_sv2_tp(Sv2TpConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        chain: Arc::clone(&tc.chain),
-        authority_secret: [7; 32],
-        cert_validity: Duration::from_secs(3600),
-        stale_grace: Duration::from_secs(10),
-        setup_timeout: SETUP_TIMEOUT,
-        idle_timeout: None,
-        write_timeout: WRITE_TIMEOUT,
-        fee_delta: FEE_DELTA,
-        template_interval,
-        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
-    })
-    .await
-    .expect("listen");
-    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
-        .await
-        .expect("handshake");
-    c.setup_connection(2, 2, 2, 0).await.unwrap();
-    c.recv().await.expect("setup reply");
+    let (tp, mut c) = connect_tp_with(tc, flags, template_interval, PROVIDE_TIMEOUT).await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
 
     let mut f = recv_in_time(&mut c).await;
@@ -633,7 +643,7 @@ async fn submit_solution_checks_pow_before_accept() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let tip = header.prev_blockhash;
 
     while header.validate_pow(header.target()).is_ok() {
@@ -668,6 +678,47 @@ async fn submit_solution_checks_pow_before_accept() {
     tp.shutdown().await;
 }
 
+/// A found block does not wait on the Tokio blocking pool: the bits read
+/// ahead of connect runs where connect does, so a pool with every thread
+/// parked still takes the solution.
+#[test]
+fn submit_solution_is_accepted_while_the_blocking_pool_is_parked() {
+    blocking_pool_runtime(1).block_on(async {
+        let tc = shared_regtest(0);
+        let FirstTemplate {
+            tp,
+            mut c,
+            template_id,
+            version,
+            mut header,
+            coinbase,
+        } = first_template(&tc, 0).await;
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let parked = tokio::task::spawn_blocking(move || {
+            let _ = gate.recv_timeout(Duration::from_secs(30));
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+            .await
+            .unwrap();
+        let solved = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
+        release.send(()).unwrap();
+        parked.await.unwrap();
+        let f = solved.expect("solution handled").expect("message");
+        assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+        assert_eq!(
+            tc.chain.tip_header().unwrap().block_hash(),
+            header.block_hash()
+        );
+
+        tp.shutdown().await;
+    });
+}
+
 /// A client that leaves the coinbase witness empty still solves the block:
 /// the TP fills the zero reserved value the witness commitment was built
 /// with. The txid, and so the merkle root, does not cover the witness.
@@ -681,7 +732,7 @@ async fn submit_solution_without_coinbase_witness_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     while header.validate_pow(header.target()).is_err() {
@@ -718,7 +769,7 @@ async fn submit_solution_without_witness_commitment_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     bare.output.truncate(1);
@@ -760,7 +811,7 @@ async fn submit_solution_ahead_of_the_rolled_time_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     header.time += 5;
     while header.validate_pow(header.target()).is_err() {
         header.nonce += 1;
@@ -791,9 +842,11 @@ async fn constraints_flood_closes_the_session() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -845,9 +898,11 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -898,9 +953,11 @@ async fn silent_session_outlives_the_setup_timeout_and_gets_the_next_tip() {
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -950,7 +1007,7 @@ async fn same_prev_hash_template_keeps_the_sent_bits() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
 
     let spacing = tc.chain.params.btc.pow_target_spacing as u32;
     tc.chain
@@ -995,9 +1052,11 @@ async fn fee_push_after_the_interval_past_the_delta() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: 1_000,
         template_interval: interval,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -1093,7 +1152,7 @@ async fn fee_pushes_keep_older_same_tip_templates_solvable() {
         version,
         mut header,
         coinbase,
-    } = first_template_every(&tc, interval).await;
+    } = first_template_every(&tc, 0, interval).await;
 
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let mut txs = (0..3)
@@ -1180,9 +1239,11 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     })
     .await
     .expect("listen");
@@ -1251,7 +1312,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
 async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     let tc = shared_regtest(0);
     let interval = Duration::from_millis(250);
-    let FirstTemplate { tp, c, .. } = first_template_every(&tc, interval).await;
+    let FirstTemplate { tp, c, .. } = first_template_every(&tc, 0, interval).await;
     tokio::time::pause();
     let stats = tp.stats();
     assert_eq!(stats.builds.totals().0, 1, "the first template");
@@ -1290,9 +1351,9 @@ fn template_builds_on_the_stripped_tip() {
     let built = rbitcoin_sv2::template::build(&tc.chain, 0, 0)
         .unwrap()
         .expect("template");
-    assert_eq!(built.prev_hash, genesis.hash);
+    assert_eq!(built.job.prev_hash, genesis.hash);
     let best = tc.chain.query.wire_header_at_height(tip).unwrap();
-    assert_ne!(built.prev_hash, best.block_hash().to_byte_array());
+    assert_ne!(built.job.prev_hash, best.block_hash().to_byte_array());
 }
 
 /// Core `GetMinimumTime`: on a clock behind a period's first block, the
@@ -1323,8 +1384,8 @@ fn template_time_holds_the_last_of_period_floor() {
     let built = rbitcoin_sv2::template::build(&tc.chain, 0, 0)
         .unwrap()
         .expect("template");
-    assert_eq!(built.prev_hash, prev.to_byte_array());
-    assert_eq!(built.header_timestamp, first_time);
+    assert_eq!(built.job.prev_hash, prev.to_byte_array());
+    assert_eq!(built.job.header_timestamp, first_time);
 }
 
 /// Under `regtest_pow_bits_overlay` the template carries the overlay target,
@@ -1342,7 +1403,7 @@ async fn template_target_follows_the_regtest_pow_overlay() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     assert_eq!(header.bits.to_consensus(), OVERLAY);
 
     while header.validate_pow(header.target()).is_err() {
@@ -1381,7 +1442,7 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     assert_eq!(header.bits.to_consensus(), OVERLAY);
     let tip = header.prev_blockhash;
     let spacing = tc.chain.params.btc.pow_target_spacing as u32;
@@ -1402,6 +1463,1914 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
         "a gap timestamp must not reach accept_block"
     );
     tc.chain.set_prefill_compact(false);
+    tp.shutdown().await;
+}
 
+/// A live TP on `tc` with one session past `SetupConnection(flags)`.
+async fn connect_tp(tc: &TestChain, flags: u32) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_with(tc, flags, TEMPLATE_INTERVAL, PROVIDE_TIMEOUT).await
+}
+
+/// [`connect_tp`] on a TP that checks fees every `template_interval` and
+/// holds a proposal waiting for its missing txs for `provide_timeout`.
+async fn connect_tp_with(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_timed(tc, flags, template_interval, provide_timeout, SETUP_TIMEOUT).await
+}
+
+/// [`connect_tp_with`] on a TP whose setup deadline is `setup_timeout`.
+async fn connect_tp_timed(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+    setup_timeout: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_graced(
+        tc,
+        flags,
+        template_interval,
+        provide_timeout,
+        setup_timeout,
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+/// [`connect_tp_timed`] on a TP that keeps a replaced tip's jobs for
+/// `stale_grace`. Its listener has the one validation permit the node
+/// computes for a four-thread blocking pool, which the journeys that run on
+/// such a pool depend on.
+async fn connect_tp_graced(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+    setup_timeout: Duration,
+    stale_grace: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace,
+        setup_timeout,
+        idle_timeout: None,
+        write_timeout: WRITE_TIMEOUT,
+        provide_timeout,
+        fee_delta: FEE_DELTA,
+        template_interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 1,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, flags).await.unwrap();
+    c.recv().await.expect("setup reply");
+    (tp, c)
+}
+
+const EXTRANONCE_LEN: usize = 8;
+
+/// A JDS-shaped coinbase: BIP34 height then the extranonce, one payout, and
+/// the witness commitment over `txs` with a zero reserved value in the
+/// witness.
+fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0u8; EXTRANONCE_LEN]);
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(script_sig),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(payout),
+                script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(witness_commitment_script(
+                    txs.iter().map(|tx| tx.compute_wtxid().to_byte_array()),
+                    &[0u8; 32],
+                )),
+            },
+        ],
+    }
+}
+
+/// Where a segwit coinbase's scriptSig starts in its serialization: version,
+/// BIP144 marker and flag, the one-input count, the null prevout, and the
+/// one-byte scriptSig length.
+const SCRIPT_SIG_AT: usize = 4 + 2 + 1 + 36 + 1;
+
+/// One `ProposeTemplate` as owned fields, so a test can bend any of them.
+struct Job {
+    request_id: u32,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
+    coinbase_suffix: Vec<u8>,
+    wtxids: Vec<[u8; 32]>,
+}
+
+impl Job {
+    /// The `DeclareMiningJob` split a JDS relays: the prefix ends where the
+    /// extranonce starts (the scriptSig tail), the suffix starts at nSequence.
+    fn declare(
+        tc: &TestChain,
+        request_id: u32,
+        coinbase: &Transaction,
+        declared: &[&Transaction],
+    ) -> Self {
+        let raw = serialize(coinbase);
+        let split = SCRIPT_SIG_AT + coinbase.input[0].script_sig.len() - EXTRANONCE_LEN;
+        Job {
+            request_id,
+            version: tc.chain.gbt_block_version(None) as u32,
+            coinbase_prefix: raw[..split].to_vec(),
+            coinbase_suffix: raw[split + EXTRANONCE_LEN..].to_vec(),
+            wtxids: declared
+                .iter()
+                .map(|tx| tx.compute_wtxid().to_byte_array())
+                .collect(),
+        }
+    }
+
+    async fn send(&self, c: &mut TpClient) {
+        let msg = ProposeTemplate {
+            request_id: self.request_id,
+            version: self.version,
+            coinbase_tx_prefix: B064K::try_from(&self.coinbase_prefix[..]).unwrap(),
+            coinbase_tx_suffix: B064K::try_from(&self.coinbase_suffix[..]).unwrap(),
+            wtxid_list: Seq064K::new(self.wtxids.iter().map(U256::from).collect()).unwrap(),
+            excess_data: B064K::try_from(&[][..]).unwrap(),
+        };
+        c.send(MESSAGE_TYPE_PROPOSE_TEMPLATE, msg).await.unwrap();
+    }
+}
+
+/// The TP asks for `positions` of `request_id`'s `wtxid_list`.
+async fn expect_missing(c: &mut TpClient, request_id: u32, positions: &[u16]) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
+        "{:?}",
+        f.payload
+    );
+    let m: ProvideMissingTransactions = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(m.request_id, request_id);
+    assert_eq!(m.unknown_tx_position_list.into_inner(), positions);
+}
+
+/// The JDS leg of the round trip: `txs` as the JDC serialized them, under
+/// the `request_id` the TP asked with.
+async fn provide(c: &mut TpClient, request_id: u32, txs: &[Vec<u8>]) {
+    let msg = ProvideMissingTransactionsSuccess {
+        request_id,
+        transaction_list: Seq064K::new(
+            txs.iter()
+                .map(|t| B016M::try_from(&t[..]).unwrap())
+                .collect(),
+        )
+        .unwrap(),
+    };
+    c.send(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, msg)
+        .await
+        .unwrap();
+}
+
+async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, "{code}");
+    let e: ProposeTemplateError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(e.request_id, request_id);
+    assert_eq!(e.error_code.as_utf8_or_hex(), code);
+}
+
+/// `Success` names the tip the job was validated on, next to the id it is
+/// retained under and the fee total of the declared transactions.
+async fn expect_job_success(
+    c: &mut TpClient,
+    tc: &TestChain,
+    request_id: u32,
+    template_id: u64,
+    fees: u64,
+) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+        "{:?}",
+        f.payload
+    );
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (request_id, template_id, fees)
+    );
+    assert_eq!(ok.prev_hash.as_ref(), tip.as_byte_array(), "validated tip");
+}
+
+/// The retained job answers `RequestTransactionData` with the declared txs
+/// in block order, exactly like a built template.
+async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction]) {
+    c.request_transaction_data(template_id).await.unwrap();
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    let d: RequestTransactionDataSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(d.template_id, template_id);
+    let got: Vec<Vec<u8>> = d
+        .transaction_list
+        .iter()
+        .map(|t| t.as_ref().to_vec())
+        .collect();
+    let want: Vec<Vec<u8>> = txs.iter().map(serialize).collect();
+    assert_eq!(got, want, "retained txs in declared order");
+}
+
+/// docs/sv2-job-validation.md §4.1–4.3: a job whose txs are all in the
+/// mempool and whose coinbase pays subsidy + fees is answered `Success` with
+/// the next template id, the declared fee sum, and the tip it was validated
+/// on, and is retained like a template.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_prices_and_retains_the_declared_job() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+    let pooled = tc.mempool.get_tx_by_wtxid(&a.compute_wtxid()).unwrap();
+    let references_before = Arc::strong_count(&pooled);
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 9, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 9, last + 1, 5_000).await;
+    assert_eq!(Arc::strong_count(&pooled), references_before + 1);
+    for n in 1..4u32 {
+        Job::declare(&tc, 9 + n, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        expect_job_success(&mut c, &tc, 9 + n, last + 1 + u64::from(n), 5_000).await;
+        assert_eq!(
+            Arc::strong_count(&pooled),
+            references_before + 1 + n as usize
+        );
+    }
+    assert_eq!(tc.mempool.remove_for_block(&[a.compute_txid()]), 1);
+    expect_retained(&mut c, last + 4, &[&a, &b]).await;
+
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overweight_proposal_is_rejected_even_if_another_body_disappears() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    let oversized = spend(
+        tc.coinbases[1],
+        2_000,
+        ScriptBuf::from_bytes(vec![OP_TRUE; 1_000_000]),
+    );
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&known], true).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    let job = Job::declare(&tc, 81, &coinbase, &[&known, &oversized]);
+    job.send(&mut c).await;
+    expect_missing(&mut c, 81, &[1]).await;
+    assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
+    provide(&mut c, 81, &[serialize(&oversized)]).await;
+    expect_job_error(&mut c, 81, "bad-blk-length").await;
+
+    Job::declare(&tc, 82, &coinbase, &[&oversized])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 82, &[0]).await;
+    provide(&mut c, 82, &[serialize(&oversized)]).await;
+    expect_job_error(&mut c, 82, "bad-blk-length").await;
+
+    let mut at_limit = spend(tc.coinbases[1], 2_000, ScriptBuf::new());
+    at_limit.output[0].script_pubkey = ScriptBuf::from_bytes(vec![OP_TRUE; 999_000]);
+    let coinbase_at_limit = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&at_limit],
+    );
+    let current = 81 * 4 + coinbase_at_limit.weight().to_wu() + at_limit.weight().to_wu();
+    let extra = (MAX_BLOCK_WEIGHT - current) / 4;
+    at_limit.output[0].script_pubkey =
+        ScriptBuf::from_bytes(vec![OP_TRUE; 999_000 + extra as usize]);
+    let coinbase_at_limit = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&at_limit],
+    );
+    assert_eq!(
+        81 * 4 + coinbase_at_limit.weight().to_wu() + at_limit.weight().to_wu(),
+        MAX_BLOCK_WEIGHT
+    );
+    Job::declare(&tc, 83, &coinbase_at_limit, &[&at_limit])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 83, &[0]).await;
+    provide(&mut c, 83, &[serialize(&at_limit)]).await;
+    expect_job_success(&mut c, &tc, 83, last + 1, 2_000).await;
+
+    // One weight unit over the limit through witness bytes alone: the stripped
+    // size is far under its limit, so only the weight rule fires.
+    let mut heavy = spend(tc.coinbases[1], 2_000, ScriptBuf::new());
+    heavy.input[0].witness = Witness::from_slice(&[vec![0u8; 3_900_000]]);
+    let coinbase_heavy = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&heavy],
+    );
+    let fixed = 81 * 4 + coinbase_heavy.weight().to_wu() + heavy.weight().to_wu();
+    let pad = (MAX_BLOCK_WEIGHT + 1 - fixed) as usize;
+    heavy.input[0].witness = Witness::from_slice(&[vec![0u8; 3_900_000 + pad]]);
+    let coinbase_heavy = job_coinbase(
+        height,
+        block_subsidy(height, &tc.chain.params) as u64 + 2_000,
+        &[&heavy],
+    );
+    assert_eq!(
+        81 * 4 + coinbase_heavy.weight().to_wu() + heavy.weight().to_wu(),
+        MAX_BLOCK_WEIGHT + 1
+    );
+    assert!(heavy.base_size() < 1_000);
+    Job::declare(&tc, 84, &coinbase_heavy, &[&heavy])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 84, &[0]).await;
+    provide(&mut c, 84, &[serialize(&heavy)]).await;
+    expect_job_error(&mut c, 84, "bad-blk-weight").await;
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pooled_overweight_proposal_is_rejected_before_missing_body_request() {
+    let tc = shared_regtest(1);
+    mock_live_tip(&tc);
+    let count = 14u32;
+    let each = (50_0000_0000 - 10_000) / u64::from(count);
+    let mut fanout = spend(
+        tc.coinbases[0],
+        10_000,
+        ScriptBuf::from_bytes(vec![OP_TRUE]),
+    );
+    fanout.output = vec![
+        TxOut {
+            value: Amount::from_sat(each),
+            script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+        };
+        count as usize
+    ];
+    let tip = tc.chain.tip_header().unwrap();
+    let height = tc.chain.query.tip_height().unwrap().0;
+    let block = mine_regtest_paying(
+        tip.block_hash(),
+        tip.time + 1,
+        height + 1,
+        ScriptBuf::from_bytes(vec![OP_TRUE]),
+        vec![fanout.clone()],
+    );
+    tc.chain.accept_block(block).expect("accept fan-out");
+    mock_live_tip(&tc);
+    let mut pooled = Vec::new();
+    for vout in 0..count {
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout.compute_txid(),
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat((each - 20_000) / 8_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+                };
+                8_000
+            ],
+        };
+        tc.mempool.accept_tx(&tx).expect("mempool accept");
+        pooled.push(tx);
+    }
+    assert!(pooled.iter().map(|tx| tx.weight().to_wu()).sum::<u64>() > MAX_BLOCK_WEIGHT);
+    let FirstTemplate { tp, mut c, .. } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    let mut unknown = pooled[0].clone();
+    unknown.lock_time = LockTime::from_consensus(1);
+    let missing_first: Vec<_> = std::iter::once(&unknown).chain(pooled.iter()).collect();
+    Job::declare(&tc, 92, &coinbase, &missing_first)
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 92, "bad-blk-length").await;
+    let known: Vec<_> = pooled.iter().collect();
+    Job::declare(&tc, 91, &coinbase, &known).send(&mut c).await;
+    expect_job_error(&mut c, 91, "bad-blk-length").await;
+    tp.shutdown().await;
+}
+
+/// §4.1–4.2: a wtxid the TP cannot resolve answers `ProvideMissingTransactions`
+/// with its 0-indexed position and holds the proposal under its
+/// `request_id`; the JDS's `ProvideMissingTransactions.Success` for that id
+/// completes the validation with the supplied tx merged in, and the tx is
+/// retained with the job. The hold is per request: a provide for an id the
+/// TP never asked about, already consumed, or held past `provide_timeout`
+/// is `unknown-request-id`; a second proposal under an id still waiting is
+/// `duplicate-request-id`; a provide that does not cover every requested
+/// position, supplies a tx the TP did not ask for, or one that does not
+/// decode, is `bad-missing-tx` and ends that exchange. The
+/// hold is bounded: past `MAX_PENDING_PROPOSALS` waiting proposals the
+/// oldest is dropped and its provide is `unknown-request-id` too. No
+/// rejected or dropped proposal takes a template id.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_asks_for_and_accepts_missing_transactions() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap.clone());
+    // Decodable and unknown to the mempool, like `b`; never validated.
+    let sibling = spend(tc.coinbases[1], 2_500, cheap);
+    tc.mempool.accept_tx(&a).expect("mempool accept");
+    let provide_timeout = Duration::from_secs(1);
+    let (tp, mut c) = connect_tp_with(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        provide_timeout,
+    )
+    .await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a], true).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let raw_b = serialize(&b);
+
+    provide(&mut c, 77, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 77, "unknown-request-id").await;
+
+    let job = Job::declare(&tc, 4, &coinbase, &[&a, &b]);
+    job.send(&mut c).await;
+    expect_missing(&mut c, 4, &[1]).await;
+    job.send(&mut c).await;
+    expect_job_error(&mut c, 4, "duplicate-request-id").await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
+    expect_job_success(&mut c, &tc, 4, last + 1, 5_000).await;
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 4, "unknown-request-id").await;
+
+    Job::declare(&tc, 5, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 5, &[1]).await;
+    provide(&mut c, 5, &[serialize(&a)]).await;
+    expect_job_error(&mut c, 5, "bad-missing-tx").await;
+    provide(&mut c, 5, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 5, "unknown-request-id").await;
+
+    Job::declare(&tc, 6, &coinbase, &[&a, &b, &sibling])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 6, &[1, 2]).await;
+    provide(&mut c, 6, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 6, "bad-missing-tx").await;
+    provide(&mut c, 6, &[raw_b.clone(), serialize(&sibling)]).await;
+    expect_job_error(&mut c, 6, "unknown-request-id").await;
+
+    let blob = vec![0xee; 40];
+    let mut garbage = Job::declare(&tc, 8, &coinbase, &[]);
+    garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
+    garbage.send(&mut c).await;
+    expect_missing(&mut c, 8, &[0]).await;
+    provide(&mut c, 8, &[blob]).await;
+    expect_job_error(&mut c, 8, "bad-missing-tx").await;
+
+    for id in 10..10 + MAX_PENDING_PROPOSALS as u32 + 1 {
+        Job::declare(&tc, id, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        expect_missing(&mut c, id, &[1]).await;
+    }
+    provide(&mut c, 10, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 10, "unknown-request-id").await;
+    provide(&mut c, 11, std::slice::from_ref(&raw_b)).await;
+    expect_job_success(&mut c, &tc, 11, last + 2, 5_000).await;
+
+    Job::declare(&tc, 7, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 7, &[1]).await;
+    tokio::time::sleep(provide_timeout + provide_timeout / 2).await;
+    provide(&mut c, 7, &[raw_b]).await;
+    expect_job_error(&mut c, 7, "unknown-request-id").await;
+
+    c.request_transaction_data(last + 3).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "only the two completed jobs took ids"
+    );
+
+    tp.shutdown().await;
+}
+
+/// A hold's deadline is checked when its `.Success` is consumed, not only by
+/// the cleanup timer. A zero `provide_timeout` makes every hold expired the
+/// moment it exists. To have the late provide and that hold's timer ready in
+/// the same loop turn, the session loop is parked: the first
+/// `CoinbaseOutputConstraints` builds a template, and the build waits on the
+/// mempool's template mutex, which the test holds. The proposal is already
+/// validating (held on the pool's write lock) and the provide is already sent
+/// behind the constraints, so by the time the loop resumes the verdict is
+/// ready and the provide sits in its frame channel (the pause before the pool
+/// lock is released lets both frames cross loopback and the loop take the
+/// first; a longer path only makes the round pass without the race). The loop picks between
+/// the two at random, and then, if the verdict won, between the provide and
+/// the expired hold's timer. A consume that ignores the deadline validates
+/// the provide in a quarter of the rounds, so 40 fresh sessions miss it with
+/// probability (3/4)^40. The provide is never answered `Success`; each round
+/// ends with the template and one `ProvideMissingTransactions`, and with one
+/// `unknown-request-id` when the verdict was taken first. A provide taken
+/// while the proposal is still validating is ignored
+/// (`provide_for_a_proposal_that_is_validating_is_ignored`).
+#[tokio::test(flavor = "multi_thread")]
+async fn provide_after_the_hold_expired_is_unknown_even_when_it_is_queued_first() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    tc.mempool.accept_tx(&a).expect("mempool accept");
+    let (tp, first) = connect_tp_with(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        MAX_TEMPLATE_INTERVAL,
+        Duration::ZERO,
+    )
+    .await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let raw_b = serialize(&b);
+
+    let mut client = Some(first);
+    for round in 0..40 {
+        let mut c = match client.take() {
+            Some(c) => c,
+            None => connect_without_template(&tp).await,
+        };
+        let pool = WriteHold::take(&tc.mempool).await;
+        let template = TemplateMutexHold::take(&tc.mempool).await;
+        Job::declare(&tc, 1, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        until("the validation to start", || {
+            stats.validations_running() == 1
+        })
+        .await;
+        c.coinbase_output_constraints(0, 0).await.unwrap();
+        provide(&mut c, 1, std::slice::from_ref(&raw_b)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pool.release();
+        until("the validation to finish", || {
+            stats.validations_running() == 0
+        })
+        .await;
+        template.release();
+
+        let mut f = recv_in_time(&mut c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE, "round {round}");
+        let f2 = recv_in_time(&mut c).await;
+        assert_eq!(f2.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH, "round {round}");
+        c.request_transaction_data(u64::MAX).await.unwrap();
+        let (mut asked, mut refused, mut synced) = (0, 0, false);
+        while asked == 0 || !synced {
+            f = recv_in_time(&mut c).await;
+            match f.msg_type {
+                MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR => synced = true,
+                MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS => asked += 1,
+                MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
+                    let e: ProposeTemplateError =
+                        binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                    assert_eq!(
+                        (e.request_id, e.error_code.as_utf8_or_hex().as_str()),
+                        (1, "unknown-request-id"),
+                        "round {round}"
+                    );
+                    refused += 1;
+                }
+                t => panic!("round {round}: a provide past its hold's deadline got {t:#x}"),
+            }
+        }
+        assert!(asked == 1 && refused <= 1, "round {round}");
+    }
+
+    tp.shutdown().await;
+}
+
+/// A `ProvideMissingTransactions.Success` for a request id whose proposal is
+/// already queued or validating is not the answer to anything the TP is
+/// waiting for: it is ignored, not answered `unknown-request-id`, so the
+/// client sees one reply for the id, the verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn provide_for_a_proposal_that_is_validating_is_ignored() {
+    let tc = shared_regtest(1);
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    mock_live_tip(&tc);
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut c).await;
+    until("the validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    provide(&mut c, 1, &[serialize(&known)]).await;
+    synced(&mut c).await;
+    pool.release();
+    expect_job_success(&mut c, &tc, 1, 1, fees).await;
+    synced(&mut c).await;
+
+    tp.shutdown().await;
+}
+
+/// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
+/// order before any mempool lookup or transaction decode: a repeated wtxid
+/// is refused on arrival, even while the tip is stale (IBD) and every other
+/// job is `job-validation-unavailable`; then a coinbase prefix that does
+/// not parse or a coinbase that does not decode, then the proposal check's
+/// own reject string: a declaration from before the tip moved fails its
+/// BIP34 height, an overpaying coinbase its amount. Nothing is retained on
+/// an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_rejects_untrusted_input_in_order() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+
+    // The padded tip is far in the past: the node is in IBD.
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+    Job::declare(&tc, 10, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 10, "duplicate-wtxid").await;
+    mock_live_tip(&tc);
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+
+    Job::declare(&tc, 2, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 2, "duplicate-wtxid").await;
+
+    // More scriptSig bytes than the length the prefix declares.
+    let mut short_sig = Job::declare(&tc, 5, &coinbase, &[&a, &b]);
+    short_sig.coinbase_prefix.extend_from_slice(&[0; 16]);
+    short_sig.send(&mut c).await;
+    expect_job_error(&mut c, 5, "bad-cb-decode").await;
+
+    let mut two_inputs = Job::declare(&tc, 6, &coinbase, &[&a, &b]);
+    two_inputs.coinbase_prefix[4 + 2] = 2;
+    two_inputs.send(&mut c).await;
+    expect_job_error(&mut c, 6, "bad-cb-decode").await;
+
+    let mut bad_cb = Job::declare(&tc, 7, &coinbase, &[&a, &b]);
+    bad_cb.coinbase_suffix.truncate(3);
+    bad_cb.send(&mut c).await;
+    expect_job_error(&mut c, 7, "bad-cb-decode").await;
+
+    let old = job_coinbase(height - 1, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 8, &old, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 8, "bad-cb-height").await;
+
+    let fat = job_coinbase(height, subsidy + 5_001, &[&a, &b]);
+    Job::declare(&tc, 9, &fat, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 9, "bad-cb-amount").await;
+
+    c.request_transaction_data(last + 1).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "a rejected job must not take a template id"
+    );
+
+    tp.shutdown().await;
+}
+
+/// A tip read that fails while a proposal validates is a refusal of that
+/// proposal, not the end of the session: the store's one-shot header-read
+/// failure, armed right before the proposal, is the read `next_header` makes
+/// first (the node is past IBD by then, and nothing else on this pad reads a
+/// header until the reply). The proposal is answered
+/// `job-validation-unavailable`, its request id is free, the templates the
+/// session retained still answer `RequestTransactionData`, and the next
+/// proposal validates.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_tip_read_failure_is_unavailable_and_the_session_survives() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let job = Job::declare(&tc, 1, &coinbase, &[&a, &b]);
+
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    tc.chain.query.fail_next_header_read_cancelled();
+    job.send(&mut c).await;
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 2, 5_000).await;
+
+    tp.shutdown().await;
+}
+
+/// A read that fails inside the proposal check, after the tip was read for
+/// the header, says nothing about the block: the JDS gets the same
+/// `job-validation-unavailable` as for the tip read, not the store's error
+/// text as a reject code, and the session keeps serving. The one-shot header
+/// read failure is armed while the validation waits on the held pool lock,
+/// past `next_header`, so the proposal check's tip header read consumes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_read_failure_in_the_check_is_unavailable_and_the_session_survives() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        ..
+    } = first_template_every(&tc, REQUIRES_JOB_VALIDATION, MAX_TEMPLATE_INTERVAL).await;
+    let stats = tp.stats();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let job = Job::declare(&tc, 1, &coinbase, &[&a, &b]);
+
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut c).await;
+    until("the validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tc.chain.query.fail_next_header_read_cancelled();
+    pool.release();
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+
+    expect_retained(&mut c, last, &[&a, &b]).await;
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    tp.shutdown().await;
+}
+
+/// §4.5: a `SubmitSolution` on a validated job's template id is assembled
+/// from the retained job and the JDS's final coinbase (extranonce in place
+/// of the placeholder) and accepted like one for a pushed template.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_for_a_validated_job_becomes_the_tip() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        version,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let mut coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
+    coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+    let mut leaves = vec![coinbase.compute_txid().to_byte_array()];
+    leaves.extend([&a, &b].iter().map(|tx| tx.compute_txid().to_byte_array()));
+    let mut header = bitcoin::block::Header {
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root_from_txids(&leaves)),
+        ..sent
+    };
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        last + 1,
+        version,
+        header.time,
+        header.nonce,
+        &serialize(&coinbase),
+    )
+    .await
+    .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE,
+        "the new tip's template"
+    );
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+const OVERLAY_BITS: u32 = 0x200f_ffff;
+
+fn overlay_params() -> ChainParams {
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(OVERLAY_BITS).unwrap();
+    params
+}
+
+/// A validated empty custom job: the retained id and the coinbase a JDS
+/// finishes it with (extranonce in place), over which a JDC grinds headers.
+struct Declared {
+    template_id: u64,
+    version: u32,
+    coinbase: Transaction,
+}
+
+impl Declared {
+    async fn validate(tc: &TestChain, c: &mut TpClient, request_id: u32, template_id: u64) -> Self {
+        let height = tc.chain.query.tip_height().unwrap().0 + 1;
+        let mut coinbase =
+            job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+        let job = Job::declare(tc, request_id, &coinbase, &[]);
+        job.send(c).await;
+        expect_job_success(c, tc, request_id, template_id, 0).await;
+        let mut script_sig = bip34_height_script(height);
+        script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
+        coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        Declared {
+            template_id,
+            version: job.version,
+            coinbase,
+        }
+    }
+
+    fn header(&self, prev: bitcoin::BlockHash, time: u32, bits: u32) -> bitcoin::block::Header {
+        bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(self.version as i32),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root_from_txids(&[self
+                .coinbase
+                .compute_txid()
+                .to_byte_array()])),
+            time,
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        }
+    }
+
+    async fn submit(&self, c: &mut TpClient, header: &bitcoin::block::Header) {
+        c.submit_solution(
+            self.template_id,
+            self.version,
+            header.time,
+            header.nonce,
+            &serialize(&self.coinbase),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+fn ground(mut header: bitcoin::block::Header) -> bitcoin::block::Header {
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    header
+}
+
+/// The session answers a `RequestTransactionData` after the solution, so the
+/// solution was handled (and dropped) before the reply.
+async fn expect_solution_handled(c: &mut TpClient, template_id: u64) {
+    c.request_transaction_data(template_id).await.unwrap();
+    let f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+}
+
+/// A JDC hashed the bits its own TP sent before the min-difficulty gap. The
+/// JDS validated the job after the gap, so its own header would carry the
+/// pow-limit bits. The solution is reconstructed with the bits consensus
+/// requires for its time and becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_before_the_gap_uses_the_bits_its_time_needs() {
+    let tc = padded_chain_with("sv2-custom-before-gap", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    assert_eq!(sent.bits.to_consensus(), OVERLAY_BITS);
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    tc.chain
+        .clock
+        .set_mock(i64::from(tc.tip_time + 2 * spacing + 1));
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let header = ground(job.header(sent.prev_blockhash, sent.time, OVERLAY_BITS));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// A JDC stamped its solution past the gap and hashed the pow-limit bits the
+/// consensus rule gives that time. The JDS validated the job before the gap.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_past_the_gap_uses_the_bits_its_time_needs() {
+    let tc = padded_chain_with("sv2-custom-past-gap", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let header = ground(job.header(sent.prev_blockhash, sent.time + 2 * spacing + 1, limit));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// The nonce meets only the easier pow-limit target; the time before the gap
+/// requires the overlay bits. The header is rebuilt with those bits, misses
+/// its target, and never reaches `accept_block`, nor does the header the
+/// retained bits would have given.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_that_misses_the_consensus_target_is_dropped() {
+    let tc = padded_chain_with("sv2-custom-misses", 0, overlay_params());
+    tc.chain.set_prefill_compact(true);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    tc.chain
+        .clock
+        .set_mock(i64::from(tc.tip_time + 2 * spacing + 1));
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let easy = job.header(sent.prev_blockhash, sent.time, limit);
+    let mut hard = job.header(sent.prev_blockhash, sent.time, OVERLAY_BITS);
+    let mut nonce = 0;
+    loop {
+        let (e, h) = (
+            bitcoin::block::Header { nonce, ..easy },
+            bitcoin::block::Header { nonce, ..hard },
+        );
+        if e.validate_pow(e.target()).is_ok() && h.validate_pow(h.target()).is_err() {
+            hard = h;
+            break;
+        }
+        nonce += 1;
+    }
+    let easy = bitcoin::block::Header { nonce, ..easy };
+    job.submit(&mut c, &easy).await;
+    expect_solution_handled(&mut c, job.template_id).await;
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        sent.prev_blockhash
+    );
+    for h in [easy, hard] {
+        assert_eq!(tc.chain.cmpct_prefill_indexes(&h.block_hash()), None);
+    }
+    tc.chain.set_prefill_compact(false);
+    tp.shutdown().await;
+}
+
+/// The job's parent stops being the tip when a block lands on it, but its
+/// grace has not run out. The solution is a heavier sibling of that block:
+/// the bits are the ones the parent's child needs at the solution's time.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_job_solution_on_a_parent_that_is_no_longer_the_tip_becomes_the_tip() {
+    let tc = padded_chain_with("sv2-custom-old-parent", 0, overlay_params());
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let job = Declared::validate(&tc, &mut c, 1, last + 1).await;
+
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let weaker = mine_empty_regtest(sent.prev_blockhash, sent.time + 2 * spacing + 100, height);
+    assert_eq!(
+        tc.chain.accept_block(weaker.clone()).unwrap(),
+        rbitcoin_net::AcceptOutcome::Accepted { height }
+    );
+    expect_template(&mut c, &tc, &[], true).await;
+
+    let header = ground(job.header(sent.prev_blockhash, sent.time + 100, OVERLAY_BITS));
+    job.submit(&mut c, &header).await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    assert_ne!(header.block_hash(), weaker.block_hash());
+
+    tp.shutdown().await;
+}
+
+/// sv2-spec#239 thread 3: a connection that only validates sets
+/// `REQUIRES_JOB_VALIDATION` and sends no `CoinbaseOutputConstraints`. It is
+/// set up once `SetupConnection.Success` is sent, so the setup deadline does
+/// not close it, and it validates a job, serves its transactions, and takes
+/// the solution with no template or `SetNewPrevHash` ever pushed.
+#[tokio::test(flavor = "multi_thread")]
+async fn validation_only_session_validates_and_solves_past_the_setup_timeout() {
+    let tc = shared_regtest(0);
+    mock_live_tip(&tc);
+    let setup_timeout = Duration::from_millis(300);
+    let (tp, mut c) = connect_tp_timed(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        PROVIDE_TIMEOUT,
+        setup_timeout,
+    )
+    .await;
+    tokio::time::sleep(setup_timeout * 3).await;
+
+    let job = Declared::validate(&tc, &mut c, 1, 1).await;
+    expect_retained(&mut c, job.template_id, &[]).await;
+    let prev = tc.chain.tip_header().unwrap().block_hash();
+    let limit = tc.chain.params.pow_limit.to_compact_lossy().to_consensus();
+    let time = tc.chain.tip_header().unwrap().time + 1;
+    let header = ground(job.header(prev, time, limit));
+    job.submit(&mut c, &header).await;
+    until("the solution to become the tip", || {
+        tc.chain.tip_header().unwrap().block_hash() == header.block_hash()
+    })
+    .await;
+
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[], true).await;
+
+    tp.shutdown().await;
+}
+
+/// Moves the store tip one empty block on, as a peer's block would.
+fn advance_tip(tc: &TestChain) {
+    let tip = tc.chain.tip_header().expect("tip");
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let next = mine_empty_regtest(tip.block_hash(), tip.time + 1, h + 1);
+    let loaded = tc
+        .chain
+        .confirm_wire_load_phase(&[(Height(h + 1), next)])
+        .expect("load")
+        .expect("contiguous");
+    let scripted = confirm_scripts_phase(loaded.batch).expect("scripts");
+    tc.chain.confirm_write(scripted.batch).expect("write");
+}
+
+/// Asks for `template_id` until the session answers stale-template-id: the
+/// retirement is a timer in the session, so the moment it fires is not
+/// observable any other way.
+async fn expect_retired(c: &mut TpClient, template_id: u64) {
+    for _ in 0..100 {
+        c.request_transaction_data(template_id).await.unwrap();
+        let mut f = recv_in_time(c).await;
+        if f.msg_type == MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR {
+            let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+            assert_eq!(e.error_code.as_utf8_or_hex(), "stale-template-id");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("job {template_id} was still retained five seconds after its tip was replaced");
+}
+
+/// A session that never sends `CoinbaseOutputConstraints` pushes no
+/// template, but its jobs retire by their own parent like any session's:
+/// after the tip moves and `stale_grace` passes, a job validated on the old
+/// tip answers stale-template-id (its private bodies are released) and a job
+/// validated on the new tip stays. Constraints sent later still get a future
+/// template and the `SetNewPrevHash` of the tip, because retiring jobs did
+/// not announce it.
+#[tokio::test(flavor = "multi_thread")]
+async fn validation_only_session_retires_jobs_on_a_tip_change() {
+    let tc = shared_regtest(0);
+    mock_live_tip(&tc);
+    let grace = Duration::from_millis(200);
+    let (tp, mut c) = connect_tp_graced(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        PROVIDE_TIMEOUT,
+        SETUP_TIMEOUT,
+        grace,
+    )
+    .await;
+
+    let on_a = Declared::validate(&tc, &mut c, 1, 1).await;
+    expect_retained(&mut c, on_a.template_id, &[]).await;
+    advance_tip(&tc);
+    expect_retired(&mut c, on_a.template_id).await;
+
+    let on_b = Declared::validate(&tc, &mut c, 2, 2).await;
+    tokio::time::sleep(grace * 3).await;
+    expect_retained(&mut c, on_b.template_id, &[]).await;
+
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[], true).await;
+    expect_retained(&mut c, on_b.template_id, &[]).await;
+
+    tp.shutdown().await;
+}
+
+/// A stalled mempool lookup must not stop the same socket serving retained data.
+#[test]
+fn propose_template_validation_does_not_delay_other_frames() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(validation_progress());
+}
+
+#[allow(clippy::cognitive_complexity)] // One socket journey covers progress and tip races.
+async fn validation_progress() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let outs = 400u64;
+    let each = (50_0000_0000 - 10_000) / outs;
+    let mut fanout = spend(tc.coinbases[0], 10_000, cheap.clone());
+    fanout.output = vec![
+        TxOut {
+            value: Amount::from_sat(each),
+            script_pubkey: cheap.clone(),
+        };
+        outs as usize
+    ];
+    let tip = tc.chain.tip_header().expect("tip");
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let block = mine_regtest_paying(
+        tip.block_hash(),
+        tip.time + 1,
+        h + 1,
+        cheap.clone(),
+        vec![fanout.clone()],
+    );
+    tc.chain.accept_block(block).expect("accept fan-out");
+    let fanout_txid = fanout.compute_txid();
+    let spends: Vec<Transaction> = (0..outs as u32)
+        .map(|vout| Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout_txid,
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(each - 1_000),
+                script_pubkey: cheap.clone(),
+            }],
+        })
+        .collect();
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let known = spend(tc.coinbases[1], 3_000, cheap);
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let declared: Vec<&Transaction> = std::iter::once(&known).chain(spends.iter()).collect();
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let fees = outs * 1_000 + 3_000;
+    let mut job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &declared),
+        &declared,
+    );
+    // The fan-out spends are supplied rather than pooled.
+    let supplied: Vec<Vec<u8>> = spends.iter().map(serialize).collect();
+    let missing: Vec<u16> = (1..=outs as u16).collect();
+
+    job.send(&mut c).await;
+    expect_missing(&mut c, 1, &missing).await;
+    provide(&mut c, 1, &supplied).await;
+    expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
+
+    job.request_id = 2;
+    job.send(&mut c).await;
+    expect_missing(&mut c, 2, &missing).await;
+    let hold = WriteHold::take(&tc.mempool).await;
+    provide(&mut c, 2, &supplied).await;
+    job.send(&mut c).await;
+    c.request_transaction_data(template_id).await.unwrap();
+    expect_job_error(&mut c, 2, "duplicate-request-id").await;
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+        "the retained data is available while validation waits for the mempool"
+    );
+    hold.release();
+    expect_job_success(&mut c, &tc, 2, template_id + 2, fees).await;
+    assert_eq!(tc.mempool.remove_for_block(&[known.compute_txid()]), 1);
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    job.request_id = 3;
+    job.send(&mut c).await;
+    let all: Vec<u16> = (0..=outs as u16).collect();
+    expect_missing(&mut c, 3, &all).await;
+    let mut all_supplied = vec![serialize(&known)];
+    all_supplied.extend(supplied);
+    provide(&mut c, 3, &all_supplied).await;
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let mut pushed = None;
+    let mut verdict = None;
+    for _ in 0..2 {
+        let mut f = recv_in_time(&mut c).await;
+        match f.msg_type {
+            MESSAGE_TYPE_NEW_TEMPLATE => {
+                assert_eq!(
+                    tc.chain.tip_header().unwrap().block_hash(),
+                    header.block_hash(),
+                    "the solution became the tip before its template was pushed"
+                );
+                pushed = Some(check_template(&mut c, &tc, f, &[], true).await);
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS => {
+                let ok: ProposeTemplateSuccess =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!((ok.request_id, ok.fees), (3, fees));
+                assert_eq!(
+                    ok.prev_hash.as_ref(),
+                    header.prev_blockhash.as_byte_array(),
+                    "validated on the tip it started on"
+                );
+                verdict = Some(Some(ok.template_id));
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
+                let e: ProposeTemplateError =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!(e.request_id, 3);
+                assert!(
+                    ["inconclusive-not-best-prevblk", "bad-cb-height"]
+                        .contains(&e.error_code.as_utf8_or_hex().as_str()),
+                    "a tip change mid-validation fails the proposal check: {}",
+                    e.error_code.as_utf8_or_hex()
+                );
+                verdict = Some(None);
+            }
+            t => panic!("unexpected frame {t:#x}"),
+        }
+    }
+    let pushed = pushed.expect("the solved tip's template");
+    let mut ids = vec![pushed];
+    ids.extend(verdict.expect("the proposal's reply"));
+    ids.sort_unstable();
+    let want: Vec<u64> = (template_id + 3..template_id + 3 + ids.len() as u64).collect();
+    assert_eq!(ids, want, "ids follow the order the loop replied in");
+
+    tp.shutdown().await;
+}
+
+/// The mempool write lock held by a test thread until released or dropped.
+struct WriteHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl WriteHold {
+    async fn take(pool: &Arc<rbitcoin_net::MempoolHub>) -> Self {
+        let pool = Arc::clone(pool);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _guard = pool.lock_write();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.await.unwrap();
+        WriteHold { release, thread }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+/// The mempool's template mutex held by a test thread until released: a
+/// template build waits on it, a proposal validation does not.
+struct TemplateMutexHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl TemplateMutexHold {
+    async fn take(pool: &Arc<rbitcoin_net::MempoolHub>) -> Self {
+        let pool = Arc::clone(pool);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _guard = pool.template_hold();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.await.unwrap();
+        TemplateMutexHold { release, thread }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+/// The largest `validations_running` a test thread saw while it sampled.
+/// The gauge holds for as long as a validation is stuck, so a validation
+/// that started when it should have waited stays visible to the sampler.
+struct PeakRunning {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    peak: Arc<std::sync::atomic::AtomicU64>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl PeakRunning {
+    fn sample(stats: Arc<rbitcoin_sv2::Sv2TpStats>) -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let thread = std::thread::spawn({
+            let (stop, peak) = (Arc::clone(&stop), Arc::clone(&peak));
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak.fetch_max(stats.validations_running(), Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+            }
+        });
+        PeakRunning { stop, peak, thread }
+    }
+
+    fn finish(self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.join().unwrap();
+        self.peak.load(Ordering::Relaxed)
+    }
+}
+
+fn blocking_pool_runtime(blocking_threads: usize) -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(blocking_threads)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A job-validation session that has its first template, and one pooled
+/// spend a proposal can declare. Nothing is admitted after the template, and
+/// the fee check is a day away, so no template build waits on a held lock.
+struct Admission {
+    tc: TestChain,
+    tp: rbitcoin_sv2::Sv2TpHandle,
+    c: TpClient,
+    template_id: u64,
+    known: Transaction,
+    fees: u64,
+    job: Job,
+}
+
+async fn admission_pad(tc: TestChain) -> Admission {
+    let FirstTemplate {
+        tp, c, template_id, ..
+    } = first_template_every(&tc, REQUIRES_JOB_VALIDATION, MAX_TEMPLATE_INTERVAL).await;
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        0,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+    Admission {
+        tc,
+        tp,
+        c,
+        template_id,
+        known,
+        fees,
+        job,
+    }
+}
+
+impl Admission {
+    /// `known` plus `extra` wtxids no pool holds: valid when `extra` is 0,
+    /// otherwise asked for.
+    fn job_with(&self, request_id: u32, extra: usize) -> Job {
+        let mut j = Job {
+            request_id,
+            version: self.job.version,
+            coinbase_prefix: self.job.coinbase_prefix.clone(),
+            coinbase_suffix: self.job.coinbase_suffix.clone(),
+            wtxids: self.job.wtxids.clone(),
+        };
+        j.wtxids.extend((0..extra).map(|i| {
+            let mut w = [0xee; 32];
+            w[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            w
+        }));
+        j
+    }
+
+    /// Every id in `ids` is answered `Success`, in any order.
+    async fn expect_successes(&mut self, ids: &[u32], first_template_id: u64) {
+        let mut got = Vec::new();
+        let mut templates = Vec::new();
+        for _ in ids {
+            let mut f = recv_in_time(&mut self.c).await;
+            assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS);
+            let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+            assert_eq!(ok.fees, self.fees);
+            got.push(ok.request_id);
+            templates.push(ok.template_id);
+        }
+        got.sort_unstable();
+        templates.sort_unstable();
+        assert_eq!(got, ids);
+        let want: Vec<u64> = (first_template_id..first_template_id + ids.len() as u64).collect();
+        assert_eq!(templates, want);
+    }
+
+    /// The retained spend is still served while the loop answers refusals.
+    async fn expect_template_data_served(&mut self) {
+        self.c
+            .request_transaction_data(self.template_id)
+            .await
+            .unwrap();
+        let f = recv_in_time(&mut self.c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    }
+}
+
+/// Work a session has accepted and not answered is bounded by count: with
+/// the mempool write lock held so nothing finishes, the proposal past
+/// `MAX_ADMITTED_PROPOSALS` and a provide past it are answered
+/// `job-validation-unavailable` while the same socket keeps serving, the
+/// refused provide frees its request id, and when the lock is released every
+/// accepted proposal gets its verdict and a fresh one succeeds.
+#[test]
+fn propose_template_admission_is_bounded_by_count() {
+    blocking_pool_runtime(4).block_on(admission_count_bound());
+}
+
+async fn admission_count_bound() {
+    let mut a = admission_pad(shared_regtest(1)).await;
+    let held = 1;
+    let ghost = a.job_with(held, 1);
+    ghost.send(&mut a.c).await;
+    expect_missing(&mut a.c, held, &[1]).await;
+
+    let hold = WriteHold::take(&a.tc.mempool).await;
+    let ids: Vec<u32> = (100..100 + MAX_ADMITTED_PROPOSALS as u32).collect();
+    for &id in &ids {
+        a.job_with(id, 0).send(&mut a.c).await;
+    }
+    let over = 100 + MAX_ADMITTED_PROPOSALS as u32;
+    a.job_with(over, 0).send(&mut a.c).await;
+    expect_job_error(&mut a.c, over, "job-validation-unavailable").await;
+    a.job_with(ids[0], 0).send(&mut a.c).await;
+    expect_job_error(&mut a.c, ids[0], "duplicate-request-id").await;
+    a.expect_template_data_served().await;
+
+    provide(&mut a.c, held, &[vec![1, 2, 3]]).await;
+    expect_job_error(&mut a.c, held, "job-validation-unavailable").await;
+    provide(&mut a.c, held, &[vec![1, 2, 3]]).await;
+    expect_job_error(&mut a.c, held, "unknown-request-id").await;
+    a.expect_template_data_served().await;
+
+    hold.release();
+    a.expect_successes(&ids, a.template_id + 1).await;
+
+    let next = a.template_id + 1 + ids.len() as u64;
+    for id in [held, over] {
+        a.job_with(id, 0).send(&mut a.c).await;
+        a.expect_successes(&[id], next + u64::from(id != held))
+            .await;
+    }
+    expect_retained(&mut a.c, next, &[&a.known]).await;
+    a.tp.shutdown().await;
+}
+
+/// The same bound in bytes: wtxid-heavy proposals fill `MAX_ADMITTED_BYTES`
+/// long before the count, the next one is refused, and so is a provide whose
+/// supplied bytes do not fit the room left. Work already accepted still
+/// completes (each asks for its unknown wtxids) and a fresh proposal fits.
+#[test]
+fn propose_template_admission_is_bounded_by_bytes() {
+    blocking_pool_runtime(4).block_on(admission_byte_bound());
+}
+
+async fn admission_byte_bound() {
+    let mut a = admission_pad(shared_regtest(1)).await;
+    let extra = 60_000;
+    let big = a.job_with(0, extra);
+    let cost = big.wtxids.len() * 32 + big.coinbase_prefix.len() + big.coinbase_suffix.len();
+    let fits = MAX_ADMITTED_BYTES / cost;
+    assert!(
+        (2..MAX_ADMITTED_PROPOSALS).contains(&fits),
+        "the bytes bind before the count"
+    );
+    let blob = vec![0xab; MAX_ADMITTED_BYTES - fits * cost + 1];
+    let held = 2;
+    let mut ghost = a.job_with(held, 0);
+    ghost
+        .wtxids
+        .push(sha256d::Hash::hash(&blob).to_byte_array());
+    ghost.send(&mut a.c).await;
+    expect_missing(&mut a.c, held, &[1]).await;
+
+    let hold = WriteHold::take(&a.tc.mempool).await;
+    let ids: Vec<u32> = (200..200 + fits as u32).collect();
+    for &id in &ids {
+        a.job_with(id, extra).send(&mut a.c).await;
+    }
+    let over = 200 + fits as u32;
+    a.job_with(over, extra).send(&mut a.c).await;
+    expect_job_error(&mut a.c, over, "job-validation-unavailable").await;
+    a.expect_template_data_served().await;
+    provide(&mut a.c, held, &[blob]).await;
+    expect_job_error(&mut a.c, held, "job-validation-unavailable").await;
+    a.expect_template_data_served().await;
+
+    hold.release();
+    let unknown: Vec<u16> = (1..=extra as u16).collect();
+    let mut asked = Vec::new();
+    for _ in &ids {
+        let mut f = recv_in_time(&mut a.c).await;
+        assert_eq!(f.msg_type, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS);
+        let m: ProvideMissingTransactions = binary_sv2::from_bytes(&mut f.payload).unwrap();
+        assert_eq!(m.unknown_tx_position_list.into_inner(), unknown);
+        asked.push(m.request_id);
+    }
+    asked.sort_unstable();
+    assert_eq!(asked, ids);
+
+    for id in [held, over] {
+        a.job_with(id, 0).send(&mut a.c).await;
+        a.expect_successes(&[id], a.template_id + 1 + u64::from(id != held))
+            .await;
+    }
+    a.tp.shutdown().await;
+}
+
+/// Proposal validations are bounded across the node, not per session, and a
+/// started validation keeps its permit when its session goes away. On a
+/// runtime with four blocking threads and the one permit the node computes
+/// for that pool, the mempool write lock is held so a validation blocks
+/// resolving a pooled body: of three sessions that each propose, one runs;
+/// the blocking pool still serves other work; the running validation's client
+/// drops and a new session's proposal still waits; and on release every live
+/// session gets its verdict and nothing is running.
+#[test]
+fn propose_template_validations_are_bounded_across_sessions() {
+    blocking_pool_runtime(4).block_on(node_wide_validation_bound());
+}
+
+/// Run until `cond` holds. The deadline only keeps a deadlock from hanging
+/// the suite; no assertion depends on it.
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("deadlock waiting for {what}"));
+}
+
+/// The session has handled every frame sent before this one.
+async fn synced(c: &mut TpClient) {
+    c.request_transaction_data(u64::MAX).await.unwrap();
+    let f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+}
+
+/// A job-validation session that never sends `CoinbaseOutputConstraints`, so
+/// it builds no template and only its validations use the blocking pool.
+async fn connect_without_template(tp: &rbitcoin_sv2::Sv2TpHandle) -> TpClient {
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, REQUIRES_JOB_VALIDATION)
+        .await
+        .unwrap();
+    c.recv().await.expect("setup reply");
+    c
+}
+
+async fn expect_success_for_request_1(c: &mut TpClient, fees: u64) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS);
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!((ok.request_id, ok.fees), (1, fees));
+}
+
+/// A listener with the one validation permit the node computes for a
+/// four-thread blocking pool, on a live tip.
+async fn one_permit_tp(tc: &TestChain) -> rbitcoin_sv2::Sv2TpHandle {
+    mock_live_tip(tc);
+    run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
+        write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: MAX_TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 1,
+    })
+    .await
+    .expect("listen")
+}
+
+/// A job declaring one pooled spend, and the fees it pays.
+fn pooled_job(tc: &TestChain) -> (Job, u64) {
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+    (job, fees)
+}
+
+async fn synced_all(clients: [&mut TpClient; 3]) {
+    for client in clients {
+        synced(client).await;
+    }
+}
+
+async fn expect_every_success_for_request_1(clients: [&mut TpClient; 3], fees: u64) {
+    for client in clients {
+        expect_success_for_request_1(client, fees).await;
+    }
+}
+
+#[allow(clippy::cognitive_complexity)] // One socket journey covers the node-wide bound.
+async fn node_wide_validation_bound() {
+    let tc = shared_regtest(1);
+    let tp = one_permit_tp(&tc).await;
+    let stats = tp.stats();
+    let (job, fees) = pooled_job(&tc);
+    let mut running = connect_without_template(&tp).await;
+    let mut b = connect_without_template(&tp).await;
+    let mut c = connect_without_template(&tp).await;
+    let peak = PeakRunning::sample(Arc::clone(&stats));
+    let hold = WriteHold::take(&tc.mempool).await;
+
+    job.send(&mut running).await;
+    synced(&mut running).await;
+    until("the first validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    job.send(&mut b).await;
+    job.send(&mut c).await;
+    synced(&mut b).await;
+    synced(&mut c).await;
+    tokio::task::spawn_blocking(|| ()).await.unwrap();
+    assert_eq!(stats.validations_running(), 1, "one validation node-wide");
+
+    drop(running);
+    until("the running validation's session to end", || {
+        tp.sessions.lock().unwrap()[0].is_finished()
+    })
+    .await;
+    let mut d = connect_without_template(&tp).await;
+    job.send(&mut d).await;
+    synced(&mut d).await;
+    tokio::task::spawn_blocking(|| ()).await.unwrap();
+    assert_eq!(
+        stats.validations_running(),
+        1,
+        "the permit stays with the started work"
+    );
+    synced_all([&mut b, &mut c, &mut d]).await;
+
+    hold.release();
+    expect_every_success_for_request_1([&mut b, &mut c, &mut d], fees).await;
+    assert_eq!(stats.validations_running(), 0);
+    assert_eq!(peak.finish(), 1, "never more than one validation node-wide");
+    tp.shutdown().await;
+}
+
+/// A permit is granted to work, not to a session's loop: session X queues a
+/// proposal behind a running validation, then its loop is parked in a
+/// template build (the template mutex is held), the same state a slow reader
+/// leaves it in inside a send. When the running validation ends and frees the
+/// permit, session Y's proposal gets its verdict while X's loop is still
+/// parked, and X's own verdict follows once it is free.
+#[test]
+fn propose_template_permit_does_not_wait_for_a_parked_session() {
+    blocking_pool_runtime(4).block_on(parked_session_does_not_hold_the_permit());
+}
+
+async fn parked_session_does_not_hold_the_permit() {
+    let tc = shared_regtest(1);
+    let tp = one_permit_tp(&tc).await;
+    let stats = tp.stats();
+    let (job, fees) = pooled_job(&tc);
+    let mut running = connect_without_template(&tp).await;
+    let mut x = connect_without_template(&tp).await;
+    let mut y = connect_without_template(&tp).await;
+
+    let peak = PeakRunning::sample(Arc::clone(&stats));
+    let pool = WriteHold::take(&tc.mempool).await;
+    job.send(&mut running).await;
+    until("the first validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    job.send(&mut x).await;
+    synced(&mut x).await;
+    let template = TemplateMutexHold::take(&tc.mempool).await;
+    x.coinbase_output_constraints(0, 0).await.unwrap();
+    x.request_transaction_data(u64::MAX).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    job.send(&mut y).await;
+    synced(&mut y).await;
+
+    pool.release();
+    expect_success_for_request_1(&mut y, fees).await;
+    expect_success_for_request_1(&mut running, fees).await;
+
+    template.release();
+    let mut got = Vec::new();
+    while got.len() < 4 {
+        got.push(recv_in_time(&mut x).await.msg_type);
+    }
+    got.sort_unstable();
+    let mut want = vec![
+        MESSAGE_TYPE_NEW_TEMPLATE,
+        MESSAGE_TYPE_SET_NEW_PREV_HASH,
+        MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+        MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want, "X is served once its loop is free");
+    until("every validation to end", || {
+        stats.validations_running() == 0
+    })
+    .await;
+    assert_eq!(peak.finish(), 1, "one permit, one validation at a time");
     tp.shutdown().await;
 }
