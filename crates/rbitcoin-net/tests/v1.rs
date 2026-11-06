@@ -96,16 +96,23 @@ async fn closed(s: &mut TcpStream) {
     }
 }
 
-/// A v1 handshake. The `version` frame arrives in three writes with a pause
-/// longer than the handshake read's 50 ms poll between them.
 async fn v1_handshake(v1_bind: SocketAddr) -> TcpStream {
+    v1_handshake_split(v1_bind, &[]).await
+}
+
+/// A v1 handshake whose `version` frame is cut at `cuts`, with a pause longer
+/// than the handshake read's 50 ms poll after each piece but the last.
+async fn v1_handshake_split(v1_bind: SocketAddr, cuts: &[usize]) -> TcpStream {
     let mut s = TcpStream::connect(v1_bind).await.unwrap();
     let ours = s.local_addr().unwrap();
     let version = v1_frame(Magic::REGTEST, v1_version(v1_bind, ours));
-    for part in [&version[..20], &version[20..34], &version[34..]] {
-        s.write_all(part).await.unwrap();
+    let mut from = 0;
+    for &cut in cuts {
+        s.write_all(&version[from..cut]).await.unwrap();
         tokio::time::sleep(Duration::from_millis(120)).await;
+        from = cut;
     }
+    s.write_all(&version[from..]).await.unwrap();
     let (theirs, _) = v1_until(&mut s, |m| matches!(m, NetworkMessage::Version(_))).await;
     let NetworkMessage::Version(theirs) = theirs else {
         unreachable!()
@@ -162,7 +169,8 @@ async fn p2p_v1_wallet_sync_listener() {
             .unwrap();
         closed_silently(&mut primary).await;
 
-        let mut wallet = v1_handshake(v1_bind).await;
+        // Cut inside the header and inside the body.
+        let mut wallet = v1_handshake_split(v1_bind, &[20, 34]).await;
         let (pong, _) = {
             wallet
                 .write_all(&v1_frame(Magic::REGTEST, NetworkMessage::Ping(7)))
@@ -180,6 +188,7 @@ async fn p2p_v1_wallet_sync_listener() {
             .expect("the wallet is a live peer");
         assert!(row.inbound);
         assert_eq!(row.addrbind, v1_bind);
+        assert_eq!(row.transport, rbitcoin_net::v1::Transport::V1);
         assert!(
             row.permissions.iter().any(|p| p == "v1")
                 && row.permissions.iter().any(|p| p == "noban"),
@@ -273,6 +282,37 @@ async fn p2p_v1_wallet_sync_listener() {
         let burst: Vec<u8> = empty.iter().copied().cycle().take(24 * 9_000).collect();
         let _ = flood.write_all(&burst).await;
         closed(&mut flood).await;
+
+        // `--listen=0` starts the node outbound-only, and the v1 bind is its
+        // only listener. A relaying wallet there must outlive the handshake.
+        let quiet_dir = rbitcoin_query::testutil::TempDir::labeled("v1-no-listen").unwrap();
+        let quiet_q = Query::open_or_create_tiny(quiet_dir.path().join("store")).unwrap();
+        let mut quiet = rbitcoin_net::P2PNode::start_outbound_only(
+            quiet_q,
+            ChainParams::regtest(),
+            Milestone::NONE,
+            "/rbitcoin:test/".into(),
+            rbitcoin_net::DEFAULT_MAX_INBOUND,
+            rbitcoin_net::socks::Dialer::Direct,
+            rbitcoin_net::REDIAL_INTERVAL_TEST,
+        )
+        .await
+        .unwrap();
+        let only = quiet
+            .add_listen("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut perms = NetPermTable::default();
+        perms
+            .whitebind
+            .push(parse_whitebind(&format!("v1,noban@{only}")).unwrap());
+        quiet.peers.set_net_perms(perms);
+        let mut kept = v1_handshake(only).await;
+        kept.write_all(&v1_frame(Magic::REGTEST, NetworkMessage::Ping(14)))
+            .await
+            .unwrap();
+        let (pong, _) = v1_until(&mut kept, |m| matches!(m, NetworkMessage::Pong(_))).await;
+        assert!(matches!(pong, NetworkMessage::Pong(14)), "{pong:?}");
     };
     tokio::time::timeout(Duration::from_secs(30), fut)
         .await

@@ -122,7 +122,8 @@ impl P2PNode {
         .await
     }
 
-    /// Outbound dials only: no P2P `TcpListener`. `local_addr` is `127.0.0.1:0`.
+    /// No primary P2P `TcpListener`. `local_addr` is `127.0.0.1:0`. A socket
+    /// from [`Self::add_listen`] still takes up to `max_inbound` peers.
     pub async fn start_outbound_only(
         query: Query,
         params: ChainParams,
@@ -176,10 +177,12 @@ impl P2PNode {
         let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<DialRequest>();
         peers.set_dialer(dial_tx);
 
+        // Without a primary listener (`--listen=0`), a v1 wallet-sync bind
+        // added by `add_listen` is the only listener and keeps this cap.
         let max_inbound = if listener.is_some() {
             max_inbound.max(1)
         } else {
-            0
+            max_inbound
         };
         let inbound_sem = inbound_semaphore(max_inbound.max(1));
         let session_tasks = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
