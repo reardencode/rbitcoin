@@ -1087,6 +1087,96 @@ async fn termination_signals_run_the_shutdown_flush() {
     }
 }
 
+/// SIGTERM while the start waits on a Tor control port that never answers
+/// ends the process cleanly at once, not after the 20 s control timeout.
+///
+/// The node is a child process, as in the test above. This process owns the
+/// silent control port and signals once the child has sent its first command.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_ends_a_start_waiting_on_tor_control() {
+    if let Ok(dir) = std::env::var("RBTC_TEST_TOR_WAIT_DIR") {
+        let mut cfg = tiny_regtest(&dir);
+        cfg.listen.use_seeds = false;
+        cfg.apply_kv("listen", "127.0.0.1:0")
+            .expect("ephemeral listen");
+        cfg.tor.control = Some(
+            std::env::var("RBTC_TEST_TOR_WAIT_ADDR")
+                .expect("control addr")
+                .parse()
+                .expect("control addr"),
+        );
+        cfg.tor.password = Some("pw".into());
+        run_p2p(cfg).await.expect("SIGTERM during the tor step");
+        return;
+    }
+
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent control port");
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-torwait-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+        .env("RBTC_TEST_TOR_WAIT_DIR", &dir)
+        .env(
+            "RBTC_TEST_TOR_WAIT_ADDR",
+            silent.local_addr().unwrap().to_string(),
+        )
+        .arg("--exact")
+        .arg("run::sigterm_ends_a_start_waiting_on_tor_control")
+        .arg("--test-threads=1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn node");
+    let waiting = std::thread::spawn(move || {
+        let (s, _) = silent.accept().expect("the child dials the control port");
+        let mut first = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut first)
+            .expect("first control command");
+        (s, first)
+    });
+    let start = Instant::now();
+    while !waiting.is_finished() {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!("child exited before it reached the control port: {status}");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(40),
+            "child never reached the control port"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (_held, first) = waiting.join().unwrap();
+    assert!(first.starts_with("AUTHENTICATE "), "{first:?}");
+    // The handler is a spawned task; the child is parked on the reply now.
+    std::thread::sleep(Duration::from_millis(50));
+    // SAFETY: `child` is the node process this test spawned, and it installs
+    // a SIGTERM handler before it dials the control port.
+    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert_eq!(rc, 0, "SIGTERM kill");
+    let signalled = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if signalled.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("SIGTERM did not end a start waiting on the control port");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        status.success(),
+        "SIGTERM must exit cleanly, status {status}"
+    );
+}
+
 /// The `IbdConfig` literal in `run_ibd_or_skip` is not built by the config
 /// journey, so this drives `run_p2p`. A refused connect must flush a fail
 /// mark into the saved book, and the SOCKS proxy must be the socket dialed.

@@ -628,16 +628,19 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
 
     let shutdown = Shutdown::new();
     spawn_signal_handler(shutdown.clone());
-    let mut tor_ctl = crate::tor_control::TorControl::connect_if_configured(
-        config.tor.control,
-        config.tor.cookie.as_deref(),
-        config.tor.password.as_deref(),
-        config
-            .tor
-            .io_timeout
-            .unwrap_or(crate::tor_control::CONTROL_TIMEOUT),
-    )
-    .await?;
+    let mut tor_ctl = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => return shutdown.result(),
+        ctl = crate::tor_control::TorControl::connect_if_configured(
+            config.tor.control,
+            config.tor.cookie.as_deref(),
+            config.tor.password.as_deref(),
+            config
+                .tor
+                .io_timeout
+                .unwrap_or(crate::tor_control::CONTROL_TIMEOUT),
+        ) => ctl?,
+    };
     if tor_ctl.is_some() {
         info!(
             "tor control authenticated on {}",
