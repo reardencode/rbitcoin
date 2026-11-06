@@ -1,0 +1,25 @@
+id: listen-bind-direct
+language: rust
+severity: error
+message: Bind server listeners with rbitcoin_net::listen::bind_tcp, not TcpListener::bind.
+note: bind_tcp sets SO_EXCLUSIVEADDRUSE on Windows so another process cannot take the port (Core #36169, #36305).
+rule:
+  all:
+    - any:
+        - pattern: TcpListener::bind($$$ARGS)
+        - pattern: net::TcpListener::bind($$$ARGS)
+        - pattern: tokio::net::TcpListener::bind($$$ARGS)
+        - pattern: std::net::TcpListener::bind($$$ARGS)
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          has:
+            field: name
+            regex: "tests$"
+ignores:
+  - "**/*tests*.rs"
+  - "**/tests/**"
+  - "**/benches/**"
+  - "crates/rbitcoin-bench/**"
+  - "crates/rbitcoin-test/**"

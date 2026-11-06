@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract: ast-grep scan is clean on lint/ast-grep/fixtures/good and
 # reports error-severity hits on fixtures/bad (detached tokio::spawn,
-# mem::forget/Box::leak, dropped thread::spawn, dropped crate-root pub).
+# mem::forget/Box::leak, dropped thread::spawn, dropped crate-root pub,
+# direct TcpListener::bind).
 # Does not scan crates/.
 # Missing binary: fail in CI, skip locally.
 set -euo pipefail
@@ -62,6 +63,10 @@ assert_ok "bad fixtures include pub use AddressHead" \
   python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("AddressHead" in e["text"] for e in d)' <<<"$bad_json"
 assert_ok "bad fixtures include pub use encode_packed_tx" \
   python3 -c 'import json,sys; d=json.load(sys.stdin); assert any(e["text"].strip()=="pub use tx_table::encode_packed_tx;" for e in d)' <<<"$bad_json"
+assert_ok "bad fixtures report listen-bind-direct" \
+  grep -q 'listen-bind-direct' <<<"$bad_json"
+assert_ok "bad fixtures include short, tokio, and std TcpListener::bind" \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert {e["text"] for e in d if e["ruleId"]=="listen-bind-direct"} == {"TcpListener::bind(addr)", "tokio::net::TcpListener::bind(addr)", "std::net::TcpListener::bind(addr)"}' <<<"$bad_json"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "ast-grep.test.sh: $PASS passed, $FAIL failed"

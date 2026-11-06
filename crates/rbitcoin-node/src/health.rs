@@ -21,7 +21,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
-use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinHandle};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -230,7 +229,7 @@ pub async fn run_health(
     status: Arc<NodeStatus>,
     metrics: bool,
 ) -> std::io::Result<HealthHandle> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = rbitcoin_net::listen::bind_tcp(addr)?;
     let local_addr = listener.local_addr()?;
     if !local_addr.ip().is_loopback() {
         warn!(
