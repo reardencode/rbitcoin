@@ -39,7 +39,7 @@ never calls this.
 → `--datadir DIR/regtest` (`bitcoind.pid` under `DIR/regtest`),
 `-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` / `--listen` on
 127.0.0.1, `--no-seeds`. It adds `--sh-index` only when the datadir parent
-is `{script}_{n}` for a run test that reads address or scripthash history
+is `{script}_{n}` for a test that reads address or scripthash history
 (MiniWallet `scantxoutset`, or the wallet shim's send and balance calls).
 Other nodes, including `p2p_compactblocks_hb.py`, start without that index,
 so a fresh regtest does not pack an empty scripthash index before it can
@@ -185,6 +185,8 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_decodescript.py` | `rpc-dialect` | `segwit.desc` infers no miniscript beyond `multi` (`decodescript_miniscript`) |
 | `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset (`isvalid` only) |
 | `rpc_invalid_address_message.py` | `rpc-dialect` | same; no `error` / `error_locations` |
+| `mempool_truc.py` | `rpc-dialect` | TRUC and sibling eviction shipped. Core checks TRUC across the package first (`package_msg`, `package-error`); reject text lacks Core's details; a reorg re-add still checks TRUC |
+| `mempool_ephemeral_dust.py` | `rpc-dialect` | ephemeral dust shipped. Multi-tx `testmempoolaccept` admits members one at a time, not as a package; reject text lacks Core's details |
 | `mempool_persist.py` | `rpc-dialect` | `savemempool` / `importmempool` speak Core `mempool.dat`, but a restart reloads our `{datadir}/mempool/`, not `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).
@@ -195,6 +197,10 @@ Shim-only scripts that used to be `run` stay skip: `feature_help.py`
 still exists so `rpc_getblockstats.py`'s rename-file needle can run; the rest
 of that script is `submitblock` + archive `getblockstats`. `feature_port.py`
 is `run`: `-bind`/`-port` become `--listen` on those sockets.
+`p2p_opportunistic_1p1c.py` is skip (`core-net-policy`): a peer's low-fee
+parent and its child are admitted together only when the child spends the
+parent's 0-value anchor (#1407). Core does this for any low-fee parent, and
+ignores a re-announced parent that failed only on fee.
 `p2p_eviction.py` is skip (`core-net-policy`): the 21-peer set in that script is fully protected, including a share of the longest-connected peers, so the extra inbound is rejected. Core accepts it and evicts one slow peer.
 `feature_filelock.py` is skip (`harness`): the node exclusive-locks `{datadir}`
 (unit + shim InitError tests). Core `-wallet` SQLite flock and `-blocksdir`

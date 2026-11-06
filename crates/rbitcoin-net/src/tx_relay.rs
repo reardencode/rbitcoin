@@ -2601,7 +2601,7 @@ impl MempoolHub {
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
         let utxo = self.utxo_provider();
-        self.accept_with_utxo(tx, &utxo, TxOrigin::Relay(None), false, &[], false)
+        self.accept_with_utxo(tx, &utxo, TxOrigin::Relay(None), true, &[], false)
     }
 
     /// Accept from `origin`. A relayed tx that parks records its peer as an
@@ -3917,14 +3917,16 @@ impl MempoolHub {
 
     /// One member of a multi-tx `testmempoolaccept`, which removes it again.
     /// Core allows no replacement there, so no sibling eviction either: an
-    /// evicted sibling would not come back.
+    /// evicted sibling would not come back. Nor 1p1c or parking (the
+    /// `defer_trim` path): a parent admitted with its child would stay in the
+    /// pool after the caller removes the members it got back.
     pub async fn accept_test_package_member_async(
         self: &Arc<Self>,
         tx: Transaction,
     ) -> Result<AcceptResult, AcceptError> {
         let hub = Arc::clone(self);
         crate::reactor::spawn_with_store_budget(async move {
-            hub.accept_with_utxo_async(tx, TxOrigin::Relay(None), false, Vec::new(), false)
+            hub.accept_with_utxo_async(tx, TxOrigin::Relay(None), true, Vec::new(), false)
                 .await
         })
         .await

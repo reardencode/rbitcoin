@@ -33,8 +33,9 @@ from rpc_wallet import register_wallet
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
-# Run tests that read address or scripthash history (MiniWallet
-# scantxoutset, or the wallet shim's send / balance / listunspent).
+# Tests that read address or scripthash history (MiniWallet scantxoutset,
+# or the wallet shim's send / balance / listunspent). A skip test belongs
+# here too when it does, so a local run reaches its real failure.
 # Core's runner names the datadir parent `{script}_{n}`. Every other
 # node skips the empty collect and can leave IBD without waiting on it.
 _SH_INDEX_TESTS = frozenset(
@@ -46,6 +47,7 @@ _SH_INDEX_TESTS = frozenset(
         "feature_framework_miniwallet.py",
         "mempool_accept_wtxid.py",
         "mempool_cluster.py",
+        "mempool_ephemeral_dust.py",
         "mempool_expiry.py",
         "mempool_limit.py",
         "mempool_package_limits.py",
@@ -53,6 +55,7 @@ _SH_INDEX_TESTS = frozenset(
         "mempool_reorg.py",
         "mempool_resurrect.py",
         "mempool_spend_coinbase.py",
+        "mempool_truc.py",
         "mempool_unbroadcast.py",
         "mining_getblocktemplate_longpoll.py",
         "mining_prioritisetransaction.py",
@@ -62,6 +65,7 @@ _SH_INDEX_TESTS = frozenset(
         "p2p_feefilter.py",
         "p2p_leak_tx.py",
         "p2p_mutated_blocks.py",
+        "p2p_opportunistic_1p1c.py",
         "p2p_orphan_handling.py",
         "p2p_permissions.py",
         "p2p_tx_privacy.py",
@@ -230,6 +234,10 @@ IGNORE_FLAGS = frozenset(
         "rpcallowip",
         "rpcauth",
         "fallbackfee",
+        # Core v32 share of inbound slots that may relay transactions. The
+        # node keeps Core's default share; the scripts that pass it open a
+        # few peers, well under that share.
+        "inboundrelaypercent",
     }
 )
 

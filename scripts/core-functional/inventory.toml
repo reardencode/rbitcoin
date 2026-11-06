@@ -482,7 +482,8 @@ reason = "policy-libre"
 [[test]]
 name = "mempool_ephemeral_dust.py"
 status = "skip"
-reason = "policy-libre"
+reason = "rpc-dialect"
+analog = "ephemeral dust shipped (#1407); multi-tx testmempoolaccept is not a package evaluation, and reject text lacks Core details"
 
 [[test]]
 name = "mempool_expiry.py"
@@ -533,8 +534,8 @@ status = "run"
 [[test]]
 name = "mempool_truc.py"
 status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: TRUC/v3"
+reason = "rpc-dialect"
+analog = "TRUC and sibling eviction shipped; no Core package-level TRUC check (package_msg, package-error), reject text lacks Core details, reorg re-add still checks TRUC"
 
 [[test]]
 name = "mempool_unbroadcast.py"
@@ -762,8 +763,8 @@ analog = "historical reconstruct serve (no prune)"
 [[test]]
 name = "p2p_opportunistic_1p1c.py"
 status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: opportunistic 1p1c"
+reason = "core-net-policy"
+analog = "peer 1p1c is for anchor parents only (#1407); no reconsiderable-reject filter on a re-announced low-fee parent"
 
 [[test]]
 name = "p2p_orphan_handling.py"

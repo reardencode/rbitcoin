@@ -4469,6 +4469,46 @@ fn prioritise_refuses_a_tx_with_dust() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Multi-tx `testmempoolaccept` is a dry run: a low-fee parent and the child
+/// that pays for it are not admitted as 1p1c, and nothing stays in the pool
+/// (Core has no package feerate there, `mempool_ephemeral_dust.py`).
+#[test]
+fn testmempoolaccept_package_leaves_no_parent_behind() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hex = |tx: &Transaction| rbitcoin_primitives::hex_encode(serialize(tx));
+    let op_true = || ScriptBuf::from_bytes(vec![0x51]);
+    let (_, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000, op_true());
+    let child = Transaction {
+        version: TxVersion::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(parent.compute_txid(), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000 - 50_000),
+            script_pubkey: op_true(),
+        }],
+    };
+    let rows = dispatch(
+        &ctx,
+        "testmempoolaccept",
+        vec![json!([hex(&parent), hex(&child)])],
+    )
+    .unwrap();
+    assert_eq!(rows[0]["reject-reason"], "min relay fee not met", "{rows}");
+    assert_eq!(rows[1]["allowed"], false, "{rows}");
+    let mp = ctx.mempool.as_ref().unwrap();
+    assert!(!mp.contains(&parent.compute_txid()), "{rows}");
+    assert!(!mp.contains(&child.compute_txid()), "{rows}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Multi-tx `testmempoolaccept` admits each member and then removes it, so a
 /// TRUC sibling eviction there would lose the real child. Core allows no
 /// replacement in that call: the sibling is `TRUC-violation`.
