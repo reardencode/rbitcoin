@@ -4,4 +4,6 @@ Fixed
   and `submitpackage` compared the sum of all unspendable outputs with the
   cap, so two 1,000 sat `OP_RETURN` outputs failed a 1,000 sat cap that Core
   accepts. Each output is now compared alone, and an output whose script
-  does not parse counts as a burn, as in Core's `HasValidOps`.
+  does not parse counts as a burn, as in Core's `HasValidOps`. The
+  `sendrawtransaction` reject is now `-25`, as in Core and `submitpackage`;
+  it was `-8`.

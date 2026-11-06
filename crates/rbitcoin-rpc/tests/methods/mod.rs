@@ -4058,6 +4058,7 @@ fn sendrawtransaction_maxburnamount_default_rejects_op_return() {
 
 /// Core compares each burn output with `maxburnamount`, not their sum, and
 /// counts an output whose script does not parse (`!HasValidOps`) as a burn.
+/// The reject is `MAX_BURN_EXCEEDED`, which Core answers as `-25`.
 #[test]
 fn sendrawtransaction_maxburnamount_caps_each_output() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
@@ -4081,7 +4082,7 @@ fn sendrawtransaction_maxburnamount_caps_each_output() {
         let (hex, _) =
             spend_generated_coinbase(&ctx, 2, 1_000, ScriptBuf::from_bytes(script.clone()));
         let e = send(&hex, "0.00000999").unwrap_err();
-        assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{script:02x?}: {e}");
+        assert_eq!(e["code"], ERR_VERIFY_ERROR, "{script:02x?}: {e}");
         assert_eq!(e["message"], MAX_BURN_MSG, "{script:02x?}: {e}");
     }
     let _ = std::fs::remove_dir_all(&dir);
