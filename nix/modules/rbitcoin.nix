@@ -42,7 +42,7 @@ let
     else
       "${address}:${toString port}";
 
-  needTorControl = cfg.tor.control != null || cfg.electrum.hiddenService || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion;
+  needTorControl = cfg.tor.control != null || (cfg.electrum.enable && cfg.electrum.hiddenService) || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion;
   needI2pSam = cfg.i2p.sam != null;
   needCjdns = cfg.cjdns.reachable;
   rpcListening = cfg.rpc.enable || cfg.rpc.unixSocket || cfg.rpc.socketPath != null;
@@ -65,7 +65,7 @@ let
   torControlAddr =
     if cfg.tor.control != null then
       cfg.tor.control
-    else if cfg.electrum.hiddenService || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion then
+    else if (cfg.electrum.enable && cfg.electrum.hiddenService) || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion then
       "127.0.0.1:9051"
     else
       null;
@@ -681,7 +681,10 @@ in
         type = types.nullOr types.str;
         default = null;
         example = "/run/tor/control.authcookie";
-        description = "Tor control cookie file. Default in the node is /run/tor/control.authcookie when --tor-control is set.";
+        description = ''
+          Tor control cookie file. When this is null and Tor control is on, the node reads
+          /run/tor/control.authcookie. The unit joins group tor in either case.
+        '';
       };
     };
 
@@ -821,7 +824,12 @@ in
       listenOnion = mkOption {
         type = types.bool;
         default = false;
-        description = "ADD_ONION for the P2P port. Binds 127.0.0.1 even with p2p.listen = false. Requires tor.control (implied 127.0.0.1:9051) and maxInbound > 0. Gossip the onion, not a home IPv4, when discover is off.";
+        description = ''
+          ADD_ONION for the P2P port. Binds 127.0.0.1 even with p2p.listen = false.
+          Requires tor.control (implied 127.0.0.1:9051) and maxInbound > 0.
+          The unit joins group tor so it can read the default control cookie.
+          Gossip the onion, not a home IPv4, when discover is off.
+        '';
       };
 
       openFirewall = mkOption {
@@ -991,7 +999,11 @@ in
       hiddenService = mkOption {
         type = types.bool;
         default = false;
-        description = "ADD_ONION for Electrum when --electrum-listen is on. Implies tor.control 127.0.0.1:9051 if unset.";
+        description = ''
+          ADD_ONION for Electrum when the listener is on. Requires `enable`.
+          Implies tor.control 127.0.0.1:9051 if unset.
+          The unit joins group tor so it can read the default control cookie.
+        '';
       };
 
       maxSubs = mkOption {
@@ -1053,6 +1065,7 @@ in
         description = ''
           ADD_ONION for Esplora when the listener is on. Requires `enable`.
           True implies tor.control 127.0.0.1:9051 if unset and passes `--esplora-onion`.
+          The unit joins group tor so it can read the default control cookie.
           False passes `--esplora-onion=0` when the listener is on and Tor control is on
           for another reason. REST and /ws share the TCP port.
         '';
@@ -1230,6 +1243,10 @@ in
         message = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
       }
       {
+        assertion = !cfg.electrum.hiddenService || cfg.electrum.enable;
+        message = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
+      }
+      {
         assertion = cfg.rpc.tokenFile == null || rpcListening;
         message = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
       }
@@ -1351,7 +1368,7 @@ in
           ++ optional (cfg.apiLog != null) (dirOf cfg.apiLog)
         );
       }
-      // lib.optionalAttrs (cfg.tor.controlCookie != null) {
+      // lib.optionalAttrs (needTorControl || cfg.tor.controlCookie != null) {
         SupplementaryGroups = [ "tor" ];
       };
     };

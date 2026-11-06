@@ -369,6 +369,36 @@ let
   tokenNeedsRpcMsg = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
   workQueueNeedsRpcMsg = "services.rbitcoin.rpc.workQueue requires an RPC listener";
   esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
+  electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
+  onionGroupSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          esplora = {
+            enable = true;
+            hiddenService = true;
+          };
+        };
+      }
+    ];
+  };
+  listenOnionGroupSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          p2p.listenOnion = true;
+        };
+      }
+    ];
+  };
   bindFwSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -773,6 +803,20 @@ assert builtins.match ".*--esplora-onion.*" (execOf {
 }) == null;
 assert !builtins.elem "tor.service" (badSystem {
   esplora.hiddenService = true;
+}).config.systemd.services.rbitcoin.wants;
+assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
+assert builtins.match ".*--tor-control 127.0.0.1:9051.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
+assert builtins.match ".*--esplora-onion($|[= ].*)" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
+assert builtins.match ".*--tor-control-cookie.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart == null;
+assert builtins.elem "tor" listenOnionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
+assert builtins.elem electrumHsNeedsEnableMsg (failedAssertions (badSystem {
+  electrum.hiddenService = true;
+}));
+assert builtins.match ".*--tor-control.*" (execOf {
+  electrum.hiddenService = true;
+}) == null;
+assert !builtins.elem "tor.service" (badSystem {
+  electrum.hiddenService = true;
 }).config.systemd.services.rbitcoin.wants;
 assert !builtins.elem spAndPruneMsg (failedAssertions system);
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"
