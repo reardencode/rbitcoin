@@ -13,7 +13,7 @@ use rbitcoin_consensus::{
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
-use rbitcoin_sv2::testutil::TpClient;
+use rbitcoin_sv2::testutil::{solution_coinbase, TpClient};
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, SETUP_TIMEOUT,
     TEMPLATE_INTERVAL, WRITE_TIMEOUT,
@@ -576,23 +576,11 @@ async fn first_template_every(tc: &TestChain, template_interval: Duration) -> Fi
     let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).expect("decode");
     let tip = tc.chain.tip_header().expect("tip").block_hash();
 
-    let coinbase = Transaction {
-        version: Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(t.coinbase_prefix.as_ref().to_vec()),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[[0u8; 32]]),
-        }],
-        output: vec![
-            TxOut {
-                value: Amount::from_sat(t.coinbase_tx_value_remaining),
-                script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
-            },
-            bitcoin::consensus::deserialize(t.coinbase_tx_outputs.as_ref()).unwrap(),
-        ],
-    };
+    let coinbase = solution_coinbase(
+        t.coinbase_prefix.as_ref(),
+        t.coinbase_tx_value_remaining,
+        t.coinbase_tx_outputs.as_ref(),
+    );
     let path: Vec<[u8; 32]> = t
         .merkle_path
         .iter()
@@ -1408,19 +1396,18 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
 
 /// Under regtest retargeting the template at a retarget height carries the
 /// retargeted bits, and a solution ground against them becomes the tip. The
-/// pad's 600 s blocks are 60x the 10 s spacing, so height 18 takes the 4x
-/// clamp: `0x1f00ffff` becomes `0x1f03fffc`. Height 18 is the first
-/// retarget height above 16; below 17 the BIP34 push is one byte, and this
-/// file's coinbase, the bare prefix, would be `bad-cb-length`.
+/// pad's 600 s blocks are 60x the 10 s spacing, so height 4, the first
+/// height that retargets, takes the 4x clamp: `0x1f00ffff` becomes
+/// `0x1f03fffc`.
 #[tokio::test(flavor = "multi_thread")]
 async fn template_target_follows_a_regtest_retarget() {
     const START: u32 = 0x1f00_ffff;
     const EASIER: u32 = 0x1f03_fffc;
     let mut params = ChainParams::regtest();
     params.apply_regtest_pow_bits(START).unwrap();
-    params.apply_regtest_retarget(10, 9).unwrap();
-    let tc = padded_chain_with("sv2-retarget", 17, params);
-    assert_eq!(tc.chain.tip_height(), Some(17));
+    params.apply_regtest_retarget(10, 2).unwrap();
+    let tc = padded_chain_with("sv2-retarget", 3, params);
+    assert_eq!(tc.chain.tip_height(), Some(3));
     assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), START);
     let FirstTemplate {
         tp,

@@ -133,3 +133,35 @@ impl TpClient {
         self.conn.recv().await
     }
 }
+
+/// The coinbase a solution to a `NewTemplate` carries: an `OP_TRUE` payout of
+/// `value_remaining`, then the template's one output. A miner appends its
+/// extranonce to the height push in `prefix`; below height 17 that push is
+/// one byte, so this pads the scriptSig to the 2-byte consensus minimum.
+#[doc(hidden)]
+pub fn solution_coinbase(
+    prefix: &[u8],
+    value_remaining: u64,
+    template_output: &[u8],
+) -> bitcoin::Transaction {
+    use bitcoin::{absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf};
+    let mut script_sig = prefix.to_vec();
+    script_sig.resize(script_sig.len().max(2), rbitcoin_primitives::OP_0);
+    bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(script_sig),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            bitcoin::TxOut {
+                value: Amount::from_sat(value_remaining),
+                script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
+            },
+            bitcoin::consensus::deserialize(template_output).expect("template output"),
+        ],
+    }
+}
