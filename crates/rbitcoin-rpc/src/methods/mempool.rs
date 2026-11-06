@@ -950,7 +950,7 @@ pub fn package_tx_fee_exceeds_max(
     }
 }
 
-/// RPC-submit `maxburnamount` (BTC). Omitted → 0. Sum of unspendable output values vs cap.
+/// RPC-submit `maxburnamount` (BTC). Omitted → 0.
 #[doc(hidden)]
 pub fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
     match params.get(index, "maxburnamount") {
@@ -959,18 +959,16 @@ pub fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
     }
 }
 
-#[doc(hidden)]
-pub fn unspendable_output_sat(tx: &Transaction) -> u64 {
-    tx.output
-        .iter()
-        .filter(|o| crate::blockstats::is_unspendable(o.script_pubkey.as_bytes()))
-        .map(|o| o.value.to_sat())
-        .sum()
-}
-
+/// Core `sendrawtransaction` / `submitpackage`: any one output that is
+/// unspendable or does not parse, worth more than the cap.
 #[doc(hidden)]
 pub fn burn_exceeds_max(tx: &Transaction, max_burn_sat: u64) -> bool {
-    unspendable_output_sat(tx) > max_burn_sat
+    tx.output.iter().any(|o| {
+        let spk = o.script_pubkey.as_script();
+        (crate::blockstats::is_unspendable(spk.as_bytes())
+            || !rbitcoin_consensus::wire::has_valid_ops(spk))
+            && o.value.to_sat() > max_burn_sat
+    })
 }
 
 #[doc(hidden)]

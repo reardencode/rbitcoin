@@ -89,7 +89,7 @@ fn scripts_parse(tx: &Transaction) -> bool {
 }
 
 /// Core `CScript::HasValidOps` and the `MAX_SCRIPT_SIZE` bound.
-fn has_valid_ops(script: &Script) -> bool {
+pub fn has_valid_ops(script: &Script) -> bool {
     script.len() <= MAX_SCRIPT_SIZE_LEGACY
         && script.instructions().all(|ins| match ins {
             Ok(Instruction::PushBytes(push)) => push.len() <= MAX_SCRIPT_ELEMENT_SIZE,

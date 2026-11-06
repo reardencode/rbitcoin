@@ -4056,6 +4056,37 @@ fn sendrawtransaction_maxburnamount_default_rejects_op_return() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core compares each burn output with `maxburnamount`, not their sum, and
+/// counts an output whose script does not parse (`!HasValidOps`) as a burn.
+#[test]
+fn sendrawtransaction_maxburnamount_caps_each_output() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let send = |hex: &str, cap: &str| {
+        dispatch(
+            &ctx,
+            "sendrawtransaction",
+            named(json!({ "hexstring": hex, "maxfeerate": 0, "maxburnamount": cap })),
+        )
+    };
+
+    let (_, mut two_burns) = mature_coinbase_spend(&ctx, 1_000, ScriptBuf::from_bytes(vec![0x6a]));
+    two_burns.output.push(two_burns.output[0].clone());
+    let ok = send(&serialize_hex(&two_burns), "0.00001000")
+        .expect("each burn output is at the cap, so the 2,000 sat total passes");
+    assert!(ok.as_str().is_some(), "{ok}");
+
+    let truncated_push = vec![0x4c];
+    let above_max_opcode = vec![0xba];
+    for script in [truncated_push, above_max_opcode] {
+        let (hex, _) =
+            spend_generated_coinbase(&ctx, 2, 1_000, ScriptBuf::from_bytes(script.clone()));
+        let e = send(&hex, "0.00000999").unwrap_err();
+        assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{script:02x?}: {e}");
+        assert_eq!(e["message"], MAX_BURN_MSG, "{script:02x?}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn pin_maxburn_json_shapes(ctx: &RpcContext, hex: &str) {
     let n0 = dispatch(
         ctx,
@@ -7842,7 +7873,7 @@ fn loose_tx(version: i32, marker: u8, prev: bitcoin::OutPoint, value: u64) -> Tr
         }],
         output: vec![TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: ScriptBuf::from_bytes(vec![marker, 0x51]),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x01, marker, 0x51]),
         }],
     }
 }
