@@ -70,7 +70,7 @@ Clean smoke:
 | `--no-listen` / `--listen=0` | `listen=0` / `no_listen=` | bind a loopback default; **off** = no clearnet P2P socket |
 | `--listen-onion` | `listen_onion=` | **off** — loopback P2P + `ADD_ONION` (`{datadir}/onion/p2p.priv`); needs `--tor-control` and `--max-inbound` > 0 |
 | `--no-discover` | `no_discover=` | discover **on**; flag off = no home-IP self-announce; P2P/wallet onions still listed |
-| `--discover-from-peers` | `discover_from_peers=` | **off** — with no clearnet `--external-ip`, announce to outbound clearnet peers the IP each one reports reaching us at, at the listen port; never to inbound peers, never over Tor, I2P, CJDNS or `--proxy`; needs discover on and a non-loopback `--listen` (ignored with a warning otherwise) |
+| `--discover-from-peers` | `discover_from_peers=` | **off** — with no clearnet `--external-ip`, announce to outbound clearnet peers the IP each one reports reaching us at, at the listen port; never to inbound peers, never over Tor, I2P, CJDNS or `--proxy`; needs discover on and a non-loopback `--listen`; a loopback bind ignores it with a warning; `--no-discover` has no effect and nothing is logged |
 | `--only-net NET` | `only_net=` | all nets; repeatable `ipv4` / `ipv6` / `onion` / `i2p` / `cjdns` |
 | `--cjdns-reachable` | `cjdns_reachable=` | **off** — `fc00::/8` is unroutable until set; `--only-net=cjdns` requires it |
 | `--connect ADDR` | `connect=` (repeatable) | seeds; `IP:port`, Tor v3 `.onion:port`, or `{52}.b32.i2p:port` |
