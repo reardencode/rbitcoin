@@ -3664,19 +3664,25 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let spent = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
-    assert_eq!(spent["code"], ERR_VERIFY_REJECTED, "{spent}");
-    assert_eq!(spent["message"], "missing-inputs", "{spent}");
+    assert_eq!(spent["code"], ERR_VERIFY_ERROR, "{spent}");
+    assert_eq!(
+        spent["message"], "bad-txns-inputs-missingorspent",
+        "{spent}"
+    );
     // The parent output is spent, but the tx index still has its value.
     // Core fee-checks only after the inputs resolve, so this stays
-    // missing-inputs rather than the max-fee error.
+    // the missing-input error rather than the max-fee error.
     let spent_capped = dispatch(
         &ctx,
         "sendrawtransaction",
         vec![json!(hex), json!("0.00000001")],
     )
     .unwrap_err();
-    assert_eq!(spent_capped["code"], ERR_VERIFY_REJECTED, "{spent_capped}");
-    assert_eq!(spent_capped["message"], "missing-inputs", "{spent_capped}");
+    assert_eq!(spent_capped["code"], ERR_VERIFY_ERROR, "{spent_capped}");
+    assert_eq!(
+        spent_capped["message"], "bad-txns-inputs-missingorspent",
+        "{spent_capped}"
+    );
 
     // Not a coin, so the implied fee must not become the max-fee error.
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -3685,8 +3691,11 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
         vout: 0,
     });
     let genesis_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(genesis_spend)]).unwrap_err();
-    assert_eq!(genesis_fee["code"], ERR_VERIFY_REJECTED, "{genesis_fee}");
-    assert_eq!(genesis_fee["message"], "missing-inputs", "{genesis_fee}");
+    assert_eq!(genesis_fee["code"], ERR_VERIFY_ERROR, "{genesis_fee}");
+    assert_eq!(
+        genesis_fee["message"], "bad-txns-inputs-missingorspent",
+        "{genesis_fee}"
+    );
 
     let (addr, _) = p2wpkh_regtest();
     let op_sat = generated_coinbase_value(&ctx, 3) - 1_000;
@@ -3703,8 +3712,11 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
         vout: 0,
     });
     let op_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(op_spend)]).unwrap_err();
-    assert_eq!(op_fee["code"], ERR_VERIFY_REJECTED, "{op_fee}");
-    assert_eq!(op_fee["message"], "missing-inputs", "{op_fee}");
+    assert_eq!(op_fee["code"], ERR_VERIFY_ERROR, "{op_fee}");
+    assert_eq!(
+        op_fee["message"], "bad-txns-inputs-missingorspent",
+        "{op_fee}"
+    );
 
     // A disconnected coinbase does not return to the mempool. Its output is
     // archive-only, so the implied fee must not become the max-fee error.
@@ -3717,11 +3729,14 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
         vout: 0,
     });
     let archived_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(archived)]).unwrap_err();
-    assert_eq!(archived_fee["code"], ERR_VERIFY_REJECTED, "{archived_fee}");
-    assert_eq!(archived_fee["message"], "missing-inputs", "{archived_fee}");
+    assert_eq!(archived_fee["code"], ERR_VERIFY_ERROR, "{archived_fee}");
+    assert_eq!(
+        archived_fee["message"], "bad-txns-inputs-missingorspent",
+        "{archived_fee}"
+    );
 
     // OP_RETURN was never a coin. Once the spendable output is spent, the
-    // resubmit stays missing-inputs. Treating the OP_RETURN as unspent is -27.
+    // resubmit is the missing-input error. Treating the OP_RETURN as unspent is -27.
     let parent_sat = generated_coinbase_value(&ctx, 5) - 1_000;
     let (_, mut parent) =
         spend_generated_coinbase(&ctx, 5, parent_sat, ScriptBuf::from_bytes(vec![0x51]));
@@ -3743,8 +3758,25 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let parent_again = dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex)]).unwrap_err();
-    assert_eq!(parent_again["code"], ERR_VERIFY_REJECTED, "{parent_again}");
-    assert_eq!(parent_again["message"], "missing-inputs", "{parent_again}");
+    assert_eq!(parent_again["code"], ERR_VERIFY_ERROR, "{parent_again}");
+    assert_eq!(
+        parent_again["message"], "bad-txns-inputs-missingorspent",
+        "{parent_again}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An input this node has never seen is Core `-25`, same as a spent one.
+#[test]
+fn sendraw_unknown_input_is_missing_or_spent() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let unknown = one_sat_spend(bitcoin::OutPoint {
+        txid: Txid::from_byte_array([0x11; 32]),
+        vout: 0,
+    });
+    let err = dispatch(&ctx, "sendrawtransaction", vec![json!(unknown)]).unwrap_err();
+    assert_eq!(err["code"], ERR_VERIFY_ERROR, "{err}");
+    assert_eq!(err["message"], "bad-txns-inputs-missingorspent", "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3779,6 +3811,33 @@ fn gettxout_script_pubkey_matches_getrawtransaction() {
     let confirmed = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
     assert_eq!(confirmed["confirmations"], 1, "{confirmed}");
     assert_eq!(confirmed["scriptPubKey"], described());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A mempool `OP_RETURN` is still admitted. The fee lookup must not price it:
+/// a 1 sat spend is the script reject. Pricing that output is the fee cap.
+#[test]
+fn sendraw_mempool_op_return_spend_is_a_script_reject() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let value = generated_coinbase_value(&ctx, 1) - 1_000;
+    let (hex, parent) = mature_coinbase_spend(&ctx, value, ScriptBuf::from_bytes(vec![0x6a]));
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex), json!(0), json!("50")],
+    )
+    .unwrap();
+    let spend = one_sat_spend(bitcoin::OutPoint {
+        txid: parent.compute_txid(),
+        vout: 0,
+    });
+    let err = dispatch(&ctx, "sendrawtransaction", vec![json!(spend)]).unwrap_err();
+    assert_eq!(err["code"], ERR_VERIFY_REJECTED, "{err}");
+    let msg = err["message"].as_str().unwrap_or("");
+    assert!(
+        msg.starts_with("mempool-script-verify-flag-failed") && msg.contains("0x6a"),
+        "{err}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
