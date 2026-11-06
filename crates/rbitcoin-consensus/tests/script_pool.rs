@@ -504,10 +504,10 @@ impl Drop for ReleaseOccupy {
     }
 }
 
-/// The stage thread steals while pool workers are busy. A failed wave
-/// is not still claimable, and `next == n` is finished.
+/// A caller that is not a script worker can still claim a chunk. A failed
+/// wave is not still claimable, and `next == n` is finished.
 #[test]
-fn help_steal_runs_the_chunk_the_workers_cannot() {
+fn steal_chunk_runs_while_workers_are_busy() {
     let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
     ALL_HITS.store(0, Ordering::Relaxed);
     let occupy = OccupyGate::occupy_all();
@@ -517,11 +517,12 @@ fn help_steal_runs_the_chunk_the_workers_cannot() {
     let _release = ReleaseOccupy(Some(occupy));
     assert!(wave.has_unclaimed(), "next < n while workers are busy");
     for _ in 0..4 {
-        assert!(help_steal(), "one index claim");
+        let (range, hold) = steal_chunk().expect("one index claim");
+        run_held(range, hold);
     }
     assert_eq!(ALL_HITS.load(Ordering::Relaxed), 4);
     assert!(!wave.has_unclaimed(), "next == n is not still unclaimed");
-    assert!(!help_steal(), "an empty wave is not a steal");
+    assert!(steal_chunk().is_none(), "an empty wave is not a steal");
     drop(_release);
     wave.finish().unwrap();
 
@@ -531,7 +532,8 @@ fn help_steal_runs_the_chunk_the_workers_cannot() {
         .expect("failed wave");
     let _release = ReleaseOccupy(Some(occupy));
     assert!(failed.has_unclaimed());
-    assert!(help_steal());
+    let (range, hold) = steal_chunk().expect("the failing job");
+    run_held(range, hold);
     assert!(
         !failed.has_unclaimed(),
         "a failed wave is not stealable while jobs remain"
