@@ -1009,7 +1009,7 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
         self.last_accept_stages = AcceptStageUs::default();
-        match self.accept_tx_with(tx, utxos, tip, 0, true, None) {
+        match self.accept_tx_with(tx, utxos, tip, 0, true, None, true) {
             Ok(r) => {
                 self.promote_orphans_of(r.txid, utxos, tip);
                 Ok(r)
@@ -1032,6 +1032,7 @@ impl ActiveMempool {
         fee_delta: i64,
         report_orphans: bool,
         min_relay: Option<u64>,
+        sibling_eviction: bool,
     ) -> Result<AcceptResult, AcceptError> {
         // Local `accept_tx` stays strict. The session bit is on the hub admit.
         let waive = false;
@@ -1046,7 +1047,7 @@ impl ActiveMempool {
                 waive,
             },
         )?;
-        prep.sibling_eviction = true;
+        prep.sibling_eviction = sibling_eviction;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -1817,7 +1818,7 @@ impl ActiveMempool {
         let mut queue = VecDeque::new();
         self.push_orphan_children(parent, &mut queue);
         while let Some(child) = queue.pop_front() {
-            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None) {
+            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None, true) {
                 Ok(r) => {
                     self.orphanage
                         .forget_taken_gen(&child.tx.compute_txid(), child.taken_gen);
@@ -2093,14 +2094,15 @@ impl ActiveMempool {
                 lifted.push(parked);
             }
             // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
+            // A package member never evicts a TRUC sibling (Core).
+            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, false) {
                 Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
                     for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0, None) {
                         let id = item.tx.compute_txid();
-                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
+                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None, true) {
                             Ok(r) => {
                                 // Admitted, so the lift row is not in flight.
                                 self.orphanage.forget_taken_gen(&id, item.taken_gen);

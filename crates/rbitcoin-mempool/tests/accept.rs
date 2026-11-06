@@ -662,12 +662,20 @@ fn truc_sibling_eviction() {
     let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(190_000)]);
     mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
 
+    // Only a tx judged alone may evict: not a package member.
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
+    let unrelated = ver_tx(&[ops[1]], 3, vec![pay(490_000)]);
+    assert_truc_violation(
+        mp.accept_package(&[paying.clone(), unrelated], &utxos, TIP_OK)
+            .map(|mut r| r.remove(0)),
+    );
+    assert!(mp.graph.contains(&first.compute_txid()));
+
     let cheap = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(190_000)]);
     let err = mp.accept_tx(&cheap, &utxos, TIP_OK).unwrap_err();
     assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
     assert!(mp.graph.contains(&first.compute_txid()));
 
-    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
     let r = mp
         .accept_tx(&paying, &utxos, TIP_OK)
         .expect("a sibling that pays more evicts the first child");
