@@ -1,0 +1,6 @@
+Added
+
+- **`--net-permission-bind v1,noban@127.0.0.1:8335` (conf `net_permission_bind=`) takes plain v1 P2P on that listener for a local wallet indexer such as NBXplorer.** A peer there that opens with a v1 `version` gets v1 framing; a BIP324 peer there still gets v2. Every other listener and every outbound connection stay v2 only.
+- **The v1 listener has its own port and a private address.** Its port must differ from the `--listen`, `--electrum-listen`, and `--esplora-listen` ports, because Tor and I2P inbound arrive from loopback on those. The address must be loopback, RFC 1918, 100.64/10, or unique-local IPv6 (`fd00::/8`); `0.0.0.0`, `::`, `::ffff:0.0.0.0`, and public addresses fail at start. Loopback is the intended address: v1 is plaintext, and any other address is reachable from that whole network unless a firewall narrows it. `--net-permission` refuses `v1`, and `all` does not include it. The listener is never advertised.
+- **v1 framing follows Core.** A wrong network magic, a bad command, or a length past 4,000,000 ends the session before the body is read. A bad checksum drops that message only, and dropped messages count against the peer's rate limit as v2 decoys do.
+- **`getpeerinfo.transport_protocol_type` is per peer, `v1` or `v2`,** and `permissions` lists `v1`.

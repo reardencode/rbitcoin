@@ -74,7 +74,7 @@ for unknown-height bodies (mark missing → re-getdata).
 | Historical block serve | **Reconstruct** from `txout`+`seqsigwit`; tip uses body queue + peer wire | Serve raw blk files / undo |
 | Spentness | Annotations on create outputs (+ rare multi-list); no mutable UTXO set as truth | Coins view / UTXO mutations |
 | Concurrency during IBD | Fixed **roles** (one Class A appender, separate confirm pipeline); HWM publish order — **no map epochs** | More global chainstate coupling |
-| Transport | **BIP324 v2 only** | v1 + v2 |
+| Transport | **BIP324 v2**; v1 only on a `--net-permission-bind v1@` listener for a local wallet indexer (own port, loopback or private address) | v1 + v2 |
 | Script verification | Pure Rust in-tree (`rbitcoin-consensus::script`) | libbitcoinconsensus / script interpreter in C++ |
 | Electrum | In-process index on confirm | External (Fulcrum, ElectrumX, …) |
 | IBD vs “current” | Dedicated densify loop exits when the **connected work path** has no remainder and is at (or one chatter block from) advertised peer height; then disconnect and `enter_tip_mode`. A restart whose confirmed tip is above genesis, already meets minimum chain work and `--max-tip-age` (default 24h), and whose header store has no heavier chain at any fork depth, enters tip follow without that loop. Peer-advertised height is not an input to the skip. After the switch, **relay-inhibited** is `--min-chain-work` + `--max-tip-age`. RPC `initialblockdownload` is the Core alias for that latch (not “still densifying”). | Same header/block pipeline throughout. `IsInitialBlockDownload` latches false on min chain work + tip timestamp recency (`nMaxTipAge`). btcd/libbitcoin also latch on tip time, not empty getdata. |
