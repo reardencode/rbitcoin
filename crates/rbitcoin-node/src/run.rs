@@ -632,6 +632,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.tor.control,
         config.tor.cookie.as_deref(),
         config.tor.password.as_deref(),
+        config
+            .tor
+            .io_timeout
+            .unwrap_or(crate::tor_control::CONTROL_TIMEOUT),
     )
     .await?;
     if tor_ctl.is_some() {

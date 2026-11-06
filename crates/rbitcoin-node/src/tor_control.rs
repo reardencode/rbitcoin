@@ -5,7 +5,8 @@ use bitcoin_hashes::{hmac, sha256, Hash, HashEngine};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
@@ -15,6 +16,13 @@ pub const SAFECOOKIE_SERVER_KEY: &[u8] =
 #[doc(hidden)]
 pub const SAFECOOKIE_CLIENT_KEY: &[u8] =
     b"Tor safe cookie authentication controller-to-server hash";
+
+/// Longest wait for the control port to connect, or to answer one command.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest reply line taken from the control port.
+pub const MAX_REPLY_LINE: usize = 64 * 1024;
+/// Most bytes one reply may span across its lines.
+pub const MAX_REPLY_BYTES: usize = 1024 * 1024;
 
 pub const DEFAULT_CONTROL_PORT: u16 = 9051;
 pub const DEFAULT_COOKIE_PATH: &str = "/run/tor/control.authcookie";
@@ -32,17 +40,26 @@ pub enum TorAuth {
 pub struct TorControl {
     pub reader: BufReader<OwnedReadHalf>,
     pub writer: OwnedWriteHalf,
+    addr: SocketAddr,
+    timeout: Duration,
 }
 
 impl TorControl {
-    pub async fn connect_and_auth(addr: SocketAddr, auth: TorAuth) -> Result<Self, NodeError> {
-        let stream = TcpStream::connect(addr)
+    pub async fn connect_and_auth(
+        addr: SocketAddr,
+        auth: TorAuth,
+        timeout: Duration,
+    ) -> Result<Self, NodeError> {
+        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
+            .map_err(|_| no_reply(addr, timeout))?
             .map_err(|e| NodeError::Init(format!("tor control connect {addr}: {e}")))?;
         let (r, w) = stream.into_split();
         let mut ctl = Self {
             reader: BufReader::new(r),
             writer: w,
+            addr,
+            timeout,
         };
         ctl.authenticate(&auth).await?;
         ctl.command("GETINFO version").await?;
@@ -53,6 +70,7 @@ impl TorControl {
         addr: Option<SocketAddr>,
         cookie: Option<&Path>,
         password: Option<&str>,
+        timeout: Duration,
     ) -> Result<Option<Self>, NodeError> {
         let Some(addr) = addr else {
             return Ok(None);
@@ -65,7 +83,7 @@ impl TorControl {
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_COOKIE_PATH)),
             ),
         };
-        Ok(Some(Self::connect_and_auth(addr, auth).await?))
+        Ok(Some(Self::connect_and_auth(addr, auth, timeout).await?))
     }
 
     pub async fn authenticate(&mut self, auth: &TorAuth) -> Result<String, NodeError> {
@@ -132,7 +150,15 @@ impl TorControl {
         parse_protocol_auth_info(&body)
     }
 
+    /// One command and its reply, within the control timeout.
     pub async fn command(&mut self, cmd: &str) -> Result<String, NodeError> {
+        let (addr, timeout) = (self.addr, self.timeout);
+        tokio::time::timeout(timeout, self.exchange(cmd))
+            .await
+            .map_err(|_| no_reply(addr, timeout))?
+    }
+
+    async fn exchange(&mut self, cmd: &str) -> Result<String, NodeError> {
         self.writer
             .write_all(cmd.as_bytes())
             .await
@@ -259,16 +285,38 @@ pub fn escape_quoted(s: &str) -> String {
     out
 }
 
+fn no_reply(addr: SocketAddr, timeout: Duration) -> NodeError {
+    NodeError::Init(format!("--tor-control {addr}: no reply within {timeout:?}"))
+}
+
+/// One reply: `250-` lines up to a `250 ` line. A line over
+/// [`MAX_REPLY_LINE`] or a reply over [`MAX_REPLY_BYTES`] is refused before
+/// it is held.
 pub async fn read_reply(reader: &mut BufReader<OwnedReadHalf>) -> Result<String, NodeError> {
     let mut body = String::new();
+    let mut read = 0usize;
     loop {
         let mut line = String::new();
-        let n = reader
+        let n = (&mut *reader)
+            .take(MAX_REPLY_LINE as u64 + 1)
             .read_line(&mut line)
             .await
             .map_err(|e| NodeError::Init(format!("tor control read: {e}")))?;
         if n == 0 {
             return Err(NodeError::Init("tor control: connection closed".into()));
+        }
+        if n > MAX_REPLY_LINE {
+            return Err(NodeError::Init(format!(
+                "--tor-control: reply line over {} KiB",
+                MAX_REPLY_LINE >> 10
+            )));
+        }
+        read += n;
+        if read > MAX_REPLY_BYTES {
+            return Err(NodeError::Init(format!(
+                "--tor-control: reply over {} MiB",
+                MAX_REPLY_BYTES >> 20
+            )));
         }
         let line = line.trim_end_matches(['\r', '\n']);
         if line.len() < 4 {
