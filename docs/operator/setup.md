@@ -157,7 +157,10 @@ the node default. A bool that defaults on passes `=0` when set false
 (`proxyRandomize`, `mempool.persist`, `mempool.prefillCompact`,
 `netPermissionRelay`). `p2p.maxInbound` defaults to 200 and omits
 `--max-inbound` at that value. `esplora.hiddenService = false` passes
-`--esplora-onion=0` when Tor control is on. `rpc.unixSocket` passes `--rpc`
+`--esplora-onion=0` when Tor control is on. An onion flag with `tor.control`
+unset enables `services.tor`, opens `127.0.0.1:9051`, and writes a
+group-readable `/run/tor/control.authcookie`. An explicit `tor.control` is
+left to the operator's daemon. `rpc.unixSocket` passes `--rpc`
 for `{dataDir}/rpc.sock` without TCP. `extraArgs` remains for `--conf`,
 test knobs (`--smoke`, `--mock-time`, `--max-run-secs`,
 `--test-activation-height`, `--regtest-pow-bits`), and the two secrets that

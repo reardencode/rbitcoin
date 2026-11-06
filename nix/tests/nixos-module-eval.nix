@@ -400,6 +400,39 @@ let
       }
     ];
   };
+  # A port the operator set must stay. The implied 9051 must not be appended.
+  hasControlPort = cfg: addr: port:
+    builtins.any (
+      p:
+      p == port
+      || (
+        builtins.isAttrs p
+        && (p.port or null) == port
+        && (p.addr or addr) == addr
+      )
+    ) cfg.services.tor.settings.ControlPort;
+  torKeepPortSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          p2p.listenOnion = true;
+        };
+        services.tor = {
+          enable = true;
+          settings = {
+            ControlPort = [ 9052 ];
+            CookieAuthentication = true;
+            CookieAuthFile = "/run/tor/other.cookie";
+            CookieAuthFileGroupReadable = true;
+          };
+        };
+      }
+    ];
+  };
   bindFwSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -808,7 +841,21 @@ assert !builtins.elem "tor.service" (badSystem {
 assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
 assert onionGroupSystem.config.users.groups ? tor;
 assert listenOnionGroupSystem.config.users.groups ? tor;
+assert onionGroupSystem.config.users.groups.tor.gid == onionGroupSystem.config.ids.gids.tor;
+assert listenOnionGroupSystem.config.users.groups.tor.gid == listenOnionGroupSystem.config.ids.gids.tor;
+assert system.config.users.groups.tor.gid == system.config.ids.gids.tor;
 assert ! (defaultSystem.config.users.groups ? tor);
+assert onionGroupSystem.config.services.tor.enable;
+assert listenOnionGroupSystem.config.services.tor.enable;
+assert ! system.config.services.tor.enable;
+assert onionGroupSystem.config.services.tor.settings.CookieAuthentication == true;
+assert onionGroupSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/control.authcookie";
+assert onionGroupSystem.config.services.tor.settings.CookieAuthFileGroupReadable == true;
+assert hasControlPort onionGroupSystem.config "127.0.0.1" 9051;
+assert hasControlPort listenOnionGroupSystem.config "127.0.0.1" 9051;
+assert torKeepPortSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/other.cookie";
+assert hasControlPort torKeepPortSystem.config "127.0.0.1" 9052;
+assert ! hasControlPort torKeepPortSystem.config "127.0.0.1" 9051;
 assert builtins.elem listenOnionNeedsInboundMsg (failedAssertions (badSystem {
   p2p.listenOnion = true;
   p2p.maxInbound = 0;

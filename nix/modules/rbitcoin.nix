@@ -69,6 +69,15 @@ let
       "127.0.0.1:9051"
     else
       null;
+  # The node only speaks a TCP control port. An implied address is one this
+  # module chose, so NixOS tor must listen there and write the cookie the node
+  # reads. An explicit tor.control is the operator's daemon.
+  impliedTorControl = cfg.tor.control == null && torControlAddr != null;
+  torCookiePath =
+    if cfg.tor.controlCookie != null then
+      cfg.tor.controlCookie
+    else
+      "/run/tor/control.authcookie";
 
   command = [
     "${cfg.package}/bin/rbitcoin-node"
@@ -674,7 +683,11 @@ in
         type = types.nullOr types.str;
         default = null;
         example = "127.0.0.1:9051";
-        description = "System tor control HOST:PORT. Unset skips the control connection.";
+        description = ''
+          System tor control HOST:PORT. Unset skips the control connection
+          unless an onion flag implies 127.0.0.1:9051. An explicit address is
+          the operator's daemon: the module does not enable services.tor for it.
+        '';
       };
 
       controlCookie = mkOption {
@@ -684,7 +697,8 @@ in
         description = ''
           Tor control cookie file. When this is null and Tor control is on, the node reads
           /run/tor/control.authcookie. The unit joins group tor in either case, and creates
-          that group when it is missing.
+          that group when it is missing, with the NixOS tor gid.
+          An implied control port also sets this path as CookieAuthFile.
         '';
       };
     };
@@ -828,8 +842,10 @@ in
         description = ''
           ADD_ONION for the P2P port. Binds 127.0.0.1 even with p2p.listen = false.
           Requires tor.control (implied 127.0.0.1:9051) and maxInbound > 0.
-          The module refuses a 0 cap. The unit joins group tor, and creates that group
-          when it is missing, so it can read the default control cookie.
+          The module refuses a 0 cap. An implied port enables services.tor, opens
+          127.0.0.1:9051, and writes a group-readable cookie at the control cookie path.
+          The unit joins group tor, and creates that group with the NixOS tor gid
+          when it is missing, so it can read the cookie.
           Gossip the onion, not a home IPv4, when discover is off.
         '';
       };
@@ -1003,8 +1019,9 @@ in
         default = false;
         description = ''
           ADD_ONION for Electrum when the listener is on. Requires `enable`.
-          Implies tor.control 127.0.0.1:9051 if unset.
-          The unit joins group tor so it can read the default control cookie.
+          Implies tor.control 127.0.0.1:9051 if unset. That implied port enables
+          services.tor, opens 127.0.0.1:9051, and writes a group-readable cookie
+          at the control cookie path. The unit joins group tor so it can read it.
         '';
       };
 
@@ -1067,7 +1084,9 @@ in
         description = ''
           ADD_ONION for Esplora when the listener is on. Requires `enable`.
           True implies tor.control 127.0.0.1:9051 if unset and passes `--esplora-onion`.
-          The unit joins group tor so it can read the default control cookie.
+          That implied port enables services.tor, opens 127.0.0.1:9051, and writes
+          a group-readable cookie at the control cookie path.
+          The unit joins group tor so it can read it.
           False passes `--esplora-onion=0` when the listener is on and Tor control is on
           for another reason. REST and /ws share the TCP port.
         '';
@@ -1265,7 +1284,21 @@ in
     users.groups = {
       ${cfg.group} = { };
     } // lib.optionalAttrs (needTorControl || cfg.tor.controlCookie != null) {
-      tor = { };
+      tor.gid = config.ids.gids.tor;
+    };
+    services.tor = lib.mkIf impliedTorControl {
+      enable = lib.mkDefault true;
+      settings = {
+        ControlPort = lib.mkDefault [
+          {
+            addr = "127.0.0.1";
+            port = 9051;
+          }
+        ];
+        CookieAuthentication = lib.mkDefault true;
+        CookieAuthFile = lib.mkDefault torCookiePath;
+        CookieAuthFileGroupReadable = lib.mkDefault true;
+      };
     };
     users.users.${cfg.user} = {
       isSystemUser = true;
