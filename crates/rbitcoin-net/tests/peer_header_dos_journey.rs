@@ -1650,14 +1650,16 @@ fn discover_from_peers_announces_the_reported_address() {
         [SocketAddr::new(seen, 8333)],
         "the reported IP goes out at our listen port, not the peer-seen port"
     );
-    let inbound = reporting_peer(&on, clearnet, Inbound, seen);
+    // A fresh hub: `on` already holds `seen` from the outbound report.
+    let fresh = hub(true);
+    let inbound = reporting_peer(&fresh, clearnet, Inbound, seen);
     assert_eq!(inbound.reported_local_ip, None);
     assert!(
         inbound.take_self_announce_msg().is_none(),
         "an inbound peer's report is not taken"
     );
     assert!(
-        !on.is_own_address(rbitcoin_net::NetAddr::Ip(SocketAddr::from(([81, 2, 69, 161], 8333)))),
+        !fresh.is_own_address(rbitcoin_net::NetAddr::Ip(SocketAddr::new(seen, 8333))),
         "nor recorded"
     );
     for bad in [

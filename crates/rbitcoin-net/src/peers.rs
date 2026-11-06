@@ -1935,6 +1935,7 @@ pub fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
 }
 
 /// Cap on remembered peer-reported sockets (`--discover-from-peers`).
+#[doc(hidden)]
 pub const MAX_DISCOVERED_IPS: usize = 8;
 
 /// This node's own announced addresses. A peer can gossip one back into
@@ -2391,6 +2392,7 @@ impl PeerHub {
 
     /// Whether `addr` is one of this node's own addresses, which `getaddr`
     /// and `addrv2` relay never pass on.
+    #[doc(hidden)]
     pub fn is_own_address(&self, addr: crate::NetAddr) -> bool {
         self.own_addrs().contains(addr)
     }
