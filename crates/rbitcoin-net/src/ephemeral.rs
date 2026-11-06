@@ -8,7 +8,7 @@ use crate::peer::{
 };
 use crate::seeds::AddrMan;
 use crate::socks::Dialer;
-use crate::tx_relay::{IsolatedLap, MempoolHub};
+use crate::tx_relay::{IsolatedLap, IsolatedTake, MempoolHub};
 use crate::v2::{read_v2_frame, write_v2_msg, V2Reader, V2Writer};
 use crate::{NetAddr, OnlyNet};
 use bitcoin::p2p::message::NetworkMessage;
@@ -183,11 +183,14 @@ pub async fn isolated_broadcast_known_tx(
     IsolatedBroadcast::Finished
 }
 
+pub const ISOLATED_RESEND_SWEEP: Duration = Duration::from_secs(30);
+
 pub fn spawn_isolated_broadcast_loop(
     mp: Arc<MempoolHub>,
     dialer: Dialer,
     addrman: Arc<Mutex<AddrMan>>,
     magic: Magic,
+    resend_sweep: Duration,
 ) -> JoinHandle<()> {
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
@@ -197,8 +200,16 @@ pub fn spawn_isolated_broadcast_loop(
     const BACKLOG_WARN: usize = 32;
     tokio::spawn(async move {
         let mut warned = false;
+        let mut sweep = tokio::time::interval(resend_sweep);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let (txid, behind) = mp.next_isolated().await;
+            let (txid, behind) = tokio::select! {
+                next = mp.next_isolated() => next,
+                _ = sweep.tick() => {
+                    mp.requeue_unreturned();
+                    continue;
+                }
+            };
             if behind < BACKLOG_WARN {
                 warned = false;
             } else {
@@ -214,16 +225,25 @@ pub fn spawn_isolated_broadcast_loop(
             // left, and `take` already marked this txid taken. A failed try
             // is the lagged lap; the read then waits on the same guard.
             let hub = Arc::clone(&mp);
-            let tx = tokio::task::spawn_blocking(move || {
+            let take = tokio::task::spawn_blocking(move || {
                 let _g = crate::reactor::BlockingRegion::enter();
-                hub.read_tx_for_isolated(&txid)
+                hub.isolated_tx_to_send(&txid)
             })
             .await
             .expect("isolated broadcast get_tx join");
-            let Some(tx) = tx else {
-                rbitcoin_log::debug!("isolated broadcast {txid}: left the mempool before its turn");
-                mp.note_isolated_lap(IsolatedLap::SkippedUnknown);
-                continue;
+            let tx = match take {
+                IsolatedTake::Send(tx) => tx,
+                IsolatedTake::Gone => {
+                    rbitcoin_log::debug!(
+                        "isolated broadcast {txid}: left the mempool before its turn"
+                    );
+                    mp.note_isolated_lap(IsolatedLap::SkippedUnknown);
+                    continue;
+                }
+                IsolatedTake::InBlock => {
+                    rbitcoin_log::debug!("isolated broadcast {txid}: already in a block, not sent");
+                    continue;
+                }
             };
             // `unindex_txid` drops the local-origin entry on every removal,
             // and this check never waits on the mempool lock.

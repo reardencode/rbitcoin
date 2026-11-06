@@ -392,6 +392,7 @@ async fn ephemeral_broadcast() {
             Dialer::Direct,
             Arc::new(Mutex::new(am)),
             Magic::REGTEST,
+            ISOLATED_RESEND_SWEEP,
         )
     };
 
@@ -425,11 +426,11 @@ async fn ephemeral_broadcast() {
         .txdata[0]
         .compute_txid();
     let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 90_000_000);
-    fan.output = vec![fan.output[0].clone(); BURST as usize + 9];
+    fan.output = vec![fan.output[0].clone(); BURST as usize + 10];
     let fan_id = fan.compute_txid();
     hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![fan])
         .expect("fan-out block");
-    let locals: Vec<Transaction> = (0..BURST + 9)
+    let locals: Vec<Transaction> = (0..BURST + 10)
         .map(|vout| spend(OutPoint { txid: fan_id, vout }, 89_990_000))
         .collect();
     let submit = |tx: &Transaction| {
@@ -450,6 +451,7 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
+        ISOLATED_RESEND_SWEEP,
     );
     submit(&locals[0]);
     tokio::time::timeout(Duration::from_secs(30), busy_rx)
@@ -510,6 +512,7 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
+        ISOLATED_RESEND_SWEEP,
     );
     let gone = &locals[BURST as usize + 3];
     let kept = &locals[BURST as usize + 4];
@@ -551,6 +554,7 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
+        ISOLATED_RESEND_SWEEP,
     );
     let [first, held, after, idle] = [5, 6, 7, 8].map(|i| &locals[BURST as usize + i]);
     let never_admitted = spend(
@@ -699,6 +703,56 @@ async fn ephemeral_broadcast() {
         rx.try_recv().is_err(),
         "failed isolated send must not fall back to standing INV"
     );
+
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        Duration::from_millis(50),
+    );
+    let retried = &locals[BURST as usize + 9];
+    let txid = retried.compute_txid();
+    let start = mp.relay_now_secs();
+    mp.note_mock_now(start);
+    submit(retried);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    gate_tx.send(()).unwrap();
+    assert_eq!(next_sent(&mut got_rx).await, txid);
+    let mut now = start;
+    'resend: loop {
+        now += 181;
+        assert!(
+            now <= start + 3 * 181,
+            "a tx that never came back is sent again"
+        );
+        mp.note_mock_now(now);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Ok(Some(sent)) = tokio::time::timeout_at(deadline, got_rx.recv()).await {
+            if sent == txid {
+                break 'resend;
+            }
+        }
+    }
+    mp.note_returned(&txid);
+    mp.note_mock_now(now + 2 * 181);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(Some(sent)) = tokio::time::timeout_at(deadline, got_rx.recv()).await {
+        assert_ne!(sent, txid, "a tx that came back is not sent again");
+    }
+    stop_task(sender).await;
+    stop_task(recipient).await;
     let _ = std::fs::remove_dir_all(dir);
 }
 

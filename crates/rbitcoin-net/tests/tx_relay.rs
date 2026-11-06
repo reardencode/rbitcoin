@@ -493,6 +493,52 @@ fn reorg_reaccept_then_unindex_drops_relay() {
 }
 
 #[tokio::test]
+async fn unreturned_isolated_tx_is_sent_again_until_the_cap() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let hub = MempoolHub::open(tmp(), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    hub.set_isolated_broadcast(true);
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+
+    hub.note_mock_now(1_000);
+    let tx = spend_true(cbs[3], 1_000, spk.clone());
+    let txid = tx.compute_txid();
+    hub.accept_tx_from(&tx, TxOrigin::Local).expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.isolated_sent(&txid);
+    hub.note_mock_now(1_119);
+    assert_eq!(hub.requeue_unreturned(), 0, "too soon to send again");
+    let mut sends = 1;
+    loop {
+        hub.note_mock_now(hub.relay_now_secs() + 181);
+        if hub.requeue_unreturned() == 0 {
+            break;
+        }
+        assert_eq!(hub.next_isolated().await.0, txid);
+        hub.isolated_sent(&txid);
+        sends += 1;
+    }
+    assert_eq!(sends, ISOLATED_SEND_CAP);
+    assert!(
+        hub.is_local_origin(&txid),
+        "past the cap it waits for a block"
+    );
+
+    let back = spend_true(cbs[4], 1_000, spk);
+    let txid = back.compute_txid();
+    hub.accept_tx_from(&back, TxOrigin::Local).expect("accept");
+    assert_eq!(hub.next_isolated().await.0, txid);
+    hub.isolated_sent(&txid);
+    hub.note_returned(&txid);
+    hub.note_mock_now(hub.relay_now_secs() + 181);
+    assert_eq!(
+        hub.requeue_unreturned(),
+        0,
+        "a tx that came back is not sent again"
+    );
+}
+
+#[tokio::test]
 async fn returned_tx_waits_for_in_flight_isolated_sends() {
     let (_store, q, cbs) = pad_cbs(12);
     let hub = MempoolHub::open(tmp(), Arc::clone(&q)).unwrap();
