@@ -4,8 +4,8 @@ use super::index::{self, IndexJob};
 use super::*;
 use rbitcoin_consensus::block::{verify_one_script_job, ScriptCheckJob};
 use rbitcoin_consensus::script_pool::{
-    fg_has_unclaimed, help_steal, set_script_publisher, start_for_each_owned,
-    start_for_each_owned_keep, start_for_each_pooled, OwnedWave,
+    fg_has_unclaimed, set_script_publisher, start_for_each_owned, start_for_each_owned_keep,
+    start_for_each_pooled, OwnedWave,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -372,9 +372,6 @@ pub fn drive_script_waves_with(
                 DriveStart::Continue => continue,
                 DriveStart::Abort | DriveStart::Stop | DriveStart::Idle => break,
             }
-        }
-        if help_steal() {
-            continue;
         }
         thread::park_timeout(Duration::from_millis(1));
     }

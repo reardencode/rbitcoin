@@ -276,21 +276,6 @@ pub fn fg_has_unclaimed() -> bool {
     waves_snap().load().iter().any(|w| w.has_unclaimed())
 }
 
-/// Run one steal chunk on the caller (not a steal worker). Used by the
-/// scripts stage thread to finish a wave tail instead of parking.
-///
-/// A one-job index claim can run on `ibd-confirm` when the workers are busy.
-pub fn help_steal() -> bool {
-    if on_steal_worker() {
-        return false;
-    }
-    let Some((range, hold)) = steal_chunk() else {
-        return false;
-    };
-    run_held(range, hold);
-    true
-}
-
 #[doc(hidden)]
 pub struct ApplyCtx<T> {
     pub items: *const T,

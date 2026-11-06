@@ -308,6 +308,110 @@ fn empty_loaded_batch() -> rbitcoin_query::confirm_run::LoadedBatch {
     }
 }
 
+/// Workers are all inside detached jobs. The publisher must not run the wave.
+#[test]
+fn drive_script_waves_parks_while_workers_are_busy() {
+    use rbitcoin_consensus::script_pool::{spawn_detached, steal_test_gate};
+    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::confirm_run::scripts::drive_script_waves_with;
+    use rbitcoin_query::confirm_run::Prepared;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let _gate = steal_test_gate();
+    let n = thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .max(1);
+    let entered = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let _release = Release(Arc::clone(&release));
+    for _ in 0..n {
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        spawn_detached(move || {
+            entered.fetch_add(1, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+    }
+    let wait = Instant::now();
+    while entered.load(Ordering::SeqCst) < n {
+        assert!(
+            wait.elapsed() < Duration::from_secs(5),
+            "workers entered {} of {n}",
+            entered.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let done = Arc::new(AtomicUsize::new(0));
+    let done_w = Arc::clone(&done);
+    let stage = thread::Builder::new()
+        .name("ibd-confirm".into())
+        .spawn(move || {
+            drive_script_waves_with(
+                &rx,
+                |_, _| {},
+                |_, _| {
+                    done_w.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+                |_, _, _| {
+                    done_w.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+                || false,
+            );
+        })
+        .expect("spawn publisher");
+
+    let mut batch = empty_loaded_batch();
+    batch.prepared.push(Prepared {
+        height: Height(1),
+        header_fk: Fk(1),
+        tx_fks: Vec::new(),
+        jobs: vec![bad_p2pkh_job(), bad_p2pkh_job()],
+        spends: Vec::new(),
+        fees: 0,
+        check_scripts: true,
+        time: 0,
+        bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+        hash: [1; 32],
+        txids: Vec::new(),
+        prev_mtp: 0,
+    });
+    tx.send((batch, 0)).expect("send");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        done.load(Ordering::SeqCst),
+        0,
+        "ibd-confirm ran the wave while every script worker was busy"
+    );
+    release.store(true, Ordering::SeqCst);
+    let wait = Instant::now();
+    while done.load(Ordering::SeqCst) == 0 {
+        assert!(
+            wait.elapsed() < Duration::from_secs(5),
+            "workers never finished the parked wave"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    drop(tx);
+    stage.join().expect("publisher");
+}
+
 fn linux_thread_comms() -> Vec<String> {
     let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
         return Vec::new();
