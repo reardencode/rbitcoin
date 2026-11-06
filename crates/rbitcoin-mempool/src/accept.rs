@@ -1024,6 +1024,7 @@ impl ActiveMempool {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // each admit states its own policy
     pub fn accept_tx_with(
         &mut self,
         tx: &Transaction,
