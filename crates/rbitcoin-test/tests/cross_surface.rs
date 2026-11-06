@@ -3579,28 +3579,6 @@ fn sv2_template(mut f: rbitcoin_sv2::Frame) -> Sv2Template {
     }
 }
 
-/// Coinbase the template describes: OP_TRUE payout, then the TP's outputs.
-fn sv2_coinbase(t: &Sv2Template) -> Transaction {
-    let tp_out: TxOut = bitcoin::consensus::deserialize(&t.coinbase_outputs).unwrap();
-    Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(t.coinbase_prefix.clone()),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[[0u8; 32]]),
-        }],
-        output: vec![
-            TxOut {
-                value: Amount::from_sat(t.value_remaining),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            },
-            tp_out,
-        ],
-    }
-}
-
 fn sv2_tx_data(mut f: rbitcoin_sv2::Frame) -> (u64, Vec<u8>, Vec<Vec<u8>>) {
     use template_distribution_sv2::{
         RequestTransactionDataSuccess, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
@@ -3802,7 +3780,11 @@ async fn sv2_tp_bootstrap() {
     assert_eq!(best["result"], mined.to_string());
 
     // Grind the pushed template (it carries the RPC tx) and submit it.
-    let coinbase = sv2_coinbase(&pushed);
+    let coinbase = rbitcoin_sv2::testutil::solution_coinbase(
+        &pushed.coinbase_prefix,
+        pushed.value_remaining,
+        &pushed.coinbase_outputs,
+    );
     let root =
         pushed
             .merkle_path

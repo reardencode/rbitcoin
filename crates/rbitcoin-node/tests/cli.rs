@@ -80,6 +80,8 @@ fn operator_conf_and_argv() {
         "--startup-notify",
         "--test-activation-height",
         "--regtest-pow-bits",
+        "--regtest-block-time",
+        "--regtest-retarget-interval",
         "--rpc-work-queue",
         "--peer-timeout",
         "--blocks-only",
@@ -151,6 +153,8 @@ fn operator_conf_and_argv() {
         "--startupnotify",
         "--testactivationheight",
         "--regtestpowbits",
+        "--regtestblocktime",
+        "--regtestretargetinterval",
         "--rpcworkqueue",
         "--checkblocks",
         "--blocksdir",
@@ -1192,4 +1196,108 @@ fn store_read_budget_formula_and_flag() {
         h.contains("minimum 1"),
         "help must state the default formula: {h}"
     );
+}
+
+#[test]
+fn regtest_retarget_from_argv_and_conf() {
+    let retarget = |cfg: &NodeConfig| cfg.chain_params().map(|p| p.regtest_retarget);
+    let regtest = ready_config(["rbitcoin-node", "--network=regtest"]);
+    assert_eq!(retarget(&regtest).unwrap(), None);
+    assert!(regtest.chain_params().unwrap().no_pow_retargeting());
+
+    // Either key turns it on; the other keeps mainnet's value.
+    for (args, spacing, interval) in [
+        (vec!["--regtest-block-time=10"], 10, 2016),
+        (vec!["--regtest-retarget-interval=60"], 600, 60),
+        (
+            vec!["--regtest-block-time=10", "--regtest-retarget-interval=60"],
+            10,
+            60,
+        ),
+    ] {
+        let mut argv = vec!["rbitcoin-node", "--network=regtest"];
+        argv.extend(args);
+        let params = ready_config(argv).chain_params().unwrap();
+        assert!(params.regtest_retarget.is_some());
+        assert!(!params.no_pow_retargeting());
+        assert!(!params.allow_min_difficulty_blocks());
+        assert_eq!(params.btc.pow_target_spacing, spacing);
+        assert_eq!(params.difficulty_adjustment_interval(), interval);
+    }
+
+    let dir = tmp_datadir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("retarget.conf");
+    std::fs::write(
+        &conf,
+        "regtest\nregtest_pow_bits=0x1e07a120\nregtest_block_time=10\nregtest_retarget_interval=60\n",
+    )
+    .unwrap();
+    let cfg = ready_config(["rbitcoin-node", "--conf", conf.to_str().unwrap()]);
+    assert_eq!(cfg.regtest_block_time, Some(10));
+    assert_eq!(cfg.regtest_retarget_interval, Some(60));
+    let start = retarget(&cfg).unwrap().unwrap().start_bits;
+    assert_eq!(start.to_consensus(), 0x1e07_a120);
+
+    for (args, want) in [
+        (
+            vec!["--network=signet", "--regtest-block-time=10"],
+            "regtest only",
+        ),
+        (
+            vec!["--network=regtest", "--regtest-block-time=0"],
+            "greater than zero",
+        ),
+        (
+            vec!["--network=regtest", "--regtest-retarget-interval=1"],
+            "at least 2",
+        ),
+        // Below 4 s the lower clamp floors to zero.
+        (
+            vec![
+                "--network=regtest",
+                "--regtest-block-time=1",
+                "--regtest-retarget-interval=3",
+            ],
+            "at least 4 seconds",
+        ),
+        (
+            vec![
+                "--network=regtest",
+                "--regtest-block-time=4294967295",
+                "--regtest-retarget-interval=2",
+            ],
+            "too long",
+        ),
+        // Target 1 is harder than the floor of a 4 s timespan, target 4.
+        (
+            vec![
+                "--network=regtest",
+                "--regtest-pow-bits=0x01010000",
+                "--regtest-block-time=1",
+                "--regtest-retarget-interval=4",
+            ],
+            "harder than",
+        ),
+        // The pow limit is easier than the ceiling four timespans allow.
+        (
+            vec![
+                "--network=regtest",
+                "--regtest-pow-bits=0x2000ffff",
+                "--regtest-block-time=10",
+            ],
+            "ceiling",
+        ),
+    ] {
+        let mut argv = vec!["rbitcoin-node"];
+        argv.extend(args);
+        let err = ready_config(argv).chain_params().unwrap_err().to_string();
+        assert!(err.contains(want), "{err}");
+    }
+    assert!(operator_config_from_args(
+        ["rbitcoin-node", "--regtest-block-time=soon"],
+        &NodeEnv::default()
+    )
+    .is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

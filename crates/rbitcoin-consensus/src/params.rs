@@ -24,6 +24,22 @@ pub struct Bip9Deployment {
     pub threshold: u32,
 }
 
+/// Mainnet-style retargeting on regtest at a chosen block time and period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RegtestRetarget {
+    /// Bits for heights 1 through the first retarget height, whose period
+    /// timespan would otherwise start at the 2011 genesis timestamp.
+    pub start_bits: CompactTarget,
+    /// Easiest target a retarget may reach. A retarget multiplies the target
+    /// by up to four period timespans; this keeps that product in 256 bits.
+    pub ceiling: Target,
+    /// Hardest target a retarget may reach: the smallest whose hardest step,
+    /// `timespan / 4` over `timespan` in integers, is above zero. Below it a
+    /// retarget can reach the zero target, which no hash meets.
+    pub floor: Target,
+}
+
 /// Static chain parameters for validation.
 #[derive(Debug, Clone)]
 pub struct ChainParams {
@@ -46,7 +62,12 @@ pub struct ChainParams {
     /// Regtest fixed difficulty for every block at height >= 1 (`None` = the
     /// network `pow_limit` bits). `header::apply_regtest_pow_overlay` applies
     /// it on regtest only, from `next_work_bits` and the off-tip header check.
+    /// With `regtest_retarget` set it is the start bits of the first period.
     pub regtest_pow_bits_overlay: Option<CompactTarget>,
+    /// Regtest retargeting (`None` = Core regtest, which never retargets). Set
+    /// by [`ChainParams::apply_regtest_retarget`].
+    #[doc(hidden)]
+    pub regtest_retarget: Option<RegtestRetarget>,
     /// Header hash at BIP34 height that turns BIP30 off. `None` on signet and
     /// regtest (Core's null hash), so BIP30 stays on at every height.
     pub bip34_hash: Option<BlockHash>,
@@ -88,6 +109,7 @@ impl ChainParams {
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
             regtest_pow_bits_overlay: None,
+            regtest_retarget: None,
             bip34_hash: None,
             testdummy: Some(Bip9Deployment {
                 bit: 28,
@@ -111,6 +133,7 @@ impl ChainParams {
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
             regtest_pow_bits_overlay: None,
+            regtest_retarget: None,
             bip34_hash: Some(bip34_block_hash(
                 // Core `consensus.BIP34Hash`: mainnet block 227931.
                 "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8",
@@ -133,6 +156,7 @@ impl ChainParams {
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
             regtest_pow_bits_overlay: None,
+            regtest_retarget: None,
             bip34_hash: Some(bip34_block_hash(
                 "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8",
             )),
@@ -156,6 +180,7 @@ impl ChainParams {
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
             regtest_pow_bits_overlay: None,
+            regtest_retarget: None,
             bip34_hash: None,
             testdummy: None,
             enforce_bip94: true,
@@ -189,6 +214,7 @@ impl ChainParams {
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
             regtest_pow_bits_overlay: None,
+            regtest_retarget: None,
             bip34_hash: None,
             testdummy: None,
             enforce_bip94: false,
@@ -410,6 +436,63 @@ impl ChainParams {
         Ok(())
     }
 
+    /// Retarget regtest difficulty as mainnet does, toward one block per
+    /// `block_time` seconds, every `interval` blocks.
+    ///
+    /// Clears Core regtest's no-retarget and min-difficulty rules. Heights 1
+    /// through `interval` carry the [`ChainParams::apply_regtest_pow_bits`]
+    /// overlay, or the ceiling bits when it is unset, so apply that first.
+    /// Refuses other networks, a zero block time, an interval below 2, a
+    /// timespan under 4 seconds or past `u32::MAX`, and an overlay easier
+    /// than the ceiling or harder than the floor. Not a Bitcoin Core option.
+    pub fn apply_regtest_retarget(
+        &mut self,
+        block_time: u64,
+        interval: u32,
+    ) -> Result<(), &'static str> {
+        if self.network != Network::Regtest {
+            return Err("regtest retargeting is regtest only");
+        }
+        if block_time == 0 {
+            return Err("regtest block time must be greater than zero");
+        }
+        if interval < 2 {
+            return Err("regtest retarget interval must be at least 2");
+        }
+        let timespan = block_time
+            .checked_mul(u64::from(interval))
+            .filter(|t| *t <= u64::from(u32::MAX))
+            .ok_or("regtest block time times retarget interval is too long")?;
+        // Core floors the lower clamp at timespan / 4. At zero, a period with
+        // no elapsed time retargets to a zero target that no hash meets.
+        if timespan < 4 {
+            return Err("regtest block time times retarget interval must be at least 4 seconds");
+        }
+        let ceiling = retarget_ceiling(timespan);
+        let floor = retarget_floor(timespan);
+        let start_bits = match self.regtest_pow_bits_overlay {
+            Some(bits) if Target::from_compact(bits) > ceiling => {
+                return Err("regtest_pow_bits is easier than the regtest retarget ceiling");
+            }
+            Some(bits) if Target::from_compact(bits) < floor => {
+                return Err("regtest_pow_bits is harder than the regtest retarget floor");
+            }
+            Some(bits) => bits,
+            None => ceiling.to_compact_lossy(),
+        };
+        self.btc.pow_target_spacing = block_time;
+        self.btc.pow_target_timespan = timespan;
+        self.btc.no_pow_retargeting = false;
+        self.btc.allow_min_difficulty_blocks = false;
+        self.btc.max_attainable_target = ceiling;
+        self.regtest_retarget = Some(RegtestRetarget {
+            start_bits,
+            ceiling,
+            floor,
+        });
+        Ok(())
+    }
+
     /// Parse compact bits as hex, `0x` optional (`0x1e0fffff`).
     pub fn parse_regtest_pow_bits(spec: &str) -> Result<u32, &'static str> {
         let hex = spec
@@ -547,4 +630,28 @@ pub fn check_genesis_hash(params: &ChainParams, hash: BlockHash) -> bool {
 
 pub fn genesis_block(params: &ChainParams) -> bitcoin::block::Block {
     constants::genesis_block(params.network)
+}
+
+/// Largest target `t` with `t * 4 * timespan` at most `2^256 - 1`: that
+/// all-ones value divided by `4 * timespan`, one byte of long division at a time.
+fn retarget_ceiling(timespan: u64) -> Target {
+    let divisor = u128::from(timespan.saturating_mul(4).max(1));
+    let mut bytes = [0u8; 32];
+    let mut rem = 0u128;
+    for byte in &mut bytes {
+        rem = (rem << 8) | u128::from(u8::MAX);
+        // rem < divisor * 256 here, so the quotient fits a byte.
+        *byte = u8::try_from(rem / divisor).unwrap_or(u8::MAX);
+        rem %= divisor;
+    }
+    Target::from_be_bytes(bytes)
+}
+
+/// Smallest target whose hardest retarget step, `timespan / 4` over
+/// `timespan` in Core's integer arithmetic, is still above zero.
+fn retarget_floor(timespan: u64) -> Target {
+    let floor = timespan.div_ceil(timespan >> 2);
+    let mut bytes = [0u8; 32];
+    bytes[24..].copy_from_slice(&floor.to_be_bytes());
+    Target::from_be_bytes(bytes)
 }

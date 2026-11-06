@@ -21,11 +21,12 @@ pub(crate) struct TestChain {
 /// Regtest chain padded to `100 + spendable` with an attached relaying mempool.
 /// The node clock is wall time, so the stale tip keeps `in_ibd()` true.
 pub(crate) fn padded_chain(label: &str, spendable: u32) -> TestChain {
-    padded_chain_with(label, spendable, ChainParams::regtest())
+    padded_chain_with(label, 100 + spendable, ChainParams::regtest())
 }
 
-/// [`padded_chain`] under `params`, which must accept the regtest padding.
-pub(crate) fn padded_chain_with(label: &str, spendable: u32, params: ChainParams) -> TestChain {
+/// [`padded_chain`] to height `tip` under `params`, which must accept the
+/// regtest padding. The first `tip - 100` coinbases are spendable.
+pub(crate) fn padded_chain_with(label: &str, tip: u32, params: ChainParams) -> TestChain {
     let (dir, q) = tiny_query_labeled(label);
     let genesis = bitcoin::blockdata::constants::genesis_block(Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -35,8 +36,8 @@ pub(crate) fn padded_chain_with(label: &str, spendable: u32, params: ChainParams
         genesis.block_hash(),
         genesis.header.time,
         1,
-        100 + spendable,
-        spendable,
+        tip,
+        tip.saturating_sub(100),
     );
     let chain = Arc::new(ChainHub::new(q, params, Milestone::NONE));
     let mp = dir.path().join("mempool");
