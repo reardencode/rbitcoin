@@ -71,6 +71,14 @@ before 1.0).
   not request. From any other peer, that message is treated as a header
   announcement. Once this node has the block, it can send the compact
   form to those peers immediately.
+- **Trusted-peer mode follows one peer and still checks the rules.**
+  `--trust-peer` connects only to that address. It is not a faster way
+  to sync. Listening, seed nodes, and every other peer stay off. Some
+  failures from that peer are accepted and written to the log, including
+  a script failure. Proof of work, the required difficulty, and a block
+  body that does not match its header are still rejected. Transactions
+  and blocks you submit yourself are still checked in full. Do not point
+  a wallet at this node unless you accept that peer.
 
 ### Changed
 

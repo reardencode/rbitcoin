@@ -24,7 +24,7 @@ refuses to tag it. `--patch` refuses to create it (`Z` stays `< 99`).
 
 Homes that must match on a ship commit: `Cargo.toml`
 `[workspace.package].version`, `nix/rbitcoin.nix` `version`, `CHANGELOG.md`
-`## [X.Y.Z]` with a **`### Highlights`** subsection (1–10 bullets,
+`## [X.Y.Z]` with a **`### Highlights`** subsection (1–11 bullets,
 operator-facing, then the thanks paragraph when this release has one).
 `./scripts/release-gate.sh` checks the bullets. Narrative banners
 (README, SECURITY, `docs/operator/mainnet.md`)
@@ -206,7 +206,7 @@ Do not commit the bump on `master`. Do not merge a red PR.
 From current `origin/master` at `X.Y.99`:
 
 1. Worktree `release/X.(Y+1).0`. `./scripts/release-cut.sh --minor`.
-2. Write **`### Highlights`** (brief, operator-facing; at most ten bullets).
+2. Write **`### Highlights`** (brief, operator-facing; at most eleven bullets).
    Leave the thanks paragraph from `changelog.d/thanks.md` at the end of
    that section. `release-notes.sh` keeps thanks in Highlights. When a
    commit since the previous tag is by someone other than `reardencode`
