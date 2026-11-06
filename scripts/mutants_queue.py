@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Order cargo-mutants names: changed lines first, then a rotating backlog.
 
-The nightly job runs a time budget of these names with ``--test-workspace``.
+The nightly job runs a time budget of these names. A file batch runs that
+crate's tests. A miss is run again against the packages that link the crate.
 A cursor remembers how far the new-code prefix and the old rotation got.
 """
 
@@ -360,6 +361,12 @@ def _outcomes(log: str) -> list[tuple[str, str, str]]:
         kind = raw.strip().split(None, 1)[0]
         found.append((kind, match.group(1), raw.strip()))
     return found
+
+
+def requested_misses(phase1: str, requested: list[str]) -> list[str]:
+    """Requested names phase 1 logged as MISSED, in slice order."""
+    missed = {name for kind, name, _raw in _outcomes(phase1) if kind == "MISSED"}
+    return [line.strip() for line in requested if line.strip() and line.strip() in missed]
 
 
 def reconcile_missed(phase1: str, phase2: str, requested: list[str]) -> list[str]:
@@ -780,6 +787,10 @@ def main(argv: list[str]) -> int:
     rec_p.add_argument("--phase2", type=Path)
     rec_p.add_argument("--slice", type=Path, required=True)
 
+    rm_p = sub.add_parser("requested-misses")
+    rm_p.add_argument("--phase1", type=Path, required=True)
+    rm_p.add_argument("--slice", type=Path, required=True)
+
     rem_p = sub.add_parser("remember")
     rem_p.add_argument("--cursor", type=Path, required=True)
     rem_p.add_argument("--new-len", type=int, required=True)
@@ -833,6 +844,10 @@ def main(argv: list[str]) -> int:
     if args.cmd == "reconcile-missed":
         phase2 = args.phase2.read_text() if args.phase2 else ""
         for line in reconcile_missed(args.phase1.read_text(), phase2, args.slice.read_text().splitlines()):
+            print(line)
+        return 0
+    if args.cmd == "requested-misses":
+        for line in requested_misses(args.phase1.read_text(), args.slice.read_text().splitlines()):
             print(line)
         return 0
     if args.cmd == "progress":

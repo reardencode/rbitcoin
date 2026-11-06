@@ -476,6 +476,9 @@ python3 "$PY" reconcile-missed --phase1 "$tmp/phase1.log" --slice "$tmp/requeste
   >"$tmp/reconciled-open.txt"
 assert_ok "with no phase-2 log every phase-1 miss is kept" \
   test "$(grep -c . "$tmp/reconciled-open.txt")" = 5
+rerun="$(python3 "$PY" requested-misses --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt")"
+assert_ok "only requested misses are rerun, in slice order" \
+  test "$rerun" = "$(printf '%s\n' "$req" "$kept" "$caught_name" "$timed")"
 
 NIGHTLY="$ROOT/scripts/mutants-nightly.sh"
 TOML="$ROOT/.cargo/mutants.toml"
@@ -517,8 +520,41 @@ assert_ok "nightly progress ignores extra outcomes" \
   grep -q 'mutants_queue.py" progress' "$NIGHTLY"
 assert_ok "same-file cursor copy is skipped" \
   grep -q -- '-ef' "$NIGHTLY"
-assert_ok "per-mutant timeout stays 20 minutes" \
-  grep -q 'MUTANTS_TIMEOUT:-1200' "$NIGHTLY"
+assert_ok "crate run and dependent run are separate cargo mutants commands" \
+  python3 -c '
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+cmds = []
+buf = []
+for line in text.splitlines():
+    if buf:
+        buf.append(line)
+        if not line.rstrip().endswith("\\"):
+            cmds.append(" ".join(part.strip().strip("\\") for part in buf))
+            buf = []
+        continue
+    if "cargo mutants" in line and "--list" not in line:
+        if line.rstrip().endswith("\\"):
+            buf = [line]
+        else:
+            cmds.append(line.strip())
+runs = [c for c in cmds if "cargo mutants" in c and "--list" not in c]
+assert len(runs) == 2, runs
+phase1, phase2 = runs
+assert "--test-package" in phase1, phase1
+assert "--baseline=skip" not in phase1, phase1
+assert "--test-workspace" not in phase1, phase1
+assert "--timeout" not in phase1, phase1
+assert "--baseline=skip" in phase2, phase2
+assert "--timeout" in phase2, phase2
+assert "--test-workspace" not in phase2, phase2
+assert "${dep_args[@]}" in phase2, phase2
+assert "dep_args+=(--test-package" in text
+for needle in ("package-for", "dependents", "dependent-timeout", "reconcile-missed", "requested-misses"):
+    assert needle in text, needle
+assert "--test-workspace" not in text
+assert "workspace-baseline.log" in text
+' "$NIGHTLY"
 assert_ok "one job budget is 4 hours" \
   grep -q 'MUTANTS_BUDGET_SEC:-14400' "$NIGHTLY"
 assert_ok "missed mutants do not fail the nightly script" \

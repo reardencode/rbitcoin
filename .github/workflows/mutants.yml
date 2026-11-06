@@ -1,7 +1,9 @@
 # Nightly workspace mutants. Not a required check.
-# Two jobs share an 8 hour mutant budget. Each job runs new mutants until
-# half of its own budget has elapsed, then the backlog. The second job
-# resumes the cursor and does not open another new window. The cursor and
+# Two jobs share an 8 hour mutant budget. Each job times one green workspace
+# suite, then runs each file's crate tests (cargo-mutants' own 5× baseline).
+# A miss is rerun against packages that link that crate. Each job runs new
+# mutants until half of its own budget has elapsed, then the backlog. The
+# second job resumes the cursor and does not open another new window. The cursor and
 # MISSED lines live on the mutants-state branch, which outlives the
 # 14-day artifact. MISSED is not a failure. A failed push of that branch
 # fails the run. Owner: TESTING.md (Mutation testing).
@@ -96,7 +98,7 @@ jobs:
         run: |
           {
             echo "### mutants nightly (1/2)"
-            echo "Not required. Workspace tests. New code until half this job's budget, then the backlog."
+            echo "Not required. Crate tests, then dependents for a miss. New code until half this job's budget, then the backlog."
             if [[ -f mutants-nightly/missed.txt ]]; then
               echo
               echo '```'

@@ -13,9 +13,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # 4 hours for this job. The nightly workflow runs two of these, 8 hours
-# total. One workspace suite is the unit of work, and two of them in
-# parallel do not fit a hosted runner, so this is -j 1. The job timeout
-# is 30 minutes longer so the script can stop itself and the workflow can
+# total. One crate suite is the unit of work, and two of them in parallel
+# do not fit a hosted runner, so this is -j 1. The job timeout is 30
+# minutes longer so the script can stop itself and the workflow can
 # publish the state branch. GitHub-hosted jobs cannot run longer than 6 hours.
 BUDGET_SEC="${MUTANTS_BUDGET_SEC:-14400}"
 # One cargo-mutants process per source file. 27.1.0 emits `..` struct
@@ -23,8 +23,6 @@ BUDGET_SEC="${MUTANTS_BUDGET_SEC:-14400}"
 # retests every such delete. --file keeps that repeat inside this file.
 # The cap is how many queued names from that file one process may take.
 BATCH="${MUTANTS_BATCH:-200}"
-# A mutant that has not finished in 20 minutes is a hang, not a miss.
-MUTANT_TIMEOUT="${MUTANTS_TIMEOUT:-1200}"
 CURSOR="${MUTANTS_CURSOR:-mutants-nightly/cursor.json}"
 OUT="${MUTANTS_OUT:-mutants-nightly}"
 
@@ -85,6 +83,36 @@ new_off=0
 old_off=0
 start=$SECONDS
 deadline=$((start + BUDGET_SEC))
+
+# One green workspace run per job. It does not warm the mutants scratch
+# tree. Phase 2's timeout is five times the test half of this run.
+echo "mutants-nightly: workspace baseline"
+set +e
+cargo test --no-run --features mutants --workspace --exclude rbitcoin-bench \
+  >"$OUT/workspace-baseline.log" 2>&1
+build_ec=$?
+set -e
+if ((build_ec != 0)); then
+  echo "mutants-nightly: workspace baseline did not build (exit $build_ec)"
+  exit "$build_ec"
+fi
+test_start=$SECONDS
+set +e
+cargo test --features mutants --workspace --exclude rbitcoin-bench \
+  >>"$OUT/workspace-baseline.log" 2>&1
+test_ec=$?
+set -e
+measured=$((SECONDS - test_start))
+if ((test_ec != 0)); then
+  echo "mutants-nightly: workspace baseline failed (exit $test_ec)"
+  exit "$test_ec"
+fi
+if ((measured < 1)); then
+  measured=1
+fi
+DEP_TIMEOUT="$(python3 "$ROOT/scripts/mutants_queue.py" dependent-timeout --seconds "$measured")"
+echo "mutants-nightly: workspace tests took ${measured}s; dependent timeout ${DEP_TIMEOUT}s"
+cargo metadata --format-version 1 >"$OUT/metadata.json"
 while ((SECONDS < deadline)); do
   remain=$((deadline - SECONDS))
   if ((remain < 60)); then
@@ -125,31 +153,76 @@ while ((SECONDS < deadline)); do
     escaped="$(python3 "$ROOT/scripts/mutants_queue.py" re "$line")"
     RE_ARGS+=(--re "$escaped")
   done <"$slice"
-  echo "mutants-nightly: batch side=$side at $offset ($requested mutants in $file, ${remain}s left)"
+  pkg="$(python3 "$ROOT/scripts/mutants_queue.py" package-for --metadata "$OUT/metadata.json" --path "$file")"
+  log="$OUT/batch-$side-$offset.log"
+  echo "mutants-nightly: batch side=$side at $offset ($requested mutants in $file, package $pkg, ${remain}s left)"
+  # This crate only. cargo-mutants runs the unmutated suite once and times out at 5× that.
   set +e
   timeout --signal=TERM --kill-after=60s "$remain" \
     cargo mutants --features mutants --workspace --exclude 'crates/rbitcoin-bench/**/*.rs' \
-      --test-workspace=true --baseline=skip --caught --unviable \
-      -j 1 --timeout "$MUTANT_TIMEOUT" \
+      --test-package "$pkg" --caught --unviable \
+      -j 1 \
       "${RE_ARGS[@]}" \
-      >"$OUT/batch-$side-$offset.log" 2>&1
+      >"$log" 2>&1
   ec=$?
   set -e
-  grep -E '^MISSED' "$OUT/batch-$side-$offset.log" >>"$OUT/missed.txt" || true
   # A clean exit consumed the slice. A killed process counts only the
   # requested names that printed an outcome, in order. Unfiltered
   # struct-field deletes in this file do not advance the cursor.
   if ((ec == 0)); then
     step=$requested
   else
-    step="$(python3 "$ROOT/scripts/mutants_queue.py" progress --log "$OUT/batch-$side-$offset.log" --slice "$slice")"
+    step="$(python3 "$ROOT/scripts/mutants_queue.py" progress --log "$log" --slice "$slice")"
     if ((step > requested)); then
       step=$requested
     fi
     if ((step == 0)); then
+      python3 "$ROOT/scripts/mutants_queue.py" reconcile-missed --phase1 "$log" --slice "$slice" \
+        >>"$OUT/missed.txt"
       echo "mutants-nightly: batch made no progress (exit $ec); same queue next night"
       break
     fi
+  fi
+  deps_ec=0
+  deps_log="$OUT/batch-$side-$offset-deps.log"
+  if ((ec != 124)); then
+    remain=$((deadline - SECONDS))
+    python3 "$ROOT/scripts/mutants_queue.py" requested-misses --phase1 "$log" --slice "$slice" \
+      >"$OUT/batch-$side-$offset.misses"
+    python3 "$ROOT/scripts/mutants_queue.py" dependents --metadata "$OUT/metadata.json" --package "$pkg" \
+      >"$OUT/batch-$side-$offset.deps"
+    if ((remain >= 60)) && [[ -s "$OUT/batch-$side-$offset.misses" && -s "$OUT/batch-$side-$offset.deps" ]]; then
+      dep_args=()
+      while IFS= read -r dep; do
+        [[ -z "$dep" ]] && continue
+        dep_args+=(--test-package "$dep")
+      done <"$OUT/batch-$side-$offset.deps"
+      miss_re=(--file "$file")
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        escaped="$(python3 "$ROOT/scripts/mutants_queue.py" re "$line")"
+        miss_re+=(--re "$escaped")
+      done <"$OUT/batch-$side-$offset.misses"
+      if ((${#dep_args[@]} > 0)); then
+        echo "mutants-nightly: dependents for $pkg ($(wc -l <"$OUT/batch-$side-$offset.misses") misses, ${remain}s left)"
+        set +e
+        timeout --signal=TERM --kill-after=60s "$remain" \
+          cargo mutants --features mutants --workspace --exclude 'crates/rbitcoin-bench/**/*.rs' \
+            --baseline=skip --timeout "$DEP_TIMEOUT" --caught --unviable \
+            -j 1 "${dep_args[@]}" \
+            "${miss_re[@]}" \
+            >"$deps_log" 2>&1
+        deps_ec=$?
+        set -e
+      fi
+    fi
+  fi
+  if [[ -f "$deps_log" ]]; then
+    python3 "$ROOT/scripts/mutants_queue.py" reconcile-missed --phase1 "$log" --phase2 "$deps_log" \
+      --slice "$slice" >>"$OUT/missed.txt"
+  else
+    python3 "$ROOT/scripts/mutants_queue.py" reconcile-missed --phase1 "$log" --slice "$slice" \
+      >>"$OUT/missed.txt"
   fi
   if [[ "$side" == "new" ]]; then
     new_off=$((new_off + step))
@@ -179,7 +252,7 @@ while ((SECONDS < deadline)); do
       break
     fi
   fi
-  if ((ec == 124)); then
+  if ((ec == 124 || deps_ec == 124)); then
     echo "mutants-nightly: budget exhausted after $completed_total mutants"
     break
   fi
