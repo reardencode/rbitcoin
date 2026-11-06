@@ -24,9 +24,11 @@ watches use those, so they are documented in [`lightning.md`](./lightning.md).
 
 Electrum is plain TCP (`--electrum-listen`). TLS terminates at a reverse
 proxy ([`operator/interfaces.md`](./operator/interfaces.md)). With
-`--tor-control`, the node publishes an onion for that port and advertises
-`tcp_port` only (no `ssl_port`). Sparrow's onion URL is
-`tcp://<id>.onion:<port>`.
+`--tor-control` and `--electrum-onion`, and `--electrum-listen` bound to
+`127.0.0.1` or `0.0.0.0`, the node publishes an onion for that port and
+advertises `tcp_port` only (no `ssl_port`). Without `--electrum-onion`
+there is no onion and `server.features.hosts` is `{}`. Sparrow's onion URL
+is `tcp://<id>.onion:<port>`.
 
 Esplora is plain HTTP (`--esplora-listen`). There is no WebSocket. A
 wallet that wants push notifications uses Electrum subscriptions. The
