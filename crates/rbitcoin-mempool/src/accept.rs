@@ -522,9 +522,11 @@ pub struct PreparedAdmit {
     /// the byte even when this admit itself does not warn.
     pub keep_mark: bool,
     /// A second child of a version-3 parent may evict the first (BIP 431
-    /// sibling eviction). Core allows it only when a tx is judged alone, so
-    /// it is off unless a single-tx accept turns it on: packages, 1p1c pairs,
-    /// put-backs and reorg re-adds keep it off.
+    /// sibling eviction). Core allows it only when a tx is judged alone,
+    /// which for a package is its per-tx pass. So it applies only when the tx
+    /// pays its own fee floor, and is off unless the admit turns it on:
+    /// single accepts and package members do; 1p1c pairs, put-backs, reorg
+    /// re-adds and multi-tx `testmempoolaccept` do not.
     pub sibling_eviction: bool,
 }
 
@@ -1732,15 +1734,25 @@ impl ActiveMempool {
         let fee_sat = prep.fee_sat;
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
-        let sibling = match self.check_truc(tx, weight.div_ceil(4), &scan)? {
-            Some(_) if !prep.sibling_eviction => {
-                return Err(AcceptError::Policy("TRUC-violation"));
-            }
-            sibling => sibling,
-        };
-        self.check_ephemeral_spends(tx, &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
+        let sibling = match self.check_truc(tx, weight.div_ceil(4), &scan)? {
+            // Core's per-tx pass admits a package member only when it pays
+            // its own floor; the package-feerate remainder never evicts.
+            Some(s)
+                if prep.sibling_eviction
+                    && policy::meets_min_relay_fee_at(
+                        admit_fee,
+                        weight,
+                        self.mempool_min_fee_sat_kvb(),
+                    ) =>
+            {
+                Some(s)
+            }
+            Some(_) => return Err(AcceptError::Policy("TRUC-violation")),
+            None => None,
+        };
+        self.check_ephemeral_spends(tx, &scan)?;
 
         // The sibling joins the replaced set and pays for it like any
         // conflict (Core adds it to `m_conflicts`).
@@ -2095,8 +2107,7 @@ impl ActiveMempool {
                 lifted.push(parked);
             }
             // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
-            // A package member never evicts a TRUC sibling (Core).
-            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, false) {
+            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, true) {
                 Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);

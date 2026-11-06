@@ -4487,7 +4487,7 @@ impl MempoolHub {
                 time_prepare_lock: true,
                 min_relay: member_min,
                 waive: false,
-                sibling_eviction: false,
+                sibling_eviction: true,
             };
             let prep = match self
                 .stage_scripts(tx, tx, spec, &mut stages, &mut lock_us)
@@ -5003,7 +5003,7 @@ impl MempoolHub {
                 time_prepare_lock: true,
                 min_relay: member_min,
                 waive: false,
-                sibling_eviction: false,
+                sibling_eviction: true,
             };
             let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
                 Ok(p) => p,

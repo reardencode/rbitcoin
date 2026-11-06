@@ -3277,11 +3277,12 @@ fn v3_spend(prevs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
 
 const COINBASE_SAT: u64 = 50_0000_0000;
 
-/// A version-3 child judged alone evicts the parent's other child when it
-/// pays for it (BIP 431 sibling eviction). Inside a package it does not, as
-/// in Core: a package child cannot pay to evict its parent's sibling.
+/// A version-3 child that pays its own way evicts the parent's other child
+/// when it pays for it (BIP 431 sibling eviction), sent alone or in a
+/// package (Core's per-tx pass). A package child cannot pay for it: a member
+/// that needs the package feerate is `TRUC-violation`, as in Core.
 #[test]
-fn truc_sibling_eviction_is_single_tx_only() {
+fn truc_sibling_eviction_needs_its_own_fee() {
     let (_store, q, cbs) = pad_cbs(12);
     for (round, on_async) in [false, true].into_iter().enumerate() {
         let dir = tmp();
@@ -3320,9 +3321,18 @@ fn truc_sibling_eviction_is_single_tx_only() {
             &[OutPoint::new(parent.compute_txid(), 1)],
             vec![pay_true(half - 50_000)],
         );
-        from_peer(&hub, &paying, 8, on_async).expect("evicts the first child");
+        hub.accept_package(std::slice::from_ref(&paying))
+            .expect("a one-tx package evicts the first child");
         assert!(!hub.contains(&first.compute_txid()));
         assert!(hub.contains(&paying.compute_txid()));
+
+        let relayed = v3_spend(
+            &[OutPoint::new(parent.compute_txid(), 0)],
+            vec![pay_true(half - 150_000)],
+        );
+        from_peer(&hub, &relayed, 8, on_async).expect("evicts by relay");
+        assert!(!hub.contains(&paying.compute_txid()));
+        assert!(hub.contains(&relayed.compute_txid()));
     }
 }
 

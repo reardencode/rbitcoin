@@ -662,11 +662,12 @@ fn truc_sibling_eviction() {
     let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(190_000)]);
     mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
 
-    // Only a tx judged alone may evict: not a package member.
-    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
-    let unrelated = ver_tx(&[ops[1]], 3, vec![pay(490_000)]);
+    // A package child cannot pay to evict its parent's sibling: a member
+    // that needs the package feerate is `TRUC-violation`, as in Core.
+    let free = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(200_000)]);
+    let bump = ver_tx(&[out_of(&free, 0)], 3, vec![pay(100_000)]);
     assert_truc_violation(
-        mp.accept_package(&[paying.clone(), unrelated], &utxos, TIP_OK)
+        mp.accept_package(&[free, bump], &utxos, TIP_OK)
             .map(|mut r| r.remove(0)),
     );
     assert!(mp.graph.contains(&first.compute_txid()));
@@ -676,9 +677,12 @@ fn truc_sibling_eviction() {
     assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
     assert!(mp.graph.contains(&first.compute_txid()));
 
+    // A member that pays its own way evicts, as Core's per-tx pass does.
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
     let r = mp
-        .accept_tx(&paying, &utxos, TIP_OK)
-        .expect("a sibling that pays more evicts the first child");
+        .accept_package(std::slice::from_ref(&paying), &utxos, TIP_OK)
+        .expect("a sibling that pays more evicts the first child")
+        .remove(0);
     assert!(
         r.replaced.contains(&first.compute_txid()),
         "{:?}",
