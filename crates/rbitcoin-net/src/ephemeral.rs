@@ -8,7 +8,7 @@ use crate::peer::{
 };
 use crate::seeds::AddrMan;
 use crate::socks::Dialer;
-use crate::tx_relay::{IsolatedLap, MempoolHub};
+use crate::tx_relay::{IsolatedLap, IsolatedTake, MempoolHub};
 use crate::v2::{read_v2_frame, write_v2_msg, V2Reader, V2Writer};
 use crate::{NetAddr, OnlyNet};
 use bitcoin::p2p::message::NetworkMessage;
@@ -225,16 +225,25 @@ pub fn spawn_isolated_broadcast_loop(
             // left, and `take` already marked this txid taken. A failed try
             // is the lagged lap; the read then waits on the same guard.
             let hub = Arc::clone(&mp);
-            let tx = tokio::task::spawn_blocking(move || {
+            let take = tokio::task::spawn_blocking(move || {
                 let _g = crate::reactor::BlockingRegion::enter();
-                hub.read_tx_for_isolated(&txid)
+                hub.isolated_tx_to_send(&txid)
             })
             .await
             .expect("isolated broadcast get_tx join");
-            let Some(tx) = tx else {
-                rbitcoin_log::debug!("isolated broadcast {txid}: left the mempool before its turn");
-                mp.note_isolated_lap(IsolatedLap::SkippedUnknown);
-                continue;
+            let tx = match take {
+                IsolatedTake::Send(tx) => tx,
+                IsolatedTake::Gone => {
+                    rbitcoin_log::debug!(
+                        "isolated broadcast {txid}: left the mempool before its turn"
+                    );
+                    mp.note_isolated_lap(IsolatedLap::SkippedUnknown);
+                    continue;
+                }
+                IsolatedTake::InBlock => {
+                    rbitcoin_log::debug!("isolated broadcast {txid}: already in a block, not sent");
+                    continue;
+                }
             };
             // `unindex_txid` drops the local-origin entry on every removal,
             // and this check never waits on the mempool lock.

@@ -745,6 +745,8 @@ async fn confirmed_private_broadcast_is_not_sent_again_before_the_pool_is_mainta
         .expect("local");
     assert_eq!(mp.next_isolated().await.0, txid);
     mp.isolated_sent(&txid);
+    mp.note_mock_now(mp.relay_now_secs() + 181);
+    assert_eq!(mp.requeue_unreturned(), 1);
     hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![local])
         .unwrap();
     assert!(!mp.pool_maintained());
@@ -752,13 +754,27 @@ async fn confirmed_private_broadcast_is_not_sent_again_before_the_pool_is_mainta
         mp.is_local_origin(&txid),
         "an unmaintained pool keeps the row"
     );
-    mp.note_mock_now(mp.relay_now_secs() + 181);
-    assert_eq!(
-        mp.requeue_unreturned(),
-        0,
-        "a confirmed tx is not sent again"
+    assert_eq!(mp.next_isolated().await.0, txid);
+    assert!(
+        matches!(
+            mp.isolated_tx_to_send(&txid),
+            rbitcoin_net::tx_relay::IsolatedTake::InBlock
+        ),
+        "a tx mined while it waited its turn is not sent"
     );
     assert!(mp.skip_standing_inv(&txid));
+
+    hub.invalidate_block(hub.tip_hash().unwrap()).unwrap();
+    mp.note_mock_now(mp.relay_now_secs() + 181);
+    assert_eq!(mp.requeue_unreturned(), 1, "a reorg can retry the tx");
+    assert_eq!(mp.next_isolated().await.0, txid);
+    assert!(
+        matches!(
+            mp.isolated_tx_to_send(&txid),
+            rbitcoin_net::tx_relay::IsolatedTake::Send(_)
+        ),
+        "once the block is gone the tx is sent again"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
