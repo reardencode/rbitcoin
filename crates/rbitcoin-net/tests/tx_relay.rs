@@ -1551,7 +1551,7 @@ fn commit_refuses_a_coin_spent_during_script_check() {
         hits: AtomicUsize::new(0),
     };
     let err = hub
-        .accept_with_utxo(&tx, &utxo, TxOrigin::Relay(None), false, &[])
+        .accept_with_utxo(&tx, &utxo, TxOrigin::Relay(None), false, &[], true)
         .unwrap_err();
     assert!(
         matches!(err, AcceptError::MissingPrevout(missing) if missing == op),
@@ -3276,6 +3276,55 @@ fn v3_spend(prevs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
 }
 
 const COINBASE_SAT: u64 = 50_0000_0000;
+
+/// A version-3 child judged alone evicts the parent's other child when it
+/// pays for it (BIP 431 sibling eviction). Inside a package it does not, as
+/// in Core: a package child cannot pay to evict its parent's sibling.
+#[test]
+fn truc_sibling_eviction_is_single_tx_only() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for (round, on_async) in [false, true].into_iter().enumerate() {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let half = COINBASE_SAT / 2;
+        let parent = v3_spend(
+            &[OutPoint::new(cbs[round * 3], 0)],
+            vec![pay_true(half - 500), pay_true(half - 500)],
+        );
+        let first = v3_spend(
+            &[OutPoint::new(parent.compute_txid(), 0)],
+            vec![pay_true(half - 1_500)],
+        );
+        from_peer(&hub, &parent, 7, on_async).unwrap();
+        from_peer(&hub, &first, 7, on_async).unwrap();
+
+        let free = v3_spend(
+            &[OutPoint::new(parent.compute_txid(), 1)],
+            vec![pay_true(half - 500)],
+        );
+        let bump = v3_spend(
+            &[OutPoint::new(free.compute_txid(), 0)],
+            vec![pay_true(half - 500 - 100_000)],
+        );
+        let err = hub
+            .accept_package(&[free.clone(), bump])
+            .expect_err("a package cannot evict the sibling");
+        assert!(
+            matches!(err, AcceptError::Policy("TRUC-violation")),
+            "{err:?}"
+        );
+        assert!(hub.contains(&first.compute_txid()));
+
+        let paying = v3_spend(
+            &[OutPoint::new(parent.compute_txid(), 1)],
+            vec![pay_true(half - 50_000)],
+        );
+        from_peer(&hub, &paying, 8, on_async).expect("evicts the first child");
+        assert!(!hub.contains(&first.compute_txid()));
+        assert!(hub.contains(&paying.compute_txid()));
+    }
+}
 
 /// A Bark-style exit parent: 0 fee, its value out, and one 0-value anchor.
 fn zero_fee_anchor(coin: Txid) -> Transaction {
@@ -5387,7 +5436,7 @@ fn accept_rechecks_confirmed_input_under_write() {
         write_hits: Arc::clone(&hits),
     };
     let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-    hub.accept_with_utxo(&tx, &probe, TxOrigin::Relay(None), false, &[])
+    hub.accept_with_utxo(&tx, &probe, TxOrigin::Relay(None), false, &[], true)
         .expect("accept");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -5397,7 +5446,7 @@ fn accept_rechecks_confirmed_input_under_write() {
     hits.store(0, Ordering::Relaxed);
     let held = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x52]));
     let _view = q.store().hold_utxo_view();
-    hub.accept_with_utxo(&held, &probe, TxOrigin::Relay(None), false, &[])
+    hub.accept_with_utxo(&held, &probe, TxOrigin::Relay(None), false, &[], true)
         .expect("accept while the view is held");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -5460,8 +5509,9 @@ fn contains_wtxid_during_slow_utxo_prepare() {
         }],
     };
     let h = Arc::clone(&hub);
-    let join =
-        thread::spawn(move || h.accept_with_utxo(&tx, &stall, TxOrigin::Relay(None), false, &[]));
+    let join = thread::spawn(move || {
+        h.accept_with_utxo(&tx, &stall, TxOrigin::Relay(None), false, &[], true)
+    });
     let start = Instant::now();
     while !entered.load(Ordering::Acquire) {
         assert!(
@@ -5916,7 +5966,7 @@ fn trust_peer_admit_staged_script() {
     rbitcoin_log::capture_logs(false);
     rbitcoin_log::capture_logs(true);
     let off = hub
-        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(None), false, &[])
+        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(None), false, &[], true)
         .unwrap_err();
     assert!(matches!(off, AcceptError::Script(_)), "{off}");
     let off_log = rbitcoin_log::take_logs()
@@ -5932,7 +5982,14 @@ fn trust_peer_admit_staged_script() {
     hub.set_trusted_session(Some(session));
     rbitcoin_log::capture_logs(true);
     let got = hub
-        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(Some(session)), false, &[])
+        .accept_with_utxo(
+            &tx,
+            &utxos,
+            TxOrigin::Relay(Some(session)),
+            false,
+            &[],
+            true,
+        )
         .expect("peer admit");
     assert_eq!(got.fee_sat, 1_000);
     let txid = tx.compute_txid();

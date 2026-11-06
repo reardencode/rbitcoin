@@ -217,6 +217,9 @@ pub enum AcceptError {
     PackageNotTopo,
     /// Conflicting mempool txs exist and replacement does not pay enough.
     RbfInsufficient,
+    /// As [`Self::RbfInsufficient`], where the replaced set includes a TRUC
+    /// sibling (Core `insufficient fee (including sibling eviction)`).
+    RbfInsufficientSibling,
     Coinbase,
     /// Duplicate previous_output within the same transaction (011).
     InputsDuplicate,
@@ -252,6 +255,9 @@ impl std::fmt::Display for AcceptError {
             AcceptError::PackageEmpty => f.write_str("package empty"),
             AcceptError::PackageNotTopo => f.write_str("package not topologically ordered"),
             AcceptError::RbfInsufficient => f.write_str("rbf insufficient fee"),
+            AcceptError::RbfInsufficientSibling => {
+                f.write_str("rbf insufficient fee (including sibling eviction)")
+            }
             AcceptError::Coinbase => f.write_str("coinbase"),
             AcceptError::InputsDuplicate => f.write_str("inputs-duplicate"),
             AcceptError::ImmatureCoinbase => f.write_str("coinbase immature"),
@@ -515,6 +521,11 @@ pub struct PreparedAdmit {
     /// This tx was already marked and is being put back. The new slot keeps
     /// the byte even when this admit itself does not warn.
     pub keep_mark: bool,
+    /// A second child of a version-3 parent may evict the first (BIP 431
+    /// sibling eviction). Core allows it only when a tx is judged alone, so
+    /// it is off unless a single-tx accept turns it on: packages, 1p1c pairs,
+    /// put-backs and reorg re-adds keep it off.
+    pub sibling_eviction: bool,
 }
 
 struct AdmitInputs {
@@ -1035,6 +1046,7 @@ impl ActiveMempool {
                 waive,
             },
         )?;
+        prep.sibling_eviction = true;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -1225,6 +1237,7 @@ impl ActiveMempool {
             keep_accept_secs: None,
             trust_warn,
             keep_mark: false,
+            sibling_eviction: false,
         })
     }
 
@@ -1597,7 +1610,10 @@ impl ActiveMempool {
         Ok(())
     }
 
-    /// BIP 431 TRUC, as Core `SingleTRUCChecks` without sibling eviction.
+    /// BIP 431 TRUC, as Core `SingleTRUCChecks`. `Ok(Some(sibling))` is a
+    /// second child whose only violation is the one-child limit, and whose
+    /// sibling can be evicted: the parent's only descendant, with no other
+    /// unconfirmed ancestor.
     ///
     /// Runs under the commit lock, so two children staged together cannot
     /// both pass against a parent that has neither yet.
@@ -1606,7 +1622,7 @@ impl ActiveMempool {
         tx: &Transaction,
         vsize: u64,
         scan: &ConflictScan,
-    ) -> Result<(), AcceptError> {
+    ) -> Result<Option<Txid>, AcceptError> {
         const VIOLATION: AcceptError = AcceptError::Policy("TRUC-violation");
         let is_truc = tx.version.0 == policy::TRUC_VERSION;
         for id in &scan.parent_txids {
@@ -1619,13 +1635,13 @@ impl ActiveMempool {
             }
         }
         if !is_truc {
-            return Ok(());
+            return Ok(None);
         }
         if vsize > policy::TRUC_MAX_VSIZE || scan.parent_txids.len() > 1 {
             return Err(VIOLATION);
         }
         let Some(parent) = scan.parent_txids.first() else {
-            return Ok(());
+            return Ok(None);
         };
         let entry = self
             .graph
@@ -1638,10 +1654,24 @@ impl ActiveMempool {
             .children
             .iter()
             .any(|c| scan.direct_conflicts.contains(c));
-        if !entry.children.is_empty() && !child_replaced {
-            return Err(VIOLATION);
+        if entry.children.is_empty() || child_replaced {
+            return Ok(None);
         }
-        Ok(())
+        // Core: the parent's descendant count is 2 and the sibling's
+        // ancestor count is 2. More is only possible after a reorg.
+        let mut children = entry.children.iter();
+        let (Some(sibling), None) = (children.next(), children.next()) else {
+            return Err(VIOLATION);
+        };
+        let alone = self
+            .graph
+            .get(sibling)
+            .is_some_and(|e| e.children.is_empty() && e.parents.len() == 1);
+        if alone {
+            Ok(Some(*sibling))
+        } else {
+            Err(VIOLATION)
+        }
     }
 
     /// A child of a parent with a dust output must spend that output (Core
@@ -1700,13 +1730,22 @@ impl ActiveMempool {
         let fee_sat = prep.fee_sat;
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
-        self.check_truc(tx, weight.div_ceil(4), &scan)?;
+        let sibling = match self.check_truc(tx, weight.div_ceil(4), &scan)? {
+            Some(_) if !prep.sibling_eviction => {
+                return Err(AcceptError::Policy("TRUC-violation"));
+            }
+            sibling => sibling,
+        };
         self.check_ephemeral_spends(tx, &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
-        let conflict_set = if !scan.direct_conflicts.is_empty() {
-            let direct: Vec<Txid> = scan.direct_conflicts.iter().copied().collect();
+        // The sibling joins the replaced set and pays for it like any
+        // conflict (Core adds it to `m_conflicts`).
+        let mut direct_conflicts = scan.direct_conflicts;
+        direct_conflicts.extend(sibling);
+        let conflict_set = if !direct_conflicts.is_empty() {
+            let direct: Vec<Txid> = direct_conflicts.iter().copied().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);
             let (direct_fee, direct_weight) = self
@@ -1720,7 +1759,11 @@ impl ActiveMempool {
                 direct_fee,
                 direct_weight,
             ) {
-                return Err(AcceptError::RbfInsufficient);
+                return Err(if sibling.is_some() {
+                    AcceptError::RbfInsufficientSibling
+                } else {
+                    AcceptError::RbfInsufficient
+                });
             }
             set
         } else {
@@ -1743,8 +1786,8 @@ impl ActiveMempool {
         }
         // Parents of the direct conflicts only, not their ancestor closure.
         // After the cap, so an over-size cluster is `too-large-cluster`.
-        if !scan.direct_conflicts.is_empty() {
-            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
+        if !direct_conflicts.is_empty() {
+            self.reject_new_unconfirmed(tx, &direct_conflicts)?;
         }
         // Core `bad-txns-spends-conflicting-tx`. A parent in the conflict set
         // is evicted by this accept, and its outputs with it.

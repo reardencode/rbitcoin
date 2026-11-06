@@ -608,8 +608,10 @@ fn truc_topology_and_sizes() {
     let child = ver_tx(&[out_of(&v3_parent, 0)], 3, vec![pay(150_000)]);
     mp.accept_tx(&child, &utxos, TIP_OK)
         .expect("one version-3 child");
+    // A second child is a sibling eviction; at the same fee it pays too little.
     let sibling = ver_tx(&[out_of(&v3_parent, 1)], 3, vec![pay(150_000)]);
-    assert_truc_violation(mp.accept_tx(&sibling, &utxos, TIP_OK));
+    let err = mp.accept_tx(&sibling, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
     let grandchild = ver_tx(&[out_of(&child, 0)], 3, vec![pay(100_000)]);
     assert_truc_violation(mp.accept_tx(&grandchild, &utxos, TIP_OK));
     let left = ver_tx(&[ops[3]], 3, vec![pay(400_000)]);
@@ -646,6 +648,54 @@ fn truc_topology_and_sizes() {
     );
     mp.accept_tx(&wide_v2, &utxos, TIP_OK)
         .expect("the TRUC child cap is only for version 3");
+}
+
+/// BIP 431 sibling eviction (Core `SingleTRUCChecks`): a second child of a
+/// version-3 parent replaces the first when it pays the replacement fee.
+#[test]
+fn truc_sibling_eviction() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[500_000, 500_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[ops[0]], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(190_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+
+    let cheap = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(190_000)]);
+    let err = mp.accept_tx(&cheap, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
+    assert!(mp.graph.contains(&first.compute_txid()));
+
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
+    let r = mp
+        .accept_tx(&paying, &utxos, TIP_OK)
+        .expect("a sibling that pays more evicts the first child");
+    assert!(
+        r.replaced.contains(&first.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+    assert!(!mp.graph.contains(&first.compute_txid()));
+    assert!(mp.graph.contains(&paying.compute_txid()));
+
+    // A sibling eviction and an ordinary replacement in one tx.
+    let unrelated = ver_tx(&[ops[1]], 3, vec![pay(490_000)]);
+    mp.accept_tx(&unrelated, &utxos, TIP_OK).unwrap();
+    let both = ver_tx(&[out_of(&parent, 0), ops[1]], 3, vec![pay(400_000)]);
+    let r = mp
+        .accept_tx(&both, &utxos, TIP_OK)
+        .expect("evicts the sibling and replaces the conflict");
+    assert!(
+        r.replaced.contains(&paying.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+    assert!(
+        r.replaced.contains(&unrelated.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
 }
 
 /// Two children staged before either commits: the second commit still sees
