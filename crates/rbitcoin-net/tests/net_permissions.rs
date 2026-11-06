@@ -272,3 +272,39 @@ fn permission_masks_keep_their_implied_bits() {
     assert!(!flagged.has(NetPermissionFlags::IMPLICIT));
     assert!(flagged.has(NetPermissionFlags::MEMPOOL));
 }
+
+#[test]
+fn v1_is_a_bind_permission_on_a_private_address() {
+    let g = parse_whitebind("v1,noban@127.0.0.1:8335").unwrap();
+    assert_eq!(g.flags.to_strings(), ["noban", "download", "v1"]);
+    let all = parse_whitebind("all@127.0.0.1:8335").unwrap();
+    assert!(!all.flags.to_strings().contains(&"v1"), "all is Core's set");
+    let err = parse_whitelist("v1@127.0.0.1").unwrap_err();
+    assert!(err.contains("--net-permission-bind"), "{err}");
+    for bind in [
+        "127.0.0.1:8335",
+        "[::1]:8335",
+        "10.0.0.5:8335",
+        "172.17.0.1:8335",
+        "192.168.1.5:8335",
+        "100.64.10.10:8335",
+        "[fd00::1]:8335",
+        "[::ffff:127.0.0.1]:8335",
+    ] {
+        assert!(parse_whitebind(&format!("v1@{bind}")).is_ok(), "{bind}");
+    }
+    for bind in [
+        "0.0.0.0:8335",
+        "[::]:8335",
+        "8.8.8.8:8335",
+        "[2001:4860:4860::8888]:8335",
+        "[::ffff:0.0.0.0]:8335",
+        "[2002:808:808:1::1]:8335",
+        "[2001:0:4136:e378:8000:63bf:3fff:fdd2]:8335",
+        "[fc00::1]:8335",
+        "169.254.1.1:8335",
+    ] {
+        let err = parse_whitebind(&format!("v1@{bind}")).unwrap_err();
+        assert!(err.contains("loopback or private address"), "{bind}: {err}");
+    }
+}

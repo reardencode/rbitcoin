@@ -891,3 +891,73 @@ fn network_names_are_recognized_and_reject_invalid() {
         }
     }
 }
+
+#[test]
+fn v1_bind_is_its_own_listener_on_its_own_port() {
+    let v1: std::net::SocketAddr = "127.0.0.1:18445".parse().unwrap();
+    let mut c = NodeConfig::default().with_network(Network::Regtest);
+    c.apply_kv("net-permission-bind", "v1,noban@127.0.0.1:18445")
+        .unwrap();
+    assert_eq!(
+        c.listen.p2p,
+        P2pListen::Auto,
+        "a v1 bind never takes --listen"
+    );
+    assert_eq!(c.listen.p2p_extra, [v1]);
+    assert!(c.validate().is_ok(), "{:?}", c.validate());
+    c.apply_kv("listen", "127.0.0.1:18444").unwrap();
+    assert_eq!(
+        c.listen.p2p,
+        P2pListen::Socket("127.0.0.1:18444".parse().unwrap())
+    );
+    assert_eq!(c.listen.p2p_extra, [v1]);
+    assert!(c.validate().is_ok(), "{:?}", c.validate());
+    let err = c.apply_kv("listen", "127.0.0.1:18445").unwrap_err();
+    assert!(err.to_string().contains("Duplicate binding"), "{err}");
+
+    // The --listen port also carries Tor and I2P inbound from loopback.
+    for (listen, bind) in [
+        (None, "v1@127.0.0.1:18444"),
+        (Some("127.0.0.1:18444"), "v1@127.0.0.2:18444"),
+        (Some("0.0.0.0:8335"), "v1@127.0.0.1:8335"),
+        (Some("127.0.0.1:8335"), "v1@127.0.0.1:8335"),
+    ] {
+        let mut c = NodeConfig::default().with_network(Network::Regtest);
+        if let Some(l) = listen {
+            c.apply_kv("listen", l).unwrap();
+        }
+        c.apply_kv("net-permission-bind", bind).unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("needs its own port"),
+            "{listen:?} {bind}: {err}"
+        );
+    }
+
+    // Tor and I2P also forward the Electrum and Esplora onions to loopback.
+    for (key, listen) in [
+        ("electrum-listen", "[::1]:50001"),
+        ("esplora-listen", "[::1]:50001"),
+    ] {
+        let mut c = NodeConfig::default().with_network(Network::Regtest);
+        c.apply_kv(key, listen).unwrap();
+        c.apply_kv("net-permission-bind", "v1@127.0.0.1:50001")
+            .unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("the --{key} port 50001")),
+            "{key}: {err}"
+        );
+    }
+
+    let mut c = NodeConfig::default();
+    let err = c
+        .apply_kv("net-permission-bind", "v1@8.8.8.8:8335")
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("loopback or private address"),
+        "{err}"
+    );
+    let err = c.apply_kv("net-permission", "v1@127.0.0.1").unwrap_err();
+    assert!(err.to_string().contains("--net-permission-bind"), "{err}");
+}

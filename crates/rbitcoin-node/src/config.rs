@@ -871,7 +871,37 @@ impl NodeConfig {
         self.validate_only_net()?;
         self.validate_trust_peer()?;
         self.validate_hidden_inbound()?;
+        self.validate_v1_bind()?;
         self.validate_rpc_cookie()
+    }
+
+    /// Tor and I2P inbound arrive from loopback on the P2P, Electrum, and
+    /// Esplora ports, so a v1 listener on one of those ports would serve them v1.
+    fn validate_v1_bind(&self) -> Result<(), NodeError> {
+        let esplora = match &self.listen.esplora {
+            Some(EsploraListen::Tcp(a)) => Some(*a),
+            _ => None,
+        };
+        let forwarded = [
+            ("--listen", self.listen.p2p_bind_addr(self.network)),
+            ("--electrum-listen", self.listen.electrum),
+            ("--esplora-listen", esplora),
+        ];
+        for g in &self.net_perms.whitebind {
+            if !g.flags.has(rbitcoin_net::NetPermissionFlags::V1) {
+                continue;
+            }
+            let port = g.addr.port();
+            if let Some((name, _)) = forwarded
+                .iter()
+                .find(|(_, a)| a.is_some_and(|a| a.port() == port))
+            {
+                return Err(NodeError::Config(format!(
+                    "--net-permission-bind v1 needs its own port, not the {name} port {port}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// True when `--trust-peer` named the sole dial target.
@@ -1691,10 +1721,14 @@ impl NodeConfig {
             "net_permission_bind" => {
                 if !val.is_empty() {
                     let g = rbitcoin_net::parse_whitebind(val).map_err(NodeError::Init)?;
-                    if self.listen.p2p != P2pListen::Socket(g.addr)
-                        && !self.listen.p2p_extra.contains(&g.addr)
-                    {
-                        self.push_p2p_listen(g.addr)?;
+                    let listening = self.listen.p2p == P2pListen::Socket(g.addr)
+                        || self.listen.p2p_extra.contains(&g.addr);
+                    if !listening {
+                        if g.flags.has(rbitcoin_net::NetPermissionFlags::V1) {
+                            self.listen.p2p_extra.push(g.addr);
+                        } else {
+                            self.push_p2p_listen(g.addr)?;
+                        }
                     }
                     self.net_perms.whitebind.push(g);
                 }

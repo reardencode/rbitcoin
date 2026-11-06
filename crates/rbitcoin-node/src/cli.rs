@@ -392,6 +392,7 @@ Trust-peer: --trust-peer ADDR (conf trustpeer=) dials only that address, the sam
   --cjdns-reachable treat fc00::/8 as CJDNS (dial and advertise). --only-net=cjdns requires it.\n\
   --trusted / --always-relay / --relay are inbound permission knobs.\n\
   --net-permission / --net-permission-bind are CIDR or bind grants (noban, relay, …; IPv4 and IPv6).\n\
+  --net-permission-bind v1,noban@127.0.0.1:PORT also takes plain v1 P2P there for a wallet indexer: own port, private address.\n\
   --net-permission-relay (default on) / --net-permission-force-relay (default off) are implicit bits on a bare CIDR grant.\n\
 Scripthash: --sh-index (default off) builds Class B for Electrum/Esplora address history.\n\
 Block filters: --block-filter-index (default off) builds BIP158 basic filters. Independent of --sh-index.\n\
