@@ -3572,6 +3572,49 @@ fn gettxout_leftover_is_connected_not_unconfirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `BroadcastTransaction` returns `-27` when any of the submitted
+/// transaction's own outputs is still a coin. A confirmed transaction whose
+/// outputs are all spent stays a missing-input reject.
+#[test]
+fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = hash_hex_display(&spend.compute_txid().to_byte_array());
+    assert_eq!(
+        dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap(),
+        json!(txid)
+    );
+    // Live mempool duplicate is success, not the utxo-set error.
+    assert_eq!(
+        dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap(),
+        json!(txid)
+    );
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let utxo = dispatch(&ctx, "gettxout", vec![json!(txid.clone()), json!(0)]).unwrap();
+    assert!(utxo["confirmations"].as_u64().unwrap() >= 1, "{utxo}");
+    let again = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
+    assert_eq!(again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{again}");
+    assert_eq!(
+        again["message"], "Transaction outputs already in utxo set",
+        "{again}"
+    );
+
+    let child = child_of(&spend, 1_000);
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(rbitcoin_primitives::hex_encode(
+            bitcoin::consensus::encode::serialize(&child)
+        ))],
+    )
+    .unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let spent = dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap_err();
+    assert_eq!(spent["code"], ERR_VERIFY_REJECTED, "{spent}");
+    assert_eq!(spent["message"], "missing-inputs", "{spent}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `gettxout` describes its coin with the same `scriptPubKey` object as
 /// `getrawtransaction`, in the mempool and once confirmed: Core's `type`
 /// and, for a standard script, `address`.

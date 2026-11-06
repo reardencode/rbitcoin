@@ -1131,8 +1131,56 @@ fn sendraw_after_accept(
             }
             Ok(json!(hash_hex_display(&tid.to_byte_array())))
         }
-        Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
+        Err(e) => {
+            // Core checks the tx's own outputs before admit. A coin still in
+            // the UTXO set is -27. Spent outputs, including an OP_RETURN that
+            // was never a coin, stay the admit error.
+            if outputs_already_in_utxo_set(ctx, tx)? {
+                return Err(rpc_error(
+                    ERR_VERIFY_ALREADY_IN_UTXO_SET,
+                    "Transaction outputs already in utxo set",
+                ));
+            }
+            Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e)))
+        }
     }
+}
+
+/// True when a spendable output of `tx` is an unspent confirmed coin.
+fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
+    let txid = tx.compute_txid().to_byte_array();
+    let Some(fk) = ctx
+        .query
+        .tx_fk_by_txid_tip(&txid)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    else {
+        return Ok(false);
+    };
+    if !ctx
+        .query
+        .store()
+        .is_confirmed_strong(fk)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    {
+        return Ok(false);
+    }
+    let vouts: Vec<u32> = tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, out)| {
+            !rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes())
+        })
+        .map(|(i, _)| i as u32)
+        .collect();
+    if vouts.is_empty() {
+        return Ok(false);
+    }
+    let unspent = ctx
+        .query
+        .unspent_create_vouts(fk, &vouts)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?;
+    Ok(!unspent.is_empty())
 }
 
 pub fn accept_reject_reason(e: &impl std::fmt::Display) -> String {

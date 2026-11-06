@@ -497,6 +497,8 @@ pub const ERR_CLIENT_NODE_NOT_CONNECTED: i64 = -29;
 pub const ERR_INVALID_PARAMETER: i64 = -8;
 /// Core `RPC_VERIFY_REJECTED` (sendrawtransaction / testmempoolaccept).
 pub const ERR_VERIFY_REJECTED: i64 = -26;
+/// Core `RPC_VERIFY_ALREADY_IN_UTXO_SET`.
+pub const ERR_VERIFY_ALREADY_IN_UTXO_SET: i64 = -27;
 pub const ERR_INVALID_PARAMS: i64 = -32602;
 /// Core `RPC_INTERNAL_ERROR` (undo data that does not read).
 pub const ERR_INTERNAL: i64 = -32603;
