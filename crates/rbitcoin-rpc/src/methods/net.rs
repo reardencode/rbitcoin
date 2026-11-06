@@ -110,7 +110,7 @@ pub fn peerinfo_json(chain: Option<&rbitcoin_net::ChainHub>, p: rbitcoin_net::Pe
         "bytessent_per_msg": sent,
         "connection_type": p.conn_type.as_str(),
         "relaytxes": p.relay && !matches!(p.conn_type, rbitcoin_net::PeerConnType::BlockRelay),
-        "transport_protocol_type": "v2",
+        "transport_protocol_type": p.transport.as_str(),
         "network": p.net.network_label(),
         "synced_headers": synced_headers,
         "synced_blocks": synced_blocks,

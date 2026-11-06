@@ -43,5 +43,6 @@ mod service;
 mod socks;
 mod tip_accept;
 mod tx_relay;
+mod v1;
 mod v2;
 mod versionbits_warn;

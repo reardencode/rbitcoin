@@ -176,17 +176,25 @@ not:
 NBXplorer scans blocks with `getblock` (verbosity 2) and
 `getrawtransaction`, broadcasts with `sendrawtransaction`, and
 authenticates with a cookie file. Those calls and the cookie exist.
-Current NBXplorer also requires Bitcoin Core **24.0 or newer**.
 `getnetworkinfo.version` defaults to **190000** so clients do not assume
-a descriptor wallet ([`rpc.md`](./rpc.md#getnetworkinfoversion)). That
-integer fails NBXplorer's version gate. `--rpc-client-version` can raise
-it, but that would claim wallet RPC this node does not serve. BTCPay works against this node when
-NBXplorer accepts the `subversion` (`/rbitcoin:<semver>/`) and keeps
-using the block and transaction calls.
+a descriptor wallet ([`rpc.md`](./rpc.md#getnetworkinfoversion)), and
+`--rpc-client-version` can raise it. NBXplorer 2.6.21 (BTCPay Server
+2.4.7) accepts the default: its floor is `MinRPCVersion = 150000`, and it
+finds `testmempoolaccept`, `estimatesmartfee` and segwit/taproot support
+by calling them.
 NBXplorer also reads `version`, `lastsend`, `lastrecv` and `conntime`
-from `getpeerinfo`; those are served. It opens a v1 P2P connection as
-well, which this node refuses, so its P2P endpoint has to be another
-node.
+from `getpeerinfo`; those are served. It also opens a v1 P2P
+connection. Give it a listener of its own that takes v1, and point its
+P2P endpoint there (`--btcnodeendpoint 127.0.0.1:8335`):
+
+```text
+--net-permission-bind v1,noban@127.0.0.1:8335
+```
+
+The port must differ from the `--listen`, `--electrum-listen`, and
+`--esplora-listen` ports, and the address must be loopback or private
+([`operator/operations.md`](./operator/operations.md)). Prefer loopback:
+v1 is plaintext. `noban` stops NBXplorer's "not whitelisted" warning.
 
 ## Compact-filter and SPV wallets
 
@@ -194,7 +202,7 @@ Wasabi's RPC filter path is above. These are different:
 
 | Client | What it needs | On this node |
 |--------|---------------|--------------|
-| bitcoinj wallets (Schildbach Bitcoin Wallet, older Mycelium) | P2P v1 and BIP37 bloom filters (`filterload`) | P2P is BIP324 v2 only. `filterload` disconnects the peer. |
+| bitcoinj wallets (Schildbach Bitcoin Wallet, older Mycelium) | P2P v1 and BIP37 bloom filters (`filterload`) | P2P is BIP324 v2, except a `v1@` listener for a local indexer. `filterload` disconnects the peer. |
 | LND Neutrino, Zeus embedded LND in Neutrino mode | BIP157 to a peer | Filters are served with `--block-filter-index`. Neutrino does not speak v2, so it cannot connect. Detail: [`lightning.md`](./lightning.md#neutrino). |
 
 ## Hardware-wallet apps

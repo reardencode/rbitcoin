@@ -57,6 +57,8 @@ pub mod tip_accept;
 #[doc(hidden)]
 pub mod tx_relay;
 #[doc(hidden)]
+pub mod v1;
+#[doc(hidden)]
 pub mod v2;
 #[doc(hidden)]
 pub mod versionbits_warn;

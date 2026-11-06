@@ -126,7 +126,7 @@ Clean smoke:
 | `--always-relay` | `always_relay=` | off — always announce inbound txs |
 | `--relay` | `relay=` | off — permit tx relay to inbound while `--blocks-only` |
 | `--net-permission SPEC` | `net_permission=` | empty — repeatable CIDR grant (`noban@1.2.3.4`, `noban@::1`, `noban@2001:db8::/32`, bare IP, …) |
-| `--net-permission-bind SPEC` | `net_permission_bind=` | empty — repeatable bind grant (`noban@127.0.0.1:8333`) |
+| `--net-permission-bind SPEC` | `net_permission_bind=` | empty — repeatable bind grant (`noban@127.0.0.1:8333`). `v1` (not Core) takes plain v1 P2P on that listener for a local wallet indexer: `v1,noban@127.0.0.1:8335`. It needs its own port, not the `--listen`, `--electrum-listen`, or `--esplora-listen` port, because Tor and I2P inbound arrive from loopback on those. The address must be loopback, RFC 1918, 100.64/10, or `fd00::/8`; prefer loopback, since v1 is plaintext and another address is reachable from its whole network. With `--listen=0` the v1 bind is the only listener and keeps `--max-inbound`; a v1 grant left without its listener, or with `--max-inbound 0`, fails at start. `--net-permission` refuses `v1` |
 | `--net-permission-relay[=0\|1]` | `net_permission_relay=` | **on** — implicit relay on a bare CIDR grant |
 | `--net-permission-force-relay[=0\|1]` | `net_permission_force_relay=` | **off** — implicit forcerelay on a bare CIDR grant |
 | `--limit-cluster-count N` | `limit_cluster_count=` | unset — hub default |
@@ -651,7 +651,10 @@ Do **not** wipe `store/` for mempool slot/full/schema errors.
 
 ## P2P transport
 
-- **BIP324 v2 only** — plaintext v1 peers disconnect (`peer does not speak BIP324 v2`).
+- **BIP324 v2 only**, except a `--net-permission-bind v1@` listener, which also
+  takes plain v1 from a local wallet indexer such as NBXplorer
+  ([`wallets.md`](../wallets.md#btcpay-server)). Elsewhere plaintext v1 peers
+  disconnect (`peer does not speak BIP324 v2`).
 - **IBD `getdata` serve** reconstructs witness blocks from contiguous Class A
   spans (`txout.body` + `seqsigwit.body`), off the session reactor. Serve volume
   is on DEBUG `tip: perf` (`serve_n`, `serve_bytes`, `serve_tx`, `serve_avg_us`, `serve_max_us`), not a

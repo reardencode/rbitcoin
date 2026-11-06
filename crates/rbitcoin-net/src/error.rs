@@ -7,7 +7,8 @@ pub enum NetError {
     Encode(String),
     Protocol(&'static str),
     /// Peer does not speak BIP324 v2 (or closed during v2 handshake).
-    /// Production is v2-only: disconnect and do not fall back to v1.
+    /// Disconnect and do not fall back to v1, except on a `v1@` listener
+    /// ([`crate::v1::open_inbound_with_wire`]).
     V1Peer,
     /// BIP324 crypto / session error detail.
     Bip324(String),

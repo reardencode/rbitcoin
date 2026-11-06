@@ -432,6 +432,8 @@ pub struct LivePeer {
     pub handshake_complete: AtomicBool,
     /// BIP324 transport finished. False while EARLY_KEY_RESPONSE / garbage.
     pub v2_transport_ready: AtomicBool,
+    /// Plain v1 framing on a `v1@` wallet-sync listener.
+    pub v1_transport: AtomicBool,
     /// Peer sent BIP155 `sendaddrv2` (use `addrv2` for self-announce / GETADDR).
     pub wants_addrv2: AtomicBool,
     /// Peer sent BIP339 `wtxidrelay` (handshake, before VERACK).
@@ -583,6 +585,20 @@ impl LivePeer {
 
     pub fn v2_transport_ready(&self) -> bool {
         self.v2_transport_ready.load(Ordering::Acquire)
+    }
+
+    /// v1 has no BIP324 phase, so the transport is ready at once.
+    pub fn mark_v1_transport(&self) {
+        self.v1_transport.store(true, Ordering::Release);
+        self.mark_v2_transport_ready();
+    }
+
+    pub fn transport(&self) -> crate::v1::Transport {
+        if self.v1_transport.load(Ordering::Acquire) {
+            crate::v1::Transport::V1
+        } else {
+            crate::v1::Transport::V2
+        }
     }
 
     pub fn set_wants_addrv2(&self) {
@@ -1547,6 +1563,7 @@ impl LivePeer {
                 })
             }),
             handshake_complete: self.handshake_complete(),
+            transport: self.transport(),
             time_offset_secs: if self.handshake_complete() {
                 self.version_timestamp
                     .saturating_sub(self.connected_at.load(Ordering::Relaxed) as i64)
@@ -1664,6 +1681,8 @@ pub struct PeerInfo {
     pub mapped_as: Option<u32>,
     /// VERSION+VERACK finished. Connecting rows stay false.
     pub handshake_complete: bool,
+    /// `getpeerinfo.transport_protocol_type`.
+    pub transport: crate::v1::Transport,
     /// VERSION clock minus connect time, seconds (`0` before handshake).
     pub time_offset_secs: i64,
     /// Best block this peer advertised (`None` until they send a header/block).
@@ -2969,6 +2988,9 @@ impl PeerHub {
         if from.wtxid_relay() {
             peer.set_wtxid_relay();
         }
+        if from.transport() == crate::v1::Transport::V1 {
+            peer.mark_v1_transport();
+        }
         peer.note_recv("version", 100);
         peer.note_recv("verack", 0);
         peer.attach_wire(wire);
@@ -3057,6 +3079,7 @@ impl PeerHub {
             tcp_shutdown: Mutex::new(None),
             handshake_complete: AtomicBool::new(false),
             v2_transport_ready: AtomicBool::new(false),
+            v1_transport: AtomicBool::new(false),
             wants_addrv2: AtomicBool::new(false),
             wtxid_relay: AtomicBool::new(false),
             next_local_addr_send: AtomicU64::new(0),

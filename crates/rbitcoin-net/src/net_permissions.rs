@@ -17,6 +17,9 @@ impl NetPermissionFlags {
     pub const NOBAN: Self = Self(0b0101_0000);
     pub const MEMPOOL: Self = Self(1 << 5);
     pub const ADDR: Self = Self(1 << 7);
+    /// Not Core: plain v1 framing on a `--net-permission-bind` listener for a
+    /// local wallet indexer. Outside [`Self::ALL`] and the implicit grant.
+    pub const V1: Self = Self(1 << 8);
     pub const IMPLICIT: Self = Self(1 << 31);
     /// Bits 1 through 7. Relay sits inside ForceRelay, and Download sits inside NoBan.
     pub const ALL: Self = Self(0b1111_1110);
@@ -55,6 +58,9 @@ impl NetPermissionFlags {
         }
         if self.has(Self::ADDR) {
             v.push("addr");
+        }
+        if self.has(Self::V1) {
+            v.push("v1");
         }
         v
     }
@@ -187,6 +193,7 @@ pub fn parse_permission_flags(s: &str, allow_out: bool) -> Result<ParsedFlags, S
             "all" => flags.add(NetPermissionFlags::ALL),
             "relay" => flags.add(NetPermissionFlags::RELAY),
             "addr" => flags.add(NetPermissionFlags::ADDR),
+            "v1" => flags.add(NetPermissionFlags::V1),
             "in" => inbound = true,
             "out" => {
                 if !allow_out {
@@ -253,6 +260,11 @@ pub fn parse_subnet(net: &str) -> Result<Subnet, String> {
 
 pub fn parse_whitelist(s: &str) -> Result<WhitelistGrant, String> {
     let p = parse_permission_flags(s, true)?;
+    if p.flags.has(NetPermissionFlags::V1) {
+        return Err(format!(
+            "v1 is a --net-permission-bind permission, not --net-permission: '{s}'"
+        ));
+    }
     let subnet = parse_subnet(&s[p.offset..])?;
     Ok(WhitelistGrant {
         subnet,
@@ -282,10 +294,27 @@ pub fn parse_whitebind(s: &str) -> Result<WhitebindGrant, String> {
             "Need to specify a port with --net-permission-bind: '{bind}'"
         ));
     }
+    if p.flags.has(NetPermissionFlags::V1) && !wallet_sync_ip(addr.ip()) {
+        return Err(format!(
+            "--net-permission-bind v1 needs a loopback or private address: '{bind}'"
+        ));
+    }
     Ok(WhitebindGrant {
         addr,
         flags: p.flags,
     })
+}
+
+/// Loopback, RFC 1918, RFC 6598 shared space, or unique-local IPv6 outside
+/// CJDNS `fc00::/8`. `::ffff:0.0.0.0` binds every IPv4 interface, so the
+/// address is unmapped first.
+fn wallet_sync_ip(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v) => v.is_loopback() || v.is_private() || crate::netaddr::ipv4_shared(v),
+        IpAddr::V6(v) => {
+            v.is_loopback() || (v.is_unique_local() && !crate::netaddr::is_cjdns_ip(v))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

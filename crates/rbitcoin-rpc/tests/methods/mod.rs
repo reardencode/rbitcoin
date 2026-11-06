@@ -5703,6 +5703,34 @@ fn getpeerinfo_lists_registered_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn getpeerinfo_reports_each_peer_transport() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let ver = test_version(0, 0);
+    let _out = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
+    let wallet = hub.register(bind, addr, &ver, true, PeerConnType::Inbound);
+    wallet.mark_v1_transport();
+    ctx.peers = Some(hub.clone());
+    let rows = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let kinds: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["inbound"].clone(), r["transport_protocol_type"].clone()))
+        .collect();
+    assert!(
+        kinds.contains(&(json!(false), json!("v2"))) && kinds.contains(&(json!(true), json!("v1"))),
+        "{rows}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn test_version(
     timestamp: i64,
     start_height: i32,

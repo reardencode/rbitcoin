@@ -2,7 +2,7 @@
 
 ## Status
 
-BIP324 v2-only P2P, cluster mempool (Libre admission + **consensus script checks on accept**),
+BIP324 v2 P2P (v1 only on an opt-in wallet-sync listener), cluster mempool (Libre admission + **consensus script checks on accept**),
 Electrum confirmed + unconfirmed (TLS via reverse proxy). Mainnet is safe to
 run. A consensus split is vanishingly unlikely. The runbook is
 [`mainnet.md`](mainnet.md). **1.0** is the release planned for further

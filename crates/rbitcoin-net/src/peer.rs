@@ -13,9 +13,10 @@ use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
 use crate::peers::{CappedSet, PeerOut};
+use crate::v1::{open_inbound_with_wire, FrameRead, FrameWrite, PeerReader, PeerWriter};
 use crate::v2::{
-    open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, read_v2_frame_with_progress,
-    write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader, V2Writer,
+    open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
+    V2Reader, V2Writer,
 };
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
@@ -1140,7 +1141,8 @@ impl V2PlainSession {
 /// Open BIP324 v2 transport + perform the version/verack exchange.
 ///
 /// Returns the peer's version and the encrypted read/write halves. All further
-/// messages must use those halves — production has no v1 wire path.
+/// messages must use those halves. Only an inbound `v1@` listener speaks v1
+/// ([`inbound_connect_and_handshake`]).
 pub async fn connect_and_handshake(
     stream: TcpStream,
     magic: Magic,
@@ -1194,8 +1196,8 @@ pub async fn inbound_connect_and_handshake(
 ) -> Result<
     (
         VersionMessage,
-        V2Reader,
-        V2Writer,
+        PeerReader,
+        PeerWriter,
         std::net::TcpStream,
         std::sync::Arc<crate::peers::LivePeer>,
     ),
@@ -1210,8 +1212,9 @@ pub async fn inbound_connect_and_handshake(
         peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
     let wire = sess.new_wire();
     sess.attach_tcp_shutdown(tcp_pre);
+    let perms = peers.permission_flags(their_addr, true, bind);
     let (mut reader, mut writer, wire, tcp_shutdown) =
-        match open_v2_with_wire(stream, magic, true, wire).await {
+        match open_inbound_with_wire(stream, magic, wire, perms).await {
             Ok(x) => x,
             Err(NetError::Protocol("magic-prefixed ellswift")) => {
                 while !sess.stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1224,7 +1227,10 @@ pub async fn inbound_connect_and_handshake(
                 return Err(e);
             }
         };
-    sess.mark_v2_transport_ready();
+    match reader {
+        PeerReader::V1(_) => sess.mark_v1_transport(),
+        PeerReader::V2(_) => sess.mark_v2_transport_ready(),
+    }
     if let Ok(clone) = tcp_shutdown.try_clone() {
         sess.attach_tcp_shutdown(clone);
     }
@@ -1428,8 +1434,8 @@ pub fn fail_if_handshake_timed_out(policy: &HandshakePolicy<'_>) -> Result<(), N
     Err(NetError::Timeout)
 }
 
-pub async fn read_handshake_frame(
-    reader: &mut V2Reader,
+pub async fn read_handshake_frame<R: FrameRead>(
+    reader: &mut R,
     magic: Magic,
     policy: &HandshakePolicy<'_>,
 ) -> Result<FramedMessage, NetError> {
@@ -1440,7 +1446,7 @@ pub async fn read_handshake_frame(
                 return Err(NetError::Disconnected);
             }
         }
-        match tokio::time::timeout(Duration::from_millis(50), read_v2_frame(reader, magic)).await {
+        match tokio::time::timeout(Duration::from_millis(50), reader.read_frame(magic)).await {
             Ok(Ok(frame)) => return Ok(frame),
             Ok(Err(e)) => {
                 fail_if_handshake_timed_out(policy)?;
@@ -1453,9 +1459,9 @@ pub async fn read_handshake_frame(
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Perform the version/verack exchange over an established BIP324 session.
-pub async fn application_handshake(
-    reader: &mut V2Reader,
-    writer: &mut V2Writer,
+pub async fn application_handshake<R: FrameRead, W: FrameWrite>(
+    reader: &mut R,
+    writer: &mut W,
     magic: Magic,
     _our_addr: SocketAddr,
     their_addr: SocketAddr,
@@ -1513,7 +1519,9 @@ pub async fn application_handshake(
             nonce_guard.peers = Some(peers);
             nonce_guard.clear = true;
         }
-        write_v2_msg(writer, NetworkMessage::Version(version.clone())).await?;
+        writer
+            .write_msg(NetworkMessage::Version(version.clone()))
+            .await?;
     }
 
     let their_version = read_peer_version(reader, magic, &policy).await?;
@@ -1525,7 +1533,7 @@ pub async fn application_handshake(
                 return Err(NetError::Protocol("connected to self"));
             }
         }
-        write_v2_msg(writer, NetworkMessage::Version(version)).await?;
+        writer.write_msg(NetworkMessage::Version(version)).await?;
     } else if private && !their_version.relay {
         return Err(NetError::Protocol("peer does not relay transactions"));
     } else if expect_services_from_conn(policy.conn_type) {
@@ -1547,10 +1555,10 @@ pub async fn application_handshake(
 
     // BIP339 / BIP155 feature negotiation starts at 70016 (`p2p_leak` pre-wtxid).
     if !private && their_version.version >= 70016 {
-        write_v2_msg(writer, NetworkMessage::WtxidRelay).await?;
-        write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
+        writer.write_msg(NetworkMessage::WtxidRelay).await?;
+        writer.write_msg(NetworkMessage::SendAddrV2).await?;
     }
-    write_v2_msg(writer, NetworkMessage::Verack).await?;
+    writer.write_msg(NetworkMessage::Verack).await?;
     wait_peer_verack(reader, magic, &policy).await?;
 
     nonce_guard.clear = false;
@@ -1563,8 +1571,8 @@ pub async fn application_handshake(
     Ok(their_version)
 }
 
-pub async fn read_peer_version(
-    reader: &mut V2Reader,
+pub async fn read_peer_version<R: FrameRead>(
+    reader: &mut R,
     magic: Magic,
     policy: &HandshakePolicy<'_>,
 ) -> Result<VersionMessage, NetError> {
@@ -1597,8 +1605,8 @@ pub async fn read_peer_version(
     }
 }
 
-pub async fn wait_peer_verack(
-    reader: &mut V2Reader,
+pub async fn wait_peer_verack<R: FrameRead>(
+    reader: &mut R,
     magic: Magic,
     policy: &HandshakePolicy<'_>,
 ) -> Result<(), NetError> {
@@ -1712,7 +1720,7 @@ pub fn take_outbound_write_batch(
 }
 
 pub async fn run_writer_task(
-    mut writer: V2Writer,
+    mut writer: PeerWriter,
     mut out_rx: mpsc::UnboundedReceiver<PeerOut>,
     writer_session: Option<Arc<crate::peers::LivePeer>>,
 ) {
@@ -1722,9 +1730,9 @@ pub async fn run_writer_task(
             let serve_slot = out.holds_serve_slot();
             let err = match out {
                 PeerOut::Msg(msg) | PeerOut::Served(msg) => {
-                    write_v2_msg_offload(&mut writer, msg).await.is_err()
+                    writer.write_msg_offload(msg).await.is_err()
                 }
-                PeerOut::Encoded(bytes) => write_v2_contents(&mut writer, bytes).await.is_err(),
+                PeerOut::Encoded(bytes) => writer.write_contents(bytes).await.is_err(),
             };
             if let Some(s) = &writer_session {
                 s.note_out_written(serve_slot, n);
@@ -2165,7 +2173,7 @@ struct OpenedPeerWriter {
 /// Handshake bytes and the writer task. The read loop starts only after this
 /// returns, so a pong can land before the first inbound frame is applied.
 async fn open_peer_writer(
-    mut writer: V2Writer,
+    mut writer: PeerWriter,
     hub: &ChainHub,
     meta: &FollowSessionMeta,
 ) -> OpenedPeerWriter {
@@ -2174,16 +2182,14 @@ async fn open_peer_writer(
         .map(|p| p.to_string())
         .unwrap_or_else(|| "peer".into());
 
-    let _ = write_v2_msg(&mut writer, NetworkMessage::SendHeaders).await;
+    let _ = writer.write_msg(NetworkMessage::SendHeaders).await;
     // BIP152: compact v2 low-bandwidth. HB is selected later (max 3, prefer outbound).
-    let _ = write_v2_msg(
-        &mut writer,
-        NetworkMessage::SendCmpct(SendCmpct {
+    let _ = writer
+        .write_msg(NetworkMessage::SendCmpct(SendCmpct {
             send_compact: false,
             version: 2,
-        }),
-    )
-    .await;
+        }))
+        .await;
     // Handshake-writer ping, same nonce as LivePeer: connect_nodes needs pong
     // bytes before the writer task; a second ping makes the first pong mismatch.
     let keepalive = if let Some(s) = meta.session.as_ref() {
@@ -2192,10 +2198,11 @@ async fn open_peer_writer(
         Some(rand_nonce())
     };
     if let Some(n) = keepalive {
-        let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(n)).await;
+        let _ = writer.write_msg(NetworkMessage::Ping(n)).await;
     }
     if let Some(fee_sat) = outbound_feefilter_sats(hub, meta.session.as_deref()) {
-        if write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat))
+        if writer
+            .write_msg(NetworkMessage::FeeFilter(fee_sat))
             .await
             .is_ok()
         {
@@ -2232,8 +2239,8 @@ async fn open_peer_writer(
 }
 
 pub async fn peer_session_with(
-    mut reader: V2Reader,
-    writer: V2Writer,
+    mut reader: PeerReader,
+    writer: PeerWriter,
     magic: Magic,
     hub: Arc<ChainHub>,
     mut tip_rx: broadcast::Receiver<crate::chain::TipEvent>,
@@ -2381,7 +2388,7 @@ pub async fn peer_session_with(
                 }
                 // Inbound before local tip announce so GetData during a
                 // generate burst is not queued behind hundreds of cmpctblocks.
-                frame = read_v2_frame_with_progress(&mut reader, magic, |_| {}, |n| {
+                frame = reader.read_frame_with_progress(magic, |_| {}, |n| {
                     let mut score = decoy_score.load(Ordering::Relaxed);
                     let keep = crate::peer_dos::decoy_stays(
                         &mut rate,

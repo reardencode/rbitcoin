@@ -21,7 +21,7 @@ Cookie file for TCP clients: [`wallets.md`](./wallets.md#tcp-rpc-cookie).
 | **ldk-node Electrum** | `--electrum-listen` TCP | Headers, `transaction.get` / broadcast, `estimatefee` work **without** `--sh-index`. `blockchain.scripthash.*`: JSON-RPC `scripthash index disabled`. TLS is reverse-proxy only (**Q-63**). |
 | **ldk-node bitcoind REST** | `--rpc-listen --rest` `GET /rest/block/` | Block bytes, headers, and hash-by-height. TCP `/rest/` is unauthenticated and off unless `--rest` is set. The BDK wallet still needs Esplora or Electrum with `--sh-index`. |
 | **LND** `bitcoind` + `rpcpolling` | TCP JSON-RPC, cookie file | Chain, tx, fee, and broadcast methods exist. ZMQ is not required on this path. Taproot detection falls through to `getdeploymentinfo`, which already lists buried taproot. See [LND](#lnd). |
-| **LND** Neutrino | BIP157 to a v2 peer | `--block-filter-index` serves basic filters and advertises `NODE_COMPACT_FILTERS` once they first reach the tip. Neutrino does not speak BIP324. This node is v2-only, so Neutrino cannot connect. |
+| **LND** Neutrino | BIP157 to a v2 peer | `--block-filter-index` serves basic filters and advertises `NODE_COMPACT_FILTERS` once they first reach the tip. Neutrino does not speak BIP324, so it cannot use this node's v2 listener. |
 | **LND** default `bitcoind` | ZMQ `rawblock` + `rawtx` | ZMQ is not served. Use `bitcoind.rpcpolling=true` instead. |
 | **Eclair** | Core wallet + ZMQ | Needs a wallet-enabled Core node (`getnewaddress` and the watch-only wallet) plus ZMQ. Both are absent here. |
 | **Zeus** embedded LND, Lightning Terminal, Loop, Pool, Faraday, tapd | Whatever LND is using | Same as the LND row they configure. |
@@ -297,7 +297,7 @@ absent. A live smoke is a follow-up.
 
 ## Not this node
 
-Core wallet RPC, ZMQ, in-binary Electrum TLS, and v1 P2P. BIP158 basic
+Core wallet RPC, ZMQ, in-binary Electrum TLS, and public v1 P2P. BIP158 basic
 filters are optional (`--block-filter-index`). Core REST block/header/tx
 routes are on the RPC listener when `--rest` is set. TCP JSON-RPC accepts
 a cookie file when `--rpc-cookie-file` is set; that is the LND and Wasabi
