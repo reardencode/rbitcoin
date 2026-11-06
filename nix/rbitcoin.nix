@@ -129,7 +129,7 @@ let
   commonArgs = {
     inherit src;
     pname = "rbitcoin";
-    version = "0.9.0";
+    version = "0.9.99";
     strictDeps = true;
     nativeBuildInputs = [
       pkg-config

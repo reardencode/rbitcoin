@@ -10,7 +10,8 @@ in-process **Electrum + optional Esplora REST** (scripthash index via
 around a **relational archive (Class A/B/C)** and a **pure-Rust
 consensus/script** path.
 
-> **0.9.0** is the published release. The patch line is **`v0.9.x`**.
+> **0.9.99** is the in-tree version (pre-**0.10.0**). The published
+> GitHub Release is **0.9.0**. The patch line is **`v0.9.x`**.
 > Mainnet is the network to run. A consensus split is vanishingly
 > unlikely. **1.0** is where further hardening, a support window, and
 > signed release binaries are planned. This release is not signed.
@@ -34,7 +35,7 @@ consensus/script** path.
 | | |
 |--|--|
 | **License** | MIT OR Apache-2.0 ([`LICENSE-MIT`](./LICENSE-MIT), [`LICENSE-APACHE`](./LICENSE-APACHE)) |
-| **Version** | **0.9.0** — [`CHANGELOG.md`](./CHANGELOG.md). Patch line **`v0.9.x`**. |
+| **Version** | **0.9.99** (pre-0.10.0) — [`CHANGELOG.md`](./CHANGELOG.md). Published release **0.9.0**, patch line **`v0.9.x`**. |
 | **Platform** | **Linux musl** (x86_64 and aarch64) is the operator path. The container image is `ghcr.io/rbitcoin-org/rbitcoin`. Windows / Darwin are published snapshots (no IoRing; Darwin not notarized) |
 | **Security** | [`SECURITY.md`](./SECURITY.md) — **0.9.x** is the published line; support window and signed binaries are 1.0 |
 | **Design** | [`docs/architecture.md`](./docs/architecture.md) — why this node is different |
