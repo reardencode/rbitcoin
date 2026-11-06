@@ -10,3 +10,7 @@ Changed
   Core's `CheckTxInputs` clause.** The code stays `-25` and the reason
   stays `bad-txns-inputs-missingorspent`, and the message still names the
   transaction. The functional RPC proxy adds the clause.
+- **A local transaction that confirms before a peer fetches it, and a bad
+  v2 handshake, log a native sentence.** The transaction still leaves the
+  unbroadcast set, and the handshake still disconnects. The functional
+  debug-log map still emits Bitcoin Core's sentences for those lines.

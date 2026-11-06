@@ -62,17 +62,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for PrefixedRead<R> {
     }
 }
 
-/// `p2p_v2_misbehaving.py` needles.
+/// A v2 handshake that never finished. The functional debug-log map emits
+/// Core's sentence; this line is what an operator reads.
 pub fn v2_handshake_timeout_log(peer: u64) -> String {
-    format!("p2p: V2 handshake timeout, disconnecting peer={peer}")
+    format!("p2p: v2 handshake timed out, disconnecting peer={peer}")
 }
 
 pub fn v2_missing_garbage_terminator_log() -> &'static str {
-    "p2p: V2 transport error: missing garbage terminator"
+    "p2p: v2 handshake had no garbage terminator"
 }
 
 pub fn v2_packet_decryption_failure_log() -> &'static str {
-    "p2p: V2 transport error: packet decryption failure"
+    "p2p: v2 packet did not decrypt"
 }
 
 /// Unix seconds for [`WireBytes`] stamps.
@@ -232,9 +233,10 @@ pub fn v2_other_recv_bytes(contents_len: usize) -> u64 {
     (contents_len + V2_CIPHER_EXPANSION) as u64
 }
 
-/// `p2p_invalid_messages.py` v2 needle for an oversized length prefix.
+/// A v2 length prefix past the cap. The functional debug-log map emits
+/// Core's sentence; this line is what an operator reads.
 pub fn v2_packet_too_large_log(n: usize) -> String {
-    format!("p2p: V2 transport error: packet too large ({n} bytes)")
+    format!("p2p: v2 packet is longer than the cap ({n} bytes)")
 }
 
 /// Ciphertext for the packet in progress. An IBD read moves the reader's
@@ -543,9 +545,10 @@ pub fn command_to_12(cmd: &str) -> [u8; 12] {
     out
 }
 
-/// `p2p_invalid_messages.py` v2 needle for an unknown short/long type.
+/// An unknown v2 message type. The functional debug-log map emits Core's
+/// sentence; this line is what an operator reads.
 pub fn v2_invalid_message_type_log() -> &'static str {
-    "p2p: V2 transport error: invalid message type"
+    "p2p: v2 peer sent a message type we do not know"
 }
 
 #[doc(hidden)]
