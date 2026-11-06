@@ -42,13 +42,30 @@ let
     else
       "${address}:${toString port}";
 
-  needTorControl = cfg.tor.control != null || cfg.electrum.hiddenService || cfg.esplora.hiddenService || cfg.p2p.listenOnion;
+  needTorControl = cfg.tor.control != null || cfg.electrum.hiddenService || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion;
   needI2pSam = cfg.i2p.sam != null;
   needCjdns = cfg.cjdns.reachable;
+  rpcListening = cfg.rpc.enable || cfg.rpc.unixSocket || cfg.rpc.socketPath != null;
+  # Port after the last @. IPv6 is `[addr]:port`. A grant with no port is left out;
+  # the node rejects it at start.
+  whitebindPort = spec:
+    let
+      addr = lib.last (lib.splitString "@" spec);
+      port =
+        if lib.hasInfix "]" addr then
+          lib.last (lib.splitString "]:" addr)
+        else
+          let
+            parts = lib.splitString ":" addr;
+          in
+          if builtins.length parts == 2 then builtins.elemAt parts 1 else "";
+    in
+    if builtins.match "[0-9]+" port != null then lib.toInt port else null;
+  whitebindPorts = lib.filter (p: p != null) (map whitebindPort cfg.netPermissionBind);
   torControlAddr =
     if cfg.tor.control != null then
       cfg.tor.control
-    else if cfg.electrum.hiddenService || cfg.esplora.hiddenService || cfg.p2p.listenOnion then
+    else if cfg.electrum.hiddenService || (cfg.esplora.enable && cfg.esplora.hiddenService) || cfg.p2p.listenOnion then
       "127.0.0.1:9051"
     else
       null;
@@ -102,10 +119,10 @@ let
   ++ optional (cfg.rpc.cookiePerms != null) cfg.rpc.cookiePerms
   ++ optional (cfg.rpc.clientVersion != null) "--rpc-client-version"
   ++ optional (cfg.rpc.clientVersion != null) (toString cfg.rpc.clientVersion)
-  ++ optional (cfg.rpc.tokenFile != null) "--rpc-token-file"
-  ++ optional (cfg.rpc.tokenFile != null) cfg.rpc.tokenFile
-  ++ optional (cfg.rpc.workQueue != null) "--rpc-work-queue"
-  ++ optional (cfg.rpc.workQueue != null) (toString cfg.rpc.workQueue)
+  ++ optional (rpcListening && cfg.rpc.tokenFile != null) "--rpc-token-file"
+  ++ optional (rpcListening && cfg.rpc.tokenFile != null) cfg.rpc.tokenFile
+  ++ optional (rpcListening && cfg.rpc.workQueue != null) "--rpc-work-queue"
+  ++ optional (rpcListening && cfg.rpc.workQueue != null) (toString cfg.rpc.workQueue)
   ++ optional cfg.electrum.enable "--electrum-listen"
   ++ optional cfg.electrum.enable (socket cfg.electrum.address cfg.electrum.port)
   ++ optional (cfg.electrum.enable && cfg.electrum.maxSubs != null) "--electrum-max-subs"
@@ -552,6 +569,7 @@ in
         Repeatable `--net-permission-bind` grants. Requires `p2p.listen`.
         Refused with `trustPeer`: the node turns a whitebind into a listen socket,
         and trust-peer then rejects that socket.
+        When `p2p.openFirewall` is set, the firewall also opens each grant's port.
       '';
     };
 
@@ -809,7 +827,7 @@ in
       openFirewall = mkOption {
         type = types.bool;
         default = false;
-        description = "Open the P2P listen port in the NixOS firewall. Ignored when listen is false.";
+        description = "Open the P2P listen port, and any netPermissionBind port, in the NixOS firewall. Ignored when listen is false.";
       };
     };
 
@@ -878,6 +896,7 @@ in
         example = "/run/rbitcoin/rpc.token";
         description = ''
           Pass `--rpc-token-file`. Null keeps `{dataDir}/rpc.token`.
+          Requires `enable`, `unixSocket`, or `socketPath` (the node writes the file only when an RPC listener starts).
           The node creates the file mode 0600. The parent directory is created mode 0750
           when it is not `dataDir` and not the `socketPath` directory.
         '';
@@ -889,6 +908,7 @@ in
         example = 32;
         description = ''
           Pass `--rpc-work-queue`. Null keeps the node default (16). 0 is that same default.
+          Requires `enable`, `unixSocket`, or `socketPath`.
         '';
       };
 
@@ -1031,9 +1051,10 @@ in
         type = types.bool;
         default = false;
         description = ''
-          ADD_ONION for Esplora when the listener is on. True implies tor.control 127.0.0.1:9051
-          if unset and passes `--esplora-onion`. False passes `--esplora-onion=0` when Tor control
-          is on for another reason. REST and /ws share the TCP port.
+          ADD_ONION for Esplora when the listener is on. Requires `enable`.
+          True implies tor.control 127.0.0.1:9051 if unset and passes `--esplora-onion`.
+          False passes `--esplora-onion=0` when the listener is on and Tor control is on
+          for another reason. REST and /ws share the TCP port.
         '';
       };
 
@@ -1204,6 +1225,18 @@ in
         assertion = cfg.esplora.socketPath == null || cfg.esplora.enable;
         message = "services.rbitcoin.esplora.socketPath requires esplora.enable";
       }
+      {
+        assertion = !cfg.esplora.hiddenService || cfg.esplora.enable;
+        message = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
+      }
+      {
+        assertion = cfg.rpc.tokenFile == null || rpcListening;
+        message = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
+      }
+      {
+        assertion = cfg.rpc.workQueue == null || rpcListening;
+        message = "services.rbitcoin.rpc.workQueue requires an RPC listener";
+      }
     ];
 
     users.groups.${cfg.group} = { };
@@ -1235,7 +1268,8 @@ in
       };
     }
     // lib.optionalAttrs (
-      cfg.rpc.tokenFile != null
+      rpcListening
+      && cfg.rpc.tokenFile != null
       && dirOf cfg.rpc.tokenFile != cfg.dataDir
       && (cfg.coldDataDir == null || dirOf cfg.rpc.tokenFile != cfg.coldDataDir)
       && (cfg.rpc.socketPath == null || dirOf cfg.rpc.tokenFile != dirOf cfg.rpc.socketPath)
@@ -1310,7 +1344,7 @@ in
           ]
           ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
           ++ optional (cfg.rpc.socketPath != null) (dirOf cfg.rpc.socketPath)
-          ++ optional (cfg.rpc.tokenFile != null) (dirOf cfg.rpc.tokenFile)
+          ++ optional (rpcListening && cfg.rpc.tokenFile != null) (dirOf cfg.rpc.tokenFile)
           ++ optional (cfg.esplora.enable && cfg.esplora.socketPath != null) (
             dirOf cfg.esplora.socketPath
           )
@@ -1322,14 +1356,16 @@ in
       };
     };
 
-    networking.firewall.allowedTCPPorts =
+    networking.firewall.allowedTCPPorts = lib.unique (
       optional (cfg.p2p.openFirewall && cfg.p2p.listen) cfg.p2p.port
+      ++ lib.optionals (cfg.p2p.openFirewall && cfg.p2p.listen) whitebindPorts
       ++ optional (cfg.electrum.enable && cfg.electrum.openFirewall) cfg.electrum.port
       ++ optional (
         cfg.esplora.enable && cfg.esplora.openFirewall && cfg.esplora.socketPath == null
       ) cfg.esplora.port
       ++ optional (cfg.health.enable && cfg.health.openFirewall) cfg.health.port
-      ++ optional (cfg.sv2.tp.enable && cfg.sv2.tp.openFirewall) cfg.sv2.tp.port;
+      ++ optional (cfg.sv2.tp.enable && cfg.sv2.tp.openFirewall) cfg.sv2.tp.port
+    );
 
     services.prometheus.scrapeConfigs = mkIf (cfg.metrics && config.services.prometheus.enable) [
       {

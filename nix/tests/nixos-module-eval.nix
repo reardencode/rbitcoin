@@ -366,6 +366,27 @@ let
   bindNeedsListenMsg = "services.rbitcoin.netPermissionBind requires p2p.listen";
   bindTrustMsg = "services.rbitcoin.netPermissionBind cannot be combined with trustPeer";
   esploraSockNeedsEnableMsg = "services.rbitcoin.esplora.socketPath requires esplora.enable";
+  tokenNeedsRpcMsg = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
+  workQueueNeedsRpcMsg = "services.rbitcoin.rpc.workQueue requires an RPC listener";
+  esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
+  bindFwSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          network = "regtest";
+          p2p.openFirewall = true;
+          netPermissionBind = [
+            "noban@0.0.0.0:8334"
+            "noban@[::1]:9444"
+          ];
+        };
+      }
+    ];
+  };
   blockTemplateOffExec = execOf {
     esplora.blockTemplate = true;
   };
@@ -715,5 +736,43 @@ assert builtins.elem "/var/log/rbitcoin" apiLogSystem.config.systemd.services.rb
 assert apiLogSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/log/rbitcoin".d.mode == "0750";
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
 assert builtins.match ".*--check-blocks 4294967296.*" (execOf { checkBlocks = 4294967296; }) != null;
+assert builtins.elem 18444 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem 8334 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem 9444 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem tokenNeedsRpcMsg (failedAssertions (badSystem {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}));
+assert builtins.match ".*--rpc-token-file.*" (execOf {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}) == null;
+assert !builtins.hasAttr "/var/log/rbitcoin-token" (badSystem {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}).config.systemd.tmpfiles.settings."10-rbitcoin";
+assert builtins.elem workQueueNeedsRpcMsg (failedAssertions (badSystem {
+  rpc.workQueue = 32;
+}));
+assert builtins.match ".*--rpc-work-queue.*" (execOf { rpc.workQueue = 32; }) == null;
+assert builtins.match ".*--rpc-token-file /run/rbitcoin/rpc.token.*" (execOf {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+  rpc.workQueue = 8;
+}) != null;
+assert builtins.match ".*--rpc-work-queue 8.*" (execOf {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+  rpc.workQueue = 8;
+}) != null;
+assert builtins.elem esploraHsNeedsEnableMsg (failedAssertions (badSystem {
+  esplora.hiddenService = true;
+}));
+assert builtins.match ".*--tor-control.*" (execOf {
+  esplora.hiddenService = true;
+}) == null;
+assert builtins.match ".*--esplora-onion.*" (execOf {
+  esplora.hiddenService = true;
+}) == null;
+assert !builtins.elem "tor.service" (badSystem {
+  esplora.hiddenService = true;
+}).config.systemd.services.rbitcoin.wants;
 assert !builtins.elem spAndPruneMsg (failedAssertions system);
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"
