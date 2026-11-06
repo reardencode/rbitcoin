@@ -3598,6 +3598,55 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
         again["message"], "Transaction outputs already in utxo set",
         "{again}"
     );
+    // The historical fee is over this cap. Core still answers -27: the coin
+    // check is before maxfeerate.
+    let capped = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex.clone()), json!("0.00000001")],
+    )
+    .unwrap_err();
+    assert_eq!(capped["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{capped}");
+    assert_eq!(
+        capped["message"], "Transaction outputs already in utxo set",
+        "{capped}"
+    );
+
+    // nVersion outside 1/2 is an RPC reject for a new tx. A confirmed output
+    // still in the set is -27 first. generateblock mines the tx without that
+    // RPC gate.
+    let (addr, _) = p2wpkh_regtest();
+    let odd_sat = generated_coinbase_value(&ctx, 2);
+    let (_, mut odd) =
+        spend_generated_coinbase(&ctx, 2, odd_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    odd.version = bitcoin::transaction::Version::non_standard(0xffff_ffffu32 as i32);
+    let odd_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&odd));
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([odd_hex.clone()])],
+    )
+    .unwrap();
+    let odd_again = dispatch(&ctx, "sendrawtransaction", vec![json!(odd_hex)]).unwrap_err();
+    assert_eq!(
+        odd_again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET,
+        "{odd_again}"
+    );
+    assert_eq!(
+        odd_again["message"], "Transaction outputs already in utxo set",
+        "{odd_again}"
+    );
+
+    // Genesis is confirmed and has no spender. It is not a coin.
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_hex =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&genesis.txdata[0]));
+    let genesis_err = dispatch(&ctx, "sendrawtransaction", vec![json!(genesis_hex)]).unwrap_err();
+    assert_eq!(genesis_err["code"], ERR_VERIFY_REJECTED, "{genesis_err}");
+    assert_eq!(
+        genesis_err["message"], "bad-txns-is-coinbase",
+        "{genesis_err}"
+    );
 
     let child = child_of(&spend, 1_000);
     dispatch(

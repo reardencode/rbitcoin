@@ -995,6 +995,8 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
     if burn_exceeds_max(&tx, max_burn) {
         return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
     }
+    // Core checks burn, then CoinsTip, then version and max fee.
+    reject_outputs_already_in_utxo_set(ctx, &tx)?;
     if rpc_tx_version_nonstandard(&tx) {
         return Err(rpc_error(ERR_VERIFY_REJECTED, "version"));
     }
@@ -1032,6 +1034,12 @@ pub async fn sendrawtransaction_async(
     if burn_exceeds_max(&tx, max_burn) {
         return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
     }
+    let ctx_coins = Arc::clone(ctx);
+    let tx_coins = tx.clone();
+    rbitcoin_net::off_pool_budgeted(move || {
+        reject_outputs_already_in_utxo_set(&ctx_coins, &tx_coins)
+    })
+    .await?;
     if rpc_tx_version_nonstandard(&tx) {
         return Err(rpc_error(ERR_VERIFY_REJECTED, "version"));
     }
@@ -1131,24 +1139,30 @@ fn sendraw_after_accept(
             }
             Ok(json!(hash_hex_display(&tid.to_byte_array())))
         }
-        Err(e) => {
-            // Core checks the tx's own outputs before admit. A coin still in
-            // the UTXO set is -27. Spent outputs, including an OP_RETURN that
-            // was never a coin, stay the admit error.
-            if outputs_already_in_utxo_set(ctx, tx)? {
-                return Err(rpc_error(
-                    ERR_VERIFY_ALREADY_IN_UTXO_SET,
-                    "Transaction outputs already in utxo set",
-                ));
-            }
-            Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e)))
-        }
+        Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
     }
+}
+
+/// Core `BroadcastTransaction` returns `-27` when one of the tx's own outputs
+/// is still a coin. Burn is already handled. Version and max fee are later.
+fn reject_outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<(), Value> {
+    if outputs_already_in_utxo_set(ctx, tx)? {
+        return Err(rpc_error(
+            ERR_VERIFY_ALREADY_IN_UTXO_SET,
+            "Transaction outputs already in utxo set",
+        ));
+    }
+    Ok(())
 }
 
 /// True when a spendable output of `tx` is an unspent confirmed coin.
 fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
     let txid = tx.compute_txid().to_byte_array();
+    // ConnectBlock never adds the genesis coinbase. No spender does not
+    // make that output a coin.
+    if txid == genesis_coinbase_txid(ctx) {
+        return Ok(false);
+    }
     let Some(fk) = ctx
         .query
         .tx_fk_by_txid_tip(&txid)
