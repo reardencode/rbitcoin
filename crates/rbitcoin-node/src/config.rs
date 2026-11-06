@@ -900,6 +900,17 @@ impl NodeConfig {
                     "--net-permission-bind v1 needs its own port, not the {name} port {port}"
                 )));
             }
+            if !self.listen.p2p_extra.contains(&g.addr) {
+                return Err(NodeError::Config(format!(
+                    "--net-permission-bind v1@{} has no listener: a later --listen or --listen=0 replaced it",
+                    g.addr
+                )));
+            }
+            if self.listen.max_inbound == 0 {
+                return Err(NodeError::Config(
+                    "--net-permission-bind v1 needs --max-inbound greater than 0".into(),
+                ));
+            }
         }
         Ok(())
     }

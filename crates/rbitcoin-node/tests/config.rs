@@ -961,3 +961,31 @@ fn v1_bind_is_its_own_listener_on_its_own_port() {
     let err = c.apply_kv("net-permission", "v1@127.0.0.1").unwrap_err();
     assert!(err.to_string().contains("--net-permission-bind"), "{err}");
 }
+
+#[test]
+fn v1_bind_needs_its_listener_and_inbound_slots() {
+    let v1: std::net::SocketAddr = "127.0.0.1:18445".parse().unwrap();
+    // `--listen=0` first: the v1 bind is the only listener.
+    let mut c = NodeConfig::default().with_network(Network::Regtest);
+    c.apply_kv("listen", "0").unwrap();
+    c.apply_kv("net-permission-bind", "v1,noban@127.0.0.1:18445")
+        .unwrap();
+    assert_eq!(c.listen.p2p, P2pListen::Off);
+    assert_eq!(c.listen.p2p_extra, [v1]);
+    assert!(c.validate().is_ok(), "{:?}", c.validate());
+
+    // `--listen=0` after it drops that listener and keeps the grant.
+    let mut c = NodeConfig::default().with_network(Network::Regtest);
+    c.apply_kv("net-permission-bind", "v1,noban@127.0.0.1:18445")
+        .unwrap();
+    c.apply_kv("listen", "0").unwrap();
+    let err = c.validate().unwrap_err().to_string();
+    assert!(err.contains("has no listener"), "{err}");
+
+    let mut c = NodeConfig::default().with_network(Network::Regtest);
+    c.apply_kv("net-permission-bind", "v1,noban@127.0.0.1:18445")
+        .unwrap();
+    c.apply_kv("max-inbound", "0").unwrap();
+    let err = c.validate().unwrap_err().to_string();
+    assert!(err.contains("--max-inbound greater than 0"), "{err}");
+}
