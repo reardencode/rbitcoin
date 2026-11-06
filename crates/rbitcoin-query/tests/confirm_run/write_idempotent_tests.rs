@@ -311,7 +311,7 @@ fn empty_loaded_batch() -> rbitcoin_query::confirm_run::LoadedBatch {
 /// Workers are all inside detached jobs. The publisher must not run the wave.
 #[test]
 fn drive_script_waves_parks_while_workers_are_busy() {
-    use rbitcoin_consensus::script_pool::spawn_detached;
+    use rbitcoin_consensus::script_pool::{spawn_detached, steal_test_gate};
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::confirm_run::scripts::drive_script_waves_with;
     use rbitcoin_query::confirm_run::Prepared;
@@ -327,6 +327,7 @@ fn drive_script_waves_parks_while_workers_are_busy() {
         }
     }
 
+    let _gate = steal_test_gate();
     let n = thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4)
