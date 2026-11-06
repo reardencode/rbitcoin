@@ -1871,9 +1871,14 @@ pub async fn announce_unsent_tip(
     }
     match current_tip_announce(hub) {
         TipRecvAnnounce::Announce(ev) => {
+            let offered_before = session.and_then(|s| s.last_tip_offered());
             let closed = on_tip_event(hub, out_tx, follow, session, Ok(ev)).await?;
+            // A skipped offer records this tip. A send already recorded the
+            // hash it queued, including a tip that moved during the await.
             if let Some(s) = session {
-                s.note_last_tip_offered(tip);
+                if s.last_tip_offered() == offered_before {
+                    s.note_last_tip_offered(hub.tip_hash().unwrap_or(tip));
+                }
             }
             Ok(closed)
         }

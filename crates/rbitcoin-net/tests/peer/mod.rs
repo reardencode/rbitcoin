@@ -585,6 +585,44 @@ async fn inv_then_non_descendant_waits_out_the_batch() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A child of an inv is a descendant, so it is announced at once.
+#[tokio::test]
+async fn child_of_an_inv_is_not_held() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("inv-child");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18474, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    assert_eq!(
+        count_block_invs(
+            &mut sess.reader,
+            sess.magic,
+            offered,
+            Duration::from_secs(2)
+        )
+        .await,
+        1
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    assert_ne!(child, offered);
+    let early = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(150)).await;
+    assert_eq!(
+        early,
+        vec![child],
+        "a child of the inv goes out before the reorg batch"
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn count_block_invs(
     reader: &mut rbitcoin_net::v2::V2Reader,
     magic: Magic,
