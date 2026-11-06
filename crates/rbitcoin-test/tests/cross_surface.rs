@@ -2914,6 +2914,25 @@ struct FakeTor {
     minted: Arc<Mutex<Vec<String>>>,
 }
 
+/// A control port that accepts, reads nothing, and writes `talk` again and
+/// again, or nothing at all.
+async fn wedged_tor(talk: Option<&'static [u8]>) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut s, _)) = listener.accept().await {
+            match talk {
+                None => held.push(s),
+                Some(talk) => {
+                    tokio::spawn(async move { while s.write_all(talk).await.is_ok() {} });
+                }
+            }
+        }
+    });
+    addr
+}
+
 const TOR_COOKIE: [u8; 32] = [0x2a; 32];
 const TOR_PASSWORD: &str = "s3cret";
 
@@ -3163,6 +3182,30 @@ async fn tor_control_onion_lifecycle() {
         cfg.tor.cookie = Some(cookie.to_path_buf());
         cfg
     };
+
+    // A control port that never answers, one whose reply line never ends, and
+    // one that sends `250-` lines without end each stop the start, naming the
+    // flag: no wait without a deadline and no reply past its byte caps.
+    for (talk, timeout, want) in [
+        (None, Duration::from_millis(100), "no reply within 100ms"),
+        (
+            Some(&[b'x'; 4096][..]),
+            Duration::from_secs(20),
+            "reply line over 64 KiB",
+        ),
+        (
+            Some(&b"250-x\r\n"[..]),
+            Duration::from_secs(20),
+            "reply over 1 MiB",
+        ),
+    ] {
+        let mut cfg = listen_and_exit_cfg(&dir);
+        cfg.tor.control = Some(wedged_tor(talk).await);
+        cfg.tor.password = Some(TOR_PASSWORD.into());
+        cfg.tor.io_timeout = Some(timeout);
+        let err = start_and_exit(cfg).await.expect_err(want).to_string();
+        assert!(err.contains("--tor-control") && err.contains(want), "{err}");
+    }
 
     // A cookie from another Tor, a truncated cookie, and a Tor that only
     // offers plain COOKIE all refuse the start, and none sends AUTHENTICATE:

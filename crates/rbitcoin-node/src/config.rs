@@ -234,6 +234,9 @@ pub struct TorControlOpts {
     pub control: Option<SocketAddr>,
     pub cookie: Option<PathBuf>,
     pub password: Option<String>,
+    /// Longest wait for the control port to connect or answer one command.
+    /// `None` is [`crate::tor_control::CONTROL_TIMEOUT`].
+    pub io_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for TorControlOpts {
@@ -242,6 +245,7 @@ impl std::fmt::Debug for TorControlOpts {
             .field("control", &self.control)
             .field("cookie", &self.cookie)
             .field("password", &self.password.as_ref().map(|_| "****"))
+            .field("io_timeout", &self.io_timeout)
             .finish()
     }
 }

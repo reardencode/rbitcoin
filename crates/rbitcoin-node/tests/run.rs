@@ -1087,6 +1087,139 @@ async fn termination_signals_run_the_shutdown_flush() {
     }
 }
 
+/// SIGTERM while the start waits on a Tor control port ends the process
+/// cleanly at once, through the shutdown tail, not after the 20 s control
+/// timeout: first while AUTHENTICATE waits, then, with `--listen-onion`, while
+/// ADD_ONION waits after a good AUTHENTICATE. The start skips what it would
+/// still block on: `--i2p-sam` names a closed port, which is 16 s of retries.
+///
+/// The node is a child process, as in the test above. This process owns the
+/// control port and signals once the child has sent the command it then holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_ends_a_start_waiting_on_tor_control() {
+    if let Ok(dir) = std::env::var("RBTC_TEST_TOR_WAIT_DIR") {
+        let mut cfg = tiny_regtest(&dir);
+        cfg.listen.use_seeds = false;
+        cfg.apply_kv("listen", "127.0.0.1:0")
+            .expect("ephemeral listen");
+        cfg.tor.control = Some(
+            std::env::var("RBTC_TEST_TOR_WAIT_ADDR")
+                .expect("control addr")
+                .parse()
+                .expect("control addr"),
+        );
+        cfg.tor.password = Some("pw".into());
+        cfg.listen.listen_onion = std::env::var("RBTC_TEST_TOR_WAIT_ONION").is_ok();
+        let closed_sam = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port");
+        cfg.listen.i2p_sam = Some(closed_sam);
+        run_p2p(cfg).await.expect("SIGTERM during the tor step");
+        return;
+    }
+
+    for held in ["AUTHENTICATE ", "ADD_ONION "] {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").expect("control port");
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-torwait-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cmd = std::process::Command::new(std::env::current_exe().expect("test exe"));
+        cmd.env("RBTC_TEST_TOR_WAIT_DIR", &dir)
+            .env(
+                "RBTC_TEST_TOR_WAIT_ADDR",
+                port.local_addr().unwrap().to_string(),
+            )
+            .arg("--exact")
+            .arg("run::sigterm_ends_a_start_waiting_on_tor_control")
+            .arg("--test-threads=1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if held == "ADD_ONION " {
+            cmd.env("RBTC_TEST_TOR_WAIT_ONION", "1");
+        }
+        let mut child = cmd.spawn().expect("spawn node");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        for pipe in [
+            Box::new(child.stdout.take().expect("stdout")) as Box<dyn std::io::Read + Send>,
+            Box::new(child.stderr.take().expect("stderr")),
+        ] {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufRead::lines(std::io::BufReader::new(pipe)) {
+                    if tx.send(line.unwrap_or_default()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let control = std::thread::spawn(move || {
+            let (s, _) = port.accept().expect("the child dials the control port");
+            let mut lines = std::io::BufReader::new(s.try_clone().expect("clone"));
+            let mut w = s;
+            loop {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut lines, &mut line).expect("control command");
+                if line.starts_with(held) {
+                    return (w, line);
+                }
+                let reply: &[u8] = if line.starts_with("GETINFO version") {
+                    b"250-version=0.4.8.10\r\n250 OK\r\n"
+                } else {
+                    b"250 OK\r\n"
+                };
+                std::io::Write::write_all(&mut w, reply).expect("control reply");
+            }
+        });
+        let start = Instant::now();
+        while !control.is_finished() {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                panic!("{held}: child exited before it held the command: {status}");
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(40),
+                "{held}: child never sent the command"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (_held_open, line) = control.join().unwrap();
+        assert!(line.starts_with(held), "{line:?}");
+        // The handler is a spawned task; the child is parked on the reply now.
+        std::thread::sleep(Duration::from_millis(50));
+        // SAFETY: `child` is the node process this test spawned, and it installs
+        // a SIGTERM handler before it dials the control port.
+        let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        assert_eq!(rc, 0, "SIGTERM kill");
+        let signalled = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break status;
+            }
+            if signalled.elapsed() > Duration::from_secs(5) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("{held}: SIGTERM did not end a start waiting on the control port");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        let out: Vec<String> = rx.iter().collect();
+        assert!(
+            status.success(),
+            "{held}: SIGTERM must exit cleanly, status {status}"
+        );
+        assert!(
+            out.iter().any(|l| l.contains("node: clean exit")),
+            "{held}: SIGTERM must run the shutdown tail: {out:?}"
+        );
+    }
+}
+
 /// The `IbdConfig` literal in `run_ibd_or_skip` is not built by the config
 /// journey, so this drives `run_p2p`. A refused connect must flush a fail
 /// mark into the saved book, and the SOCKS proxy must be the socket dialed.

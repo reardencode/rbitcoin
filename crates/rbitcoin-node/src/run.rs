@@ -128,6 +128,20 @@ impl Shutdown {
         self.flag.load(Ordering::SeqCst)
     }
 
+    /// `step`, or `Ok(None)` once shutdown is requested first. A start that
+    /// gets `None` goes on to the shutdown tail and its flushes, as after
+    /// [`Self::or_fail`].
+    pub async fn run_until_cancelled<T>(
+        &self,
+        step: impl std::future::Future<Output = Result<T, NodeError>>,
+    ) -> Result<Option<T>, NodeError> {
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(None),
+            done = step => done.map(Some),
+        }
+    }
+
     /// Completes when shutdown has been requested.
     pub async fn cancelled(&self) {
         if self.requested() {
@@ -628,12 +642,18 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
 
     let shutdown = Shutdown::new();
     spawn_signal_handler(shutdown.clone());
-    let mut tor_ctl = crate::tor_control::TorControl::connect_if_configured(
-        config.tor.control,
-        config.tor.cookie.as_deref(),
-        config.tor.password.as_deref(),
-    )
-    .await?;
+    let mut tor_ctl = shutdown
+        .run_until_cancelled(crate::tor_control::TorControl::connect_if_configured(
+            config.tor.control,
+            config.tor.cookie.as_deref(),
+            config.tor.password.as_deref(),
+            config
+                .tor
+                .io_timeout
+                .unwrap_or(crate::tor_control::CONTROL_TIMEOUT),
+        ))
+        .await?
+        .flatten();
     if tor_ctl.is_some() {
         info!(
             "tor control authenticated on {}",
@@ -643,22 +663,24 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .expect("control addr set when session exists")
         );
     }
-    if config.listen.listen_onion {
+    if config.listen.listen_onion && !shutdown.requested() {
         let ctl = tor_ctl
             .as_mut()
             .expect("validate requires --tor-control with --listen-onion");
         let virt = config.network.default_p2p_port();
-        let hs = ctl
-            .add_p2p_onion(config.datadir.path(), node.local_addr, virt)
-            .await?;
-        info!("p2p onion {}.onion:{}", hs.service_id, virt);
-        node.peers
-            .set_p2p_onion(format!("{}.onion", hs.service_id), virt);
+        if let Some(hs) = shutdown
+            .run_until_cancelled(ctl.add_p2p_onion(config.datadir.path(), node.local_addr, virt))
+            .await?
+        {
+            info!("p2p onion {}.onion:{}", hs.service_id, virt);
+            node.peers
+                .set_p2p_onion(format!("{}.onion", hs.service_id), virt);
+        }
     }
     if config.listen.i2p_sam.is_some() {
         node.peers.set_i2p_reachable(true);
     }
-    let mut i2p_sam = if let Some(addr) = config.listen.i2p_sam {
+    let mut i2p_sam = if let Some(addr) = config.listen.i2p_sam.filter(|_| !shutdown.requested()) {
         let s = if config.listen.i2p_accept_incoming {
             let dest = config.datadir.path().join("i2p").join("p2p.priv");
             rbitcoin_net::I2pSam::connect_persistent(addr, &dest, rbitcoin_net::SAM_RETRY).await
@@ -671,7 +693,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     } else {
         None
     };
-    if config.listen.i2p_accept_incoming {
+    if config.listen.i2p_accept_incoming && !shutdown.requested() {
         let port = node.local_addr.port();
         let sam = i2p_sam
             .as_mut()
@@ -748,7 +770,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.listen.connect_dns.clone(),
         config.network.default_p2p_port(),
     );
-    let dns_resolved = resolve_connect_dns(&config.listen.connect_dns, config.network).await;
+    let dns_resolved = if shutdown.requested() {
+        Vec::new()
+    } else {
+        resolve_connect_dns(&config.listen.connect_dns, config.network).await
+    };
     if config.trust_peer_host.is_some() {
         for addr in &dns_resolved {
             if let rbitcoin_net::NetAddr::Ip(sock) = addr {
@@ -763,7 +789,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         addrman.add_addr(*c);
     }
     let mut proxy_seeds_queued = false;
-    if should_resolve_default_seeds(&config) {
+    if should_resolve_default_seeds(&config) && !shutdown.requested() {
         info!(
             "ibd: resolving DNS/fixed seeds for {}…",
             config.network.as_str()
@@ -776,7 +802,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );
-    } else if !config.trust_peer_set() && config.listen.proxy.is_some() && config.listen.use_seeds {
+    } else if !config.trust_peer_set()
+        && config.listen.proxy.is_some()
+        && config.listen.use_seeds
+        && !shutdown.requested()
+    {
         proxy_seeds_queued = true;
         let n = queue_proxy_seed_addrfetch(&node.peers, config.network);
         info!("ibd: SOCKS proxy set — queued {n} seed hostnames via SOCKS addrfetch");
@@ -1127,9 +1157,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     );
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), electrum_handles.first()) {
         if let Some(hs) = shutdown.or_fail(
-            ctl.add_named_onion(config.datadir.path(), "electrum", h.local_addr)
-                .await
-                .map(Some),
+            shutdown
+                .run_until_cancelled(ctl.add_named_onion(
+                    config.datadir.path(),
+                    "electrum",
+                    h.local_addr,
+                ))
+                .await,
         ) {
             info!(
                 "electrum onion {}.onion:{}",
@@ -1162,9 +1196,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if config.esplora_onion {
         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
             if let Some(hs) = shutdown.or_fail(
-                ctl.add_named_onion(config.datadir.path(), "esplora", h.local_addr)
-                    .await
-                    .map(Some),
+                shutdown
+                    .run_until_cancelled(ctl.add_named_onion(
+                        config.datadir.path(),
+                        "esplora",
+                        h.local_addr,
+                    ))
+                    .await,
             ) {
                 info!(
                     "esplora onion http://{}.onion:{} (/ws same port)",
@@ -1296,9 +1334,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     );
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         if let Some(hs) = shutdown.or_fail(
-                            ctl.add_named_onion(config.datadir.path(), "electrum", h.local_addr)
-                                .await
-                                .map(Some),
+                            shutdown
+                                .run_until_cancelled(ctl.add_named_onion(
+                                    config.datadir.path(),
+                                    "electrum",
+                                    h.local_addr,
+                                ))
+                                .await,
                         ) {
                             info!(
                                 "electrum onion {}.onion:{}",
@@ -1357,9 +1399,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     if config.esplora_onion {
                         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                             if let Some(hs) = shutdown.or_fail(
-                                ctl.add_named_onion(config.datadir.path(), "esplora", h.local_addr)
-                                    .await
-                                    .map(Some),
+                                shutdown
+                                    .run_until_cancelled(ctl.add_named_onion(
+                                        config.datadir.path(),
+                                        "esplora",
+                                        h.local_addr,
+                                    ))
+                                    .await,
                             ) {
                                 info!(
                                     "esplora onion http://{}.onion:{} (/ws same port)",

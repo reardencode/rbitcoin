@@ -77,7 +77,7 @@ Clean smoke:
 | `--proxy HOST:PORT` | `proxy=` | unset — SOCKS5 for all P2P outbound |
 | `--onion HOST:PORT` | `onion=` | unset — SOCKS5 for onion destinations |
 | `--proxy-randomize[=0\|1]` | `proxy_randomize=` | **on** — fresh SOCKS username per peer (Tor circuit isolation) |
-| `--tor-control [HOST:PORT]` | `tor_control=` | unset — no control connection; omit ADDR → `127.0.0.1:9051` |
+| `--tor-control [HOST:PORT]` | `tor_control=` | unset — no control connection; omit ADDR → `127.0.0.1:9051`. Connecting and each command give up after 20 s; a reply line over 64 KiB or a reply over 1 MiB ends the start |
 | `--tor-control-cookie PATH` | `tor_control_cookie=` | `/run/tor/control.authcookie` when `--tor-control` is set and password is unset |
 | `--tor-control-password PASS` | `tor_control_password=` | unset — cookie AUTH unless set |
 | `--i2p-sam [HOST:PORT]` | `i2p_sam=` | unset — no SAM; omit ADDR → `127.0.0.1:7656` |
