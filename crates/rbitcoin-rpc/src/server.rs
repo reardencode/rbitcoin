@@ -37,7 +37,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 #[cfg(unix)]
@@ -254,9 +253,8 @@ pub async fn run_rpc(
     }
 
     if let Some(addr) = config.listen {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("rpc bind {addr}: {e}"))?;
+        let listener =
+            rbitcoin_net::listen::bind_tcp(addr).map_err(|e| format!("rpc bind {addr}: {e}"))?;
         let bound = listener
             .local_addr()
             .map_err(|e| format!("rpc local_addr: {e}"))?;

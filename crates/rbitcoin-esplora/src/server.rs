@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -1197,7 +1196,7 @@ pub async fn run_esplora(
 
     match config.listen {
         EsploraListen::Tcp(addr) => {
-            let listener = TcpListener::bind(addr).await?;
+            let listener = rbitcoin_net::listen::bind_tcp(addr)?;
             let local_addr = listener.local_addr()?;
             let task = tokio::spawn(async move {
                 let make = app.into_make_service_with_connect_info::<SocketAddr>();

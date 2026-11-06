@@ -35,6 +35,10 @@ sha3 = "0.12"
 # POLLRDHUP: peer FIN with unread bytes still in the receive buffer.
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# listen.rs: SO_EXCLUSIVEADDRUSE (same version socket2 already locks).
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 rbitcoin-ibd = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

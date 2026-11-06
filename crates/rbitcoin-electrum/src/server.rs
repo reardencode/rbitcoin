@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -265,7 +264,7 @@ pub async fn run_electrum(
     tip_tx: broadcast::Sender<TipNotify>,
     mempool: Option<Arc<MempoolHub>>,
 ) -> Result<ElectrumHandle, std::io::Error> {
-    let listener = TcpListener::bind(config.listen).await?;
+    let listener = rbitcoin_net::listen::bind_tcp(config.listen)?;
     let local_addr = listener.local_addr()?;
     let shutdown = ElectrumStop::new(false);
     let shutdown_c = Arc::clone(&shutdown);

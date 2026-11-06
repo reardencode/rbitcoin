@@ -39,6 +39,7 @@ PRIMITIVES_PLATFORM_FILTERS=()
 # 104-byte sun_path little room, and Linux CI's tmpfs TMPDIR is short.
 RPC_PLATFORM_FILTERS=()
 ESPLORA_PLATFORM_FILTERS=()
+NET_PLATFORM_FILTERS=()
 # Windows OVERLAPPED + concurrent grow can `pread short` and abort the
 # process (STATUS_STACK_BUFFER_OVERRUN). Same-thread fuse roundtrip, seal
 # roll, and query confirm still run. CI_OS_SMOKE_UNAME overrides uname
@@ -52,6 +53,8 @@ case "${CI_OS_SMOKE_UNAME:-$(uname -s)}" in
     # Linux and Windows only: Darwin opens no session by default.
     STORE_PLATFORM_FILTERS+=(uring_session::default_kind_follows_os)
     PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::)
+    # `mod listen` is #[cfg(windows)]: SO_EXCLUSIVEADDRUSE on listen sockets.
+    NET_PLATFORM_FILTERS+=(listen::)
     ;;
   Darwin*)
     PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::)
@@ -67,6 +70,7 @@ if [[ "${CI_OS_SMOKE_DRY_RUN:-}" == "1" ]]; then
   echo "primitives=${PRIMITIVES_PLATFORM_FILTERS[*]:-}"
   echo "rpc=${RPC_PLATFORM_FILTERS[*]:-}"
   echo "esplora=${ESPLORA_PLATFORM_FILTERS[*]:-}"
+  echo "net=${NET_PLATFORM_FILTERS[*]:-}"
   echo "skip=${STORE_PLATFORM_SKIPS[*]:-}"
   exit 0
 fi
@@ -115,6 +119,11 @@ done
 for f in ${ESPLORA_PLATFORM_FILTERS[@]+"${ESPLORA_PLATFORM_FILTERS[@]}"}; do
   assert_filter_matches rbitcoin-esplora "$f"
   cargo test -p rbitcoin-esplora --test suite -- "$f"
+done
+
+for f in ${NET_PLATFORM_FILTERS[@]+"${NET_PLATFORM_FILTERS[@]}"}; do
+  assert_filter_matches rbitcoin-net "$f"
+  cargo test -p rbitcoin-net --test suite -- "$f"
 done
 
 cargo build -p rbitcoin-node -p rbitcoin-cli

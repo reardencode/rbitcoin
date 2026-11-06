@@ -17,7 +17,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
@@ -203,7 +202,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     };
     let constraints_cooldown = config.constraints_cooldown;
     let chain = config.chain;
-    let listener = TcpListener::bind(config.listen).await?;
+    let listener = rbitcoin_net::listen::bind_tcp(config.listen)?;
     let local_addr = listener.local_addr()?;
     let stats = Arc::new(Sv2TpStats::default());
     let slots = Arc::new(Semaphore::new(MAX_SESSIONS));
