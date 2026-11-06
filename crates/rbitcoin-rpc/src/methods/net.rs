@@ -361,8 +361,20 @@ pub fn localaddresses_json(ctx: &RpcContext) -> Value {
 /// `bitcoincore-rpc` requires the pre-0.19 `bip9_softforks` map below
 /// 190000 and then rejects our `getblockchaininfo`. This is an RPC shape
 /// floor. P2P stays `protocolversion` 70016. The crate semver stays in
-/// `subversion`.
+/// `subversion`. `--rpc-client-version` raises the reported integer for a
+/// client that gates on a newer one, without changing any response shape.
 pub const RPC_COMPAT_VERSION: u64 = 190_000;
+
+/// `--rpc-client-version` / conf `rpc_client_version=`: 1 through 1000000.
+pub fn parse_rpc_client_version(val: &str) -> Result<u64, String> {
+    let n: u64 = val
+        .parse()
+        .map_err(|e| format!("rpc_client_version: {e}"))?;
+    if !(1..=1_000_000).contains(&n) {
+        return Err("rpc_client_version must be between 1 and 1000000".into());
+    }
+    Ok(n)
+}
 
 fn networks_json(ctx: &RpcContext) -> Value {
     let nets = rbitcoin_net::OnlyNet::ALL;
@@ -403,7 +415,7 @@ pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
         rbitcoin_net::local_service_flags(ctx.query.prune_seqsigwit(), ctx.peers.as_deref());
     let svc_bits = flags.to_u64();
     json!({
-        "version": RPC_COMPAT_VERSION,
+        "version": ctx.client_version,
         "subversion": ctx.subversion,
         "protocolversion": 70016,
         "localservices": format!("{svc_bits:016x}"),

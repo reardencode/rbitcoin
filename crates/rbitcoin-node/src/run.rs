@@ -261,6 +261,7 @@ pub async fn start_rpc_listener(
         alert_notify: config.alert_notify.clone(),
         blocksonly: config.mempool.blocksonly,
         package_dialect: config.rpc.package_dialect,
+        client_version: config.rpc.client_version,
     };
     let op_true_signet = config.network == Network::Signet
         && config
@@ -2635,6 +2636,7 @@ pub async fn start_esplora_if_ready(
                 alert_fired: Arc::new(AtomicBool::new(false)),
                 blocksonly,
                 package_dialect: false,
+                client_version: rbitcoin_rpc::methods::RPC_COMPAT_VERSION,
             };
             gbt_template(&ctx).map_err(|v| {
                 v.get("message")

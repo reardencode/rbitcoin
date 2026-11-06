@@ -126,6 +126,8 @@ pub struct RpcConfig {
     pub blocksonly: bool,
     /// See [`crate::methods::RpcContext::package_dialect`].
     pub package_dialect: bool,
+    /// See [`crate::methods::RpcContext::client_version`].
+    pub client_version: u64,
 }
 
 /// Live RPC server handle.
@@ -230,6 +232,7 @@ pub async fn run_rpc(
         alert_fired: Arc::new(AtomicBool::new(false)),
         blocksonly: config.blocksonly,
         package_dialect: config.package_dialect,
+        client_version: config.client_version,
     });
 
     let n = work_queue_permits(config.work_queue);

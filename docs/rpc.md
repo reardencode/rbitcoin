@@ -17,7 +17,7 @@ subset** (table below). Official Core dialect scripts (`rpc_decodescript.py`,
 
 ## `getnetworkinfo.version`
 
-`version` is the hardcoded integer **190000**, Bitcoin Core 0.19.0's
+`version` defaults to the integer **190000**, Bitcoin Core 0.19.0's
 `CLIENT_VERSION` (`10000 * 19` in Core's 0.x packing). Typed RPC clients
 compare this field when they choose a response shape. Below 190000,
 `bitcoincore-rpc`'s `get_blockchain_info` requires the pre-0.19
@@ -38,9 +38,16 @@ an array).
   gate. Packing a later rbitcoin `19.0` or `22.0` the same way would
   collide with a real Core `CLIENT_VERSION`.
 
-The floor stops at 0.19. A higher integer would tell those clients that
+The default stops at 0.19. A higher integer tells those clients that
 later Core RPC is present, including descriptor-wallet calls from 0.21
-(`210000`). It would not change what peers accept.
+(`210000`). It does not change what this node serves or what peers
+accept.
+
+`--rpc-client-version N` (conf `rpc_client_version=`, `1` through
+`1000000`) sets only the reported integer. Leave the default unless a
+client refuses to start below a newer floor. Bark's captaind requires
+`310000` because Core 31 added the `getmempoolentry` chunk fields, which
+this node already returns.
 
 ## Operator knobs
 
@@ -55,6 +62,7 @@ later Core RPC is present, including descriptor-wallet calls from 0.21
 | `--sh-index` | **off** | Class B scripthash for Electrum/Esplora address history. RPC by height/hash/txid does not need it |
 | `--block-filter-index` | **off** | BIP158 basic. IBD seals them when the flag is on from the start. A later enable still materializes after catch-up. `NODE_COMPACT_FILTERS` is advertised once filters first reach the tip (`getnetworkinfo` lists `COMPACT_FILTERS`), then for the life of the process. `getblockfilter` serves a sealed height, one block whose parent filter is already sealed, and a stale branch back to that sealed fork point. An unsealed best-chain gap is refused. `/rest/blockfilter/` and P2P still serve only heights the watermark covers. Independent of `--sh-index` |
 | `--rpc-work-queue N` | **16** | In-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (a JSON-RPC array is still one slot). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. The call holds that slot while it waits for a `--store-read-budget` permit. A call that does not read the store, including `getblockcount`, does not take that permit. `waitforblock`, `waitforblockheight`, `waitfornewblock`, and a `getblocktemplate` long-poll (a non-null `longpollid` in template mode; proposal mode does not wait) do not hold the work-queue slot or the disk permit while they wait. A `getblocktemplate` with no `longpollid` keeps the slot and takes it before any store read. The template build reads the tip with no disk permit, takes one permit, and reads the tip again without waiting on connect. It keeps that permit for the header reads only when both reads match, then drops it before transaction selection, so a block connect does not pin that permit and a store read can run during selection. After a long-poll, the next call in that POST waits for a work-queue slot. A POST that has not run a call is still HTTP 503, including a long-poll, and that 503 is before the tip poll. `--store-read-budget N` (`store_read_budget=`) overrides `--datadir-hdd`. Omitted or `0` is 1 on `--datadir-hdd`, otherwise one less than the core count, minimum 1 |
+| `--rpc-client-version N` / conf `rpc_client_version=` | **190000** | Integer `getnetworkinfo.version` reports (`1`–`1000000`). Adds no RPC and changes no other field. Bark captaind needs `310000`. See [getnetworkinfo.version](#getnetworkinfoversion). |
 | `--rest` / conf `rest=` | **off** | Unauthenticated `/rest/` on the RPC listener. Own queue, same depth as `--rpc-work-queue`'s default. The body is read before that permit is taken. Without the flag those paths are 404. |
 
 TLS is external (reverse proxy). Unix socket needs no HTTP header. TCP is

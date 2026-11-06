@@ -17,6 +17,7 @@ pub use chain::{tip_hash_height, wait_timeout_ms};
 /// Cap for `waitfor*` and `getblocktemplate` long-poll. Not a knob.
 pub const RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
 pub use mine::{gbt_template, submit_received_block};
+pub use net::{parse_rpc_client_version, RPC_COMPAT_VERSION};
 
 /// HTTP methods whose connect runs on `tip-accept` and must be awaited on the
 /// request task. In-process [`dispatch`] stays synchronous.
@@ -304,6 +305,8 @@ pub struct RpcContext {
     /// `submitpackage` uses Core `IsChildWithParents` (the node's
     /// `RBITCOIN_RPC_PACKAGE_DIALECT`). Off by default.
     pub package_dialect: bool,
+    /// `getnetworkinfo.version`. Default [`RPC_COMPAT_VERSION`].
+    pub client_version: u64,
     /// In-flight RPC methods for `getrpcinfo.active_commands`.
     pub active: Arc<std::sync::Mutex<RpcActive>>,
 }

@@ -177,10 +177,10 @@ NBXplorer scans blocks with `getblock` (verbosity 2) and
 `getrawtransaction`, broadcasts with `sendrawtransaction`, and
 authenticates with a cookie file. Those calls and the cookie exist.
 Current NBXplorer also requires Bitcoin Core **24.0 or newer**.
-`getnetworkinfo.version` is fixed at **190000** so clients do not assume
+`getnetworkinfo.version` defaults to **190000** so clients do not assume
 a descriptor wallet ([`rpc.md`](./rpc.md#getnetworkinfoversion)). That
-integer fails NBXplorer's version gate. Raising it would claim wallet
-RPC this node does not serve. BTCPay works against this node when
+integer fails NBXplorer's version gate. `--rpc-client-version` can raise
+it, but that would claim wallet RPC this node does not serve. BTCPay works against this node when
 NBXplorer accepts the `subversion` (`/rbitcoin:<semver>/`) and keeps
 using the block and transaction calls.
 NBXplorer also reads `version`, `lastsend`, `lastrecv` and `conntime`

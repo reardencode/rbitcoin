@@ -81,6 +81,7 @@ fn operator_conf_and_argv() {
         "--test-activation-height",
         "--regtest-pow-bits",
         "--rpc-work-queue",
+        "--rpc-client-version",
         "--peer-timeout",
         "--blocks-only",
         "--ua-comment",
@@ -528,6 +529,25 @@ fn operator_conf_and_argv() {
             .work_queue,
         Some(4)
     );
+
+    // Only the reported integer; 190000 unless an operator raises it.
+    assert_eq!(ready_config(["rbitcoin-node"]).rpc.client_version, 190_000);
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--rpc-client-version=310000"])
+            .rpc
+            .client_version,
+        310_000
+    );
+    let mut refused = NodeConfig::default();
+    let zero = refused.apply_kv("rpc_client_version", "0").unwrap_err();
+    assert!(zero.to_string().contains("between 1 and 1000000"), "{zero}");
+    assert_eq!(refused.rpc.client_version, 190_000);
+    for bad in ["--rpc-client-version=0", "--rpc-client-version=1000001"] {
+        match operator_config_from_args(["rbitcoin-node", bad], &NodeEnv::default()) {
+            Err(code) => assert_exit(code, ExitCode::from(2)),
+            Ok(other) => panic!("{bad} assembled: {other:?}"),
+        }
+    }
 }
 
 #[test]

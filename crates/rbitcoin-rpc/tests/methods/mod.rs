@@ -57,6 +57,7 @@ fn open_ctx(dir: &TempDir) -> RpcContext {
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     }
 }
 
@@ -955,6 +956,19 @@ fn getnetworkinfo_networks_report_reach_and_proxy() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `getnetworkinfo.version` is the configured client version. Bark's
+/// captaind refuses to start below 310000.
+#[test]
+fn getnetworkinfo_version_follows_client_version() {
+    let (mut ctx, dir) = ctx_empty();
+    let def = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(def["version"], 190_000, "{def}");
+    ctx.client_version = 310_000;
+    let raised = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(raised["version"], 310_000, "{raised}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn getnetworkinfo_localrelay_follows_mempool_relay() {
     // `p2p_blocksonly.py`: `-blocksonly` leaves relay off → localrelay false.
@@ -1392,6 +1406,7 @@ fn all_methods_callable_empty_or_error() {
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(mem2["loaded"], true);
@@ -1876,6 +1891,7 @@ fn regtest_ctx(
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     (ctx, dir, hub)
 }
@@ -7820,6 +7836,7 @@ fn ctx_without_chain(src: &RpcContext) -> RpcContext {
         alert_fired: Arc::clone(&src.alert_fired),
         blocksonly: src.blocksonly,
         package_dialect: src.package_dialect,
+        client_version: src.client_version,
     }
 }
 

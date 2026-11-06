@@ -109,6 +109,7 @@ async fn long_socket_path_keeps_the_tcp_stop_flag() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None)
         .await
@@ -152,6 +153,7 @@ async fn rpc_smoke_getblockcount_and_help() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
@@ -253,6 +255,7 @@ async fn rest_is_404_without_the_flag() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -363,6 +366,7 @@ async fn jsonrpc_http_body_matches_core_line() {
         alert_notify: None,
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -465,6 +469,7 @@ async fn jsonrpc_v2_batch_and_http_codes() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
@@ -549,6 +554,7 @@ async fn unauthorized_large_content_length_is_401_before_body() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
     let mut stream = tokio::net::TcpStream::connect(tcp_addr(&handle))
@@ -593,6 +599,7 @@ async fn oversized_bearer_body_is_413_and_small_body_still_runs() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
     let (st, body) = post_raw(
@@ -860,6 +867,7 @@ async fn large_block_submit_and_proposal_clear_http_413() {
         alert_notify: None,
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
@@ -1050,6 +1058,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
@@ -1187,6 +1196,7 @@ async fn long_poll_deadline_returns_the_tip() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
@@ -1339,6 +1349,7 @@ async fn stalled_rpc_connections_expire_and_free_capacity() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
@@ -1456,6 +1467,7 @@ fn waitfor_does_not_hold_the_blocking_pool() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
 };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
@@ -1546,6 +1558,7 @@ async fn long_poll_does_not_hold_the_work_queue() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
@@ -1666,6 +1679,7 @@ async fn rpc_work_queue_exceeded() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
@@ -2032,6 +2046,7 @@ async fn long_poll_does_not_hold_the_store_budget() {
         alert_notify: None,
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
@@ -2093,6 +2108,7 @@ async fn batched_long_poll_does_not_hold_the_store_budget() {
         alert_notify: None,
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
@@ -2221,6 +2237,7 @@ fn gbt_prev_ctx() -> (
         alert_fired: Arc::new(AtomicBool::new(false)),
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     });
     (ctx, dir, mp)
 }
@@ -2567,6 +2584,7 @@ async fn jsonrpc_envelope_junk_and_auth() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
@@ -2750,6 +2768,7 @@ async fn tcp_accepts_bearer_and_opted_in_core_cookie_basic() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(
         without_cookie,
@@ -2795,6 +2814,7 @@ async fn tcp_accepts_bearer_and_opted_in_core_cookie_basic() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     // The cookie is TCP-only: a socket-only listener must not silently ignore it.
     std::fs::write(&cookie_path, "mempool:secret").unwrap();
@@ -2961,6 +2981,7 @@ async fn unix_socket_without_tcp_refuses_without_af_unix() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let err = run_rpc(cfg, q, None, None, None, None, None)
         .await
@@ -2993,6 +3014,7 @@ async fn unix_socket_needs_no_http_auth() {
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
     assert!(sock.exists(), "socket file");
@@ -3062,6 +3084,7 @@ fn http_wait_ctx_on(
 
         blocksonly: false,
         package_dialect: false,
+        client_version: 190_000,
     });
     (ctx, dir)
 }

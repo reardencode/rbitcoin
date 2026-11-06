@@ -287,6 +287,8 @@ pub struct RpcOpts {
     /// RPC tip waits drain the tip-accept lane. Set only from
     /// [`NodeEnv::rpc_wait_tip_idle`].
     pub wait_tip_idle: bool,
+    /// `getnetworkinfo.version`. Default 190000. Bark captaind needs 310000.
+    pub client_version: u64,
 }
 
 impl Default for RpcOpts {
@@ -303,6 +305,7 @@ impl Default for RpcOpts {
             rest: false,
             package_dialect: false,
             wait_tip_idle: false,
+            client_version: rbitcoin_rpc::methods::RPC_COMPAT_VERSION,
         }
     }
 }
@@ -1824,6 +1827,10 @@ impl NodeConfig {
                 } else {
                     n
                 });
+            }
+            "rpc_client_version" => {
+                self.rpc.client_version = rbitcoin_rpc::methods::parse_rpc_client_version(val)
+                    .map_err(NodeError::Config)?;
             }
             "max_run_secs" => {
                 self.max_run_secs = Some(
