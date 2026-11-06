@@ -548,8 +548,16 @@ fn tapscript_sighash_matches_rust_bitcoin_on_every_hash_type() {
     for annex in [None, Some(&annex_bytes[..])] {
         for input_index in inputs.iter().copied() {
             let vin = input_index.get();
-            let exec =
-                crypto::TapscriptExecData::new(&job, input_index, &tap_spent, leaf_hash, annex);
+            let (spent_value, spent_script) = job.prevout_parts(input_index).expect("prevout");
+            let exec = crypto::TapscriptExecData::new(
+                &job,
+                input_index,
+                &tap_spent,
+                leaf_hash,
+                spent_value,
+                spent_script,
+                annex,
+            );
             let annex_oracle = annex.map(|a| Annex::new(a).unwrap());
             let annex_hash = annex.map(crypto::annex_hash);
             for ty in types {
@@ -562,6 +570,8 @@ fn tapscript_sighash_matches_rust_bitcoin_on_every_hash_type() {
                     annex_hash,
                     None,
                     &single,
+                    spent_value,
+                    spent_script,
                 );
                 let key_oracle = SighashCache::new(&tx).taproot_signature_hash(
                     vin,
@@ -716,7 +726,8 @@ fn p2pkh_fast_path_matches_interpreter_including_hash_collision() {
     assert!(verify_job_all_inputs(&job).is_ok());
     assert!({
         let i = job.inputs().next().unwrap();
-        verify_bare(&job, i, &job.tx)
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        verify_bare(&job, i, &job.tx, Amount::from_sat(value), script)
     }
     .is_ok());
 
@@ -732,7 +743,8 @@ fn p2pkh_fast_path_matches_interpreter_including_hash_collision() {
     assert!(verify_job_all_inputs(&job).is_err());
     assert!({
         let i = job.inputs().next().unwrap();
-        verify_bare(&job, i, &job.tx)
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        verify_bare(&job, i, &job.tx, Amount::from_sat(value), script)
     }
     .is_err());
     // Interpreter FindAndDelete of that push leaves the four opcodes.
@@ -824,4 +836,34 @@ fn wire_vout_past_n_out_is_missing_prevout() {
     let (value, script) = job.prevout_parts(i).expect("resolved wire prevout");
     assert_eq!(value, 50);
     assert_eq!(script, &[0x51]);
+}
+
+/// A legacy spend does not fill BIP143 midstates. The script is a P2PKH
+/// template, so the anyone-can-spend skip does not return before that choice.
+#[test]
+fn legacy_check_does_not_build_bip143_midstates() {
+    let mut spk = vec![0x76, 0xa9, 0x14];
+    spk.extend([0u8; 20]);
+    spk.extend_from_slice(&[0x88, 0xac]);
+    let job = ScriptCheckJob::new(
+        vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        }],
+        Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![],
+        },
+        rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, false),
+    );
+    let err = rbitcoin_consensus::block::verify_one_script_job(&job).expect_err("empty scriptSig");
+    assert!(matches!(err, ConsensusError::Script(_)), "{err}");
+    assert!(job.pre.get().is_none());
 }

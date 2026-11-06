@@ -792,7 +792,8 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
         let tx: &bitcoin::Transaction = &job.tx;
         let bare = script_flag_msg({
             let i = job.inputs().next().unwrap();
-            script::verify_bare(job, i, tx)
+            let (value, script_bytes) = job.prevout_parts(i).expect("prevout");
+            script::verify_bare(job, i, tx, Amount::from_sat(value), script_bytes)
         });
         let shipped = script_flag_msg(script::verify_job_all_inputs(job));
         (shipped, bare)

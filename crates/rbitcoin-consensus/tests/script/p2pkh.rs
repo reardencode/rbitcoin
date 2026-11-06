@@ -73,7 +73,8 @@ fn verify_pubkey_hash_mismatch() {
     let mut cache = SighashCache::new(&*job.tx);
     let err = {
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &mut cache)
+        let spk = job.prevout_script(i).expect("prevout");
+        verify(&job, i, &job.tx, &mut cache, spk)
     }
     .unwrap_err();
     assert!(format!("{err}").contains("p2pkh"));

@@ -52,7 +52,9 @@ fn empty_witness_and_hash_mismatch() {
     };
     assert!({
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx)
+        let spk = job.prevout_script(i).expect("spk");
+        let amount = job.prevout_amount(i).expect("amount");
+        verify(&job, i, &job.tx, spk, amount)
     }
     .is_err());
 
@@ -60,7 +62,8 @@ fn empty_witness_and_hash_mismatch() {
     job2.tx.input[0].witness = Witness::from_slice(&[vec![0x51]]); // OP_TRUE script
     assert!({
         let i = job2.inputs().next().unwrap();
-        verify_with_scripthash(&job2, i, &job2.tx, &[0u8; 32])
+        let amount = job2.prevout_amount(i).expect("amount");
+        verify_with_scripthash(&job2, i, &job2.tx, &[0u8; 32], amount)
     }
     .is_err());
 }

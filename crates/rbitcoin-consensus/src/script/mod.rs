@@ -23,7 +23,7 @@ pub mod p2wsh;
 pub mod core_script;
 
 use bitcoin::hashes::Hash;
-use bitcoin::Transaction;
+use bitcoin::{Amount, Transaction};
 
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
@@ -31,12 +31,22 @@ use classify::ScriptKind;
 
 pub use classify::is_anyone_can_spend;
 
-/// Verify every non-anyone-can-spend input of a script job.
+/// Verify every input of a script job, or succeed when every input is pure
+/// anyone-can-spend.
+///
+/// Pure anyone-can-spend is empty `scriptSig`, empty witness, and an
+/// `OP_TRUE` scriptPubKey on every input. `OP_TRUE` alone still runs.
+/// A later non-pure input verifies the whole transaction, including the
+/// leading pure inputs.
 ///
 /// One shared [`bitcoin::sighash::SighashCache`] per tx for typed paths (P2WPKH /
 /// nested). P2TR hashes borrowed prevout scripts. Interpreter paths own a cache for the script eval so
 /// multi-CHECKSIG (multisig) reuses midstate. Signet-heavy path is 1-input txs —
 /// that case avoids the multi-input loop overhead.
+///
+/// Each input's amount and script are resolved once and passed down. The
+/// BIP341 spent-output hash still walks every input when a taproot signature
+/// commits to them.
 ///
 /// On failure, [`ConsensusError::Script`] messages are annotated with `txid=` and
 /// `vin=` so IBD logs name the failing spend (batch-first height alone is not enough).
@@ -47,20 +57,81 @@ pub fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError>
     let Some(first) = inputs.next() else {
         return Ok(());
     };
-    let mut cache = None;
-    // Legacy sighash does not read BIP143 midstates. A segwit transaction
-    // loads the stored row, or fills one when the job has none.
-    let pre = if crate::tx_precompute::uses_segwit_serialization(tx) {
-        job.pre()?
+    let (value0, script0) = job.prevout_parts(first)?;
+    if !pure_anyone_can_spend(tx, first, script0) {
+        return verify_loaded_inputs_from(job, tx, first, value0, script0, inputs);
+    }
+    for i in inputs {
+        let (_, script) = job.prevout_parts(i)?;
+        if !pure_anyone_can_spend(tx, i, script) {
+            return verify_loaded_inputs(job, tx);
+        }
+    }
+    Ok(())
+}
+
+/// Empty scriptSig, empty witness, and `OP_TRUE` scriptPubKey.
+fn pure_anyone_can_spend(tx: &Transaction, index: crate::block::InputIndex, script: &[u8]) -> bool {
+    let vin = &tx.input[index.get()];
+    vin.script_sig.is_empty()
+        && vin.witness.is_empty()
+        && is_anyone_can_spend(bitcoin::script::Script::from_bytes(script))
+}
+
+/// Legacy jobs keep the static base row. A segwit job uses the stored row,
+/// or fills one when the job has none.
+fn midstate_row(job: &ScriptCheckJob) -> Result<&crate::TxScriptPrecompute, ConsensusError> {
+    if job.skips_segwit_midstates() {
+        Ok(interpreter::base_sig_precompute())
     } else {
-        interpreter::base_sig_precompute()
+        job.pre()
+    }
+}
+
+fn verify_loaded_inputs(job: &ScriptCheckJob, tx: &Transaction) -> Result<(), ConsensusError> {
+    let mut inputs = job.inputs();
+    let Some(first) = inputs.next() else {
+        return Ok(());
     };
+    let (value0, script0) = job.prevout_parts(first)?;
+    verify_loaded_inputs_from(job, tx, first, value0, script0, inputs)
+}
+
+fn verify_loaded_inputs_from(
+    job: &ScriptCheckJob,
+    tx: &Transaction,
+    first: crate::block::InputIndex,
+    value0: u64,
+    script0: &[u8],
+    rest: impl Iterator<Item = crate::block::InputIndex>,
+) -> Result<(), ConsensusError> {
+    let mut cache = None;
+    let pre = midstate_row(job)?;
     let tap_spent = crypto::TapSpentHashes::default();
-    verify_input(job, first, tx, &mut cache, pre, &tap_spent)
-        .map_err(|e| annotate_script_err(e, job, first))?;
-    for ii in inputs {
-        verify_input(job, ii, tx, &mut cache, pre, &tap_spent)
-            .map_err(|e| annotate_script_err(e, job, ii))?;
+    verify_input(
+        job,
+        first,
+        tx,
+        &mut cache,
+        pre,
+        &tap_spent,
+        Amount::from_sat(value0),
+        script0,
+    )
+    .map_err(|e| annotate_script_err(e, job, first))?;
+    for ii in rest {
+        let (value, script) = job.prevout_parts(ii)?;
+        verify_input(
+            job,
+            ii,
+            tx,
+            &mut cache,
+            pre,
+            &tap_spent,
+            Amount::from_sat(value),
+            script,
+        )
+        .map_err(|e| annotate_script_err(e, job, ii))?;
     }
     Ok(())
 }
@@ -101,6 +172,7 @@ pub fn sighash_cache<'a, 't>(
     cache.get_or_insert_with(|| bitcoin::sighash::SighashCache::new(tx))
 }
 
+#[allow(clippy::too_many_arguments)] // spent output is passed in; verify does not resolve it again
 pub fn verify_input<'a>(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
@@ -108,14 +180,26 @@ pub fn verify_input<'a>(
     cache: &mut Option<bitcoin::sighash::SighashCache<&'a Transaction>>,
     pre: &crate::TxScriptPrecompute,
     tap_spent: &crypto::TapSpentHashes,
+    amount: Amount,
+    script: &[u8],
 ) -> Result<(), ConsensusError> {
-    let spk = bitcoin::script::Script::from_bytes(job.prevout_script(input_index)?);
+    let spk = bitcoin::script::Script::from_bytes(script);
     let input = &tx.input[input_index.get()];
     let has_witness = !input.witness.is_empty();
 
     if job.witness_active {
         if let Some((version, program)) = classify::witness_program(spk) {
-            return verify_native_witness(job, input_index, tx, pre, tap_spent, version, program);
+            return verify_native_witness(
+                job,
+                input_index,
+                tx,
+                pre,
+                tap_spent,
+                version,
+                program,
+                amount,
+                script,
+            );
         }
     }
 
@@ -128,16 +212,18 @@ pub fn verify_input<'a>(
     match kind {
         ScriptKind::P2pkh => {
             if needs_interpreted_ecdsa(job) {
-                return verify_bare(job, input_index, tx);
+                return verify_bare(job, input_index, tx, amount, script);
             }
             // Fast path: exact `<sig> <pubkey>` scriptSig. Historical mainnet has
             // non-standard P2PKH scriptSigs that still leave a valid stack for
             // scriptPubKey (e.g. height 218596: "p2pkh scriptSig len"). Fall back
             // only for scriptSig *shape* errors (not DER/ECDSA), so bip66 failure
             // codes stay.
-            match p2pkh::verify(job, input_index, tx, sighash_cache(cache, tx)) {
+            match p2pkh::verify(job, input_index, tx, sighash_cache(cache, tx), script) {
                 Ok(()) => Ok(()),
-                Err(e) if p2pkh_scriptsig_shape_error(&e) => verify_bare(job, input_index, tx),
+                Err(e) if p2pkh_scriptsig_shape_error(&e) => {
+                    verify_bare(job, input_index, tx, amount, script)
+                }
                 Err(e) => Err(e),
             }
         }
@@ -145,9 +231,9 @@ pub fn verify_input<'a>(
             // Pre-BIP16: HASH160/EQUAL is a bare script (push data, hash, equal) —
             // do **not** treat the last push as a redeemScript. Mainnet 170060.
             if !job.bip16_active {
-                return verify_bare(job, input_index, tx);
+                return verify_bare(job, input_index, tx, amount, script);
             }
-            let stack = nested::p2sh_script_sig_stack(job, input_index, tx)?;
+            let stack = nested::p2sh_script_sig_stack(job, input_index, tx, amount)?;
             if let Some(res) = nested::try_p2sh_nested_segwit(
                 job,
                 input_index,
@@ -155,16 +241,18 @@ pub fn verify_input<'a>(
                 sighash_cache(cache, tx),
                 pre,
                 &stack,
+                amount,
+                script,
             ) {
                 return res;
             }
             if job.witness_active && has_witness {
                 return Err(ConsensusError::Script("WITNESS_UNEXPECTED".into()));
             }
-            nested::verify_p2sh_legacy(job, input_index, tx, stack)
+            nested::verify_p2sh_legacy(job, input_index, tx, stack, amount, script)
         }
         ScriptKind::Bare | ScriptKind::P2wpkh | ScriptKind::P2wsh | ScriptKind::P2tr => {
-            verify_bare(job, input_index, tx)
+            verify_bare(job, input_index, tx, amount, script)
         }
     }
 }
@@ -179,6 +267,7 @@ pub const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = rbitcoin_primitives::P2A_PROGRAM;
 /// without DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM, as in Core.
 #[inline]
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)] // spent output is passed in; verify does not resolve it again
 pub fn verify_native_witness(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
@@ -187,6 +276,8 @@ pub fn verify_native_witness(
     tap_spent: &crypto::TapSpentHashes,
     version: u8,
     program: &[u8],
+    amount: Amount,
+    script: &[u8],
 ) -> Result<(), ConsensusError> {
     if !tx.input[input_index.get()].script_sig.is_empty() {
         return Err(ConsensusError::Script("WITNESS_MALLEATED".into()));
@@ -198,14 +289,16 @@ pub fn verify_native_witness(
     }
     match (version, program.len()) {
         (0, 20) if needs_interpreted_ecdsa(job) => {
-            p2wpkh::verify_interpreted(job, input_index, tx, program)
+            p2wpkh::verify_interpreted(job, input_index, tx, program, amount)
         }
-        (0, 20) => p2wpkh::verify(job, input_index, tx, pre),
-        (0, 32) => p2wsh::verify(job, input_index, tx),
+        (0, 20) => p2wpkh::verify(job, input_index, tx, pre, script, amount),
+        (0, 32) => p2wsh::verify(job, input_index, tx, script, amount),
         (0, _) => Err(ConsensusError::Script(
             "WITNESS_PROGRAM_WRONG_LENGTH".into(),
         )),
-        (1, 32) if job.taproot_active => p2tr::verify(job, input_index, tx, tap_spent),
+        (1, 32) if job.taproot_active => {
+            p2tr::verify(job, input_index, tx, tap_spent, amount, script)
+        }
         (1, 32) => Ok(()),
         (1, 2) if program == PAY_TO_ANCHOR_PROGRAM => Ok(()),
         _ => {
@@ -246,6 +339,8 @@ pub fn verify_bare(
     job: &ScriptCheckJob,
     input_index: crate::block::InputIndex,
     tx: &Transaction,
+    amount: Amount,
+    script: &[u8],
 ) -> Result<(), ConsensusError> {
     // Fully run scriptSig, then scriptPubKey, sharing one stack. scriptSig is
     // not push-only in consensus for bare spends (SIGPUSHONLY is policy / BIP16-P2SH
@@ -260,16 +355,18 @@ pub fn verify_bare(
             job,
             tx,
             input_index,
+            amount,
             ss,
             interpreter::SigVersion::Base,
         )?;
         let _ = interpreter::eval_script(ss, &mut stack, &ctx_sig)?;
     }
-    let spk = bitcoin::script::Script::from_bytes(job.prevout_script(input_index)?);
+    let spk = bitcoin::script::Script::from_bytes(script);
     let ctx = interpreter::EvalContext::from_job(
         job,
         tx,
         input_index,
+        amount,
         spk,
         interpreter::SigVersion::Base,
     )?;
@@ -608,6 +705,7 @@ pub mod crypto {
     /// and `Some((tapleaf, codesep))` on the script path (ext flag 1).
     ///
     /// Prevout scripts are borrowed from `job`. This does not allocate `TxOut`.
+    #[allow(clippy::too_many_arguments)] // spent output is passed in; ANYONECANPAY does not resolve it again
     pub fn tap_signature_hash(
         job: &crate::block::ScriptCheckJob,
         input_index: crate::block::InputIndex,
@@ -616,6 +714,8 @@ pub mod crypto {
         annex_hash: Option<[u8; 32]>,
         leaf: Option<(bitcoin::TapLeafHash, u32)>,
         single_output_hash: &std::cell::OnceCell<Option<[u8; 32]>>,
+        spent_value: u64,
+        spent_script: &[u8],
     ) -> Result<[u8; 32], ConsensusError> {
         use bitcoin::consensus::Encodable;
         use bitcoin::hashes::{sha256, HashEngine};
@@ -657,14 +757,13 @@ pub mod crypto {
         }
         eng.input(&[(ext_flag << 1) | u8::from(annex_hash.is_some())]);
         if anyone_can_pay {
-            let (value, script) = job.prevout_parts(input_index)?;
             txin.previous_output
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
-            value
+            spent_value
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
-            bitcoin::Script::from_bytes(script)
+            bitcoin::Script::from_bytes(spent_script)
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
             txin.sequence
@@ -712,18 +811,23 @@ pub mod crypto {
         input_index: crate::block::InputIndex,
         spent: &'a TapSpentHashes,
         tapleaf_hash: bitcoin::TapLeafHash,
+        spent_value: u64,
+        spent_script: &'a [u8],
         annex_hash: Option<[u8; 32]>,
         single_output_hash: std::cell::OnceCell<Option<[u8; 32]>>,
     }
 
     impl<'a> TapscriptExecData<'a> {
         /// `annex` is the BIP341 annex including its `0x50` tag. `spent`
-        /// belongs to `job`'s transaction.
+        /// belongs to `job`'s transaction. `spent_script` is that input's
+        /// scriptPubKey.
         pub fn new(
             job: &'a crate::block::ScriptCheckJob,
             input_index: crate::block::InputIndex,
             spent: &'a TapSpentHashes,
             tapleaf_hash: bitcoin::TapLeafHash,
+            spent_value: u64,
+            spent_script: &'a [u8],
             annex: Option<&[u8]>,
         ) -> Self {
             Self {
@@ -731,6 +835,8 @@ pub mod crypto {
                 input_index,
                 spent,
                 tapleaf_hash,
+                spent_value,
+                spent_script,
                 annex_hash: annex.map(annex_hash),
                 single_output_hash: std::cell::OnceCell::new(),
             }
@@ -751,6 +857,8 @@ pub mod crypto {
                 self.annex_hash,
                 Some((self.tapleaf_hash, codeseparator_pos)),
                 &self.single_output_hash,
+                self.spent_value,
+                self.spent_script,
             )
         }
     }

@@ -12,7 +12,7 @@ use bitcoin::script::Script;
 use bitcoin::secp256k1::{Message, Parity};
 use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::{TapLeafHash, TapNodeHash, TapTweakHash};
-use bitcoin::{Transaction, Witness};
+use bitcoin::{Amount, Transaction, Witness};
 
 use super::crypto;
 use super::interpreter::{self, EvalContext, SigVersion};
@@ -24,8 +24,9 @@ pub fn verify(
     input_index: crate::block::InputIndex,
     tx: &Transaction,
     tap_spent: &crypto::TapSpentHashes,
+    amount: Amount,
+    spk: &[u8],
 ) -> Result<(), ConsensusError> {
-    let spk = job.prevout_script(input_index)?;
     debug_assert!(spk.len() == 34 && spk.starts_with(&rbitcoin_primitives::P2TR_PREFIX));
     let output_key = &spk[2..34];
 
@@ -38,9 +39,9 @@ pub fn verify(
     // Key-path: one element, or sig + annex (BIP341: annex = last stack item
     // starting with 0x50 when there are ≥2 items).
     if wit_len == 1 || (wit_len == 2 && bip341_annex(&input.witness).is_some()) {
-        return verify_key_path(job, input_index, tx, output_key, tap_spent);
+        return verify_key_path(job, input_index, tx, output_key, tap_spent, amount, spk);
     }
-    verify_script_path(job, input_index, tx, output_key, tap_spent)
+    verify_script_path(job, input_index, tx, output_key, tap_spent, amount, spk)
 }
 
 /// BIP341 annex: last witness item, only when `len ≥ 2` and first byte is `0x50`.
@@ -64,6 +65,8 @@ pub fn verify_key_path(
     tx: &Transaction,
     output_key: &[u8],
     tap_spent: &crypto::TapSpentHashes,
+    amount: Amount,
+    spent_script: &[u8],
 ) -> Result<(), ConsensusError> {
     let input = &tx.input[input_index.get()];
     let sig_raw = input
@@ -103,6 +106,8 @@ pub fn verify_key_path(
         annex_hash,
         None,
         &single,
+        amount.to_sat(),
+        spent_script,
     )?;
     let msg = Message::from_digest(sighash);
     crypto::SECP.with(|secp| {
@@ -195,6 +200,8 @@ pub fn verify_script_path(
     tx: &Transaction,
     output_key_bytes: &[u8],
     tap_spent: &crypto::TapSpentHashes,
+    amount: Amount,
+    spent_script: &[u8],
 ) -> Result<(), ConsensusError> {
     let input = &tx.input[input_index.get()];
     let mut items: Vec<Vec<u8>> = (0..input.witness.len())
@@ -224,8 +231,16 @@ pub fn verify_script_path(
         return Ok(());
     }
 
-    let exec = crypto::TapscriptExecData::new(job, input_index, tap_spent, tapleaf_hash, annex);
-    let ctx = EvalContext::from_job(job, tx, input_index, script, SigVersion::TapScript)?
+    let exec = crypto::TapscriptExecData::new(
+        job,
+        input_index,
+        tap_spent,
+        tapleaf_hash,
+        amount.to_sat(),
+        spent_script,
+        annex,
+    );
+    let ctx = EvalContext::from_job(job, tx, input_index, amount, script, SigVersion::TapScript)?
         .with_tapscript(exec);
     if interpreter::eval_script(script, &mut stack, &ctx)? {
         interpreter::require_clean_true(&stack)?;

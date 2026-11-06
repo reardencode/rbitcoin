@@ -279,6 +279,7 @@ fn tapscript_sighash_single_without_output_fails() {
     let single = std::cell::OnceCell::new();
     let err = {
         let i = job.inputs().next().unwrap();
+        let (spent_value, spent_script) = job.prevout_parts(i).expect("prevout");
         super::crypto::tap_signature_hash(
             &job,
             i,
@@ -287,6 +288,8 @@ fn tapscript_sighash_single_without_output_fails() {
             None,
             Some((leaf, 0xffff_ffff)),
             &single,
+            spent_value,
+            spent_script,
         )
     }
     .expect_err("SIGHASH_SINGLE with no output");
@@ -536,7 +539,15 @@ fn empty_witness_and_bad_sig_len() {
     };
     assert!({
         let i = job.inputs().next().unwrap();
-        verify(&job, i, &job.tx, &Default::default())
+        let (value, script) = job.prevout_parts(i).expect("prevout");
+        verify(
+            &job,
+            i,
+            &job.tx,
+            &Default::default(),
+            Amount::from_sat(value),
+            script,
+        )
     }
     .is_err());
 
@@ -544,7 +555,15 @@ fn empty_witness_and_bad_sig_len() {
     job2.tx.input[0].witness = Witness::from_slice(&[vec![0u8; 10]]);
     assert!({
         let i = job2.inputs().next().unwrap();
-        verify(&job2, i, &job2.tx, &Default::default())
+        let (value, script) = job2.prevout_parts(i).expect("prevout");
+        verify(
+            &job2,
+            i,
+            &job2.tx,
+            &Default::default(),
+            Amount::from_sat(value),
+            script,
+        )
     }
     .is_err());
 }
@@ -1481,12 +1500,15 @@ fn script_path_rejects_a_witness_shorter_than_script_and_control() {
     );
     let err = {
         let i = job.inputs().next().unwrap();
+        let (value, script) = job.prevout_parts(i).expect("prevout");
         verify_script_path(
             &job,
             i,
             &job.tx,
             &[2u8; 32],
             &crypto::TapSpentHashes::default(),
+            Amount::from_sat(value),
+            script,
         )
     }
     .unwrap_err();
