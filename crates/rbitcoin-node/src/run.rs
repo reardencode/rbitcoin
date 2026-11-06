@@ -128,6 +128,20 @@ impl Shutdown {
         self.flag.load(Ordering::SeqCst)
     }
 
+    /// `step`, or `Ok(None)` once shutdown is requested first. A start that
+    /// gets `None` goes on to the shutdown tail and its flushes, as after
+    /// [`Self::or_fail`].
+    pub async fn run_until_cancelled<T>(
+        &self,
+        step: impl std::future::Future<Output = Result<T, NodeError>>,
+    ) -> Result<Option<T>, NodeError> {
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(None),
+            done = step => done.map(Some),
+        }
+    }
+
     /// Completes when shutdown has been requested.
     pub async fn cancelled(&self) {
         if self.requested() {
@@ -628,10 +642,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
 
     let shutdown = Shutdown::new();
     spawn_signal_handler(shutdown.clone());
-    let mut tor_ctl = tokio::select! {
-        biased;
-        () = shutdown.cancelled() => return shutdown.result(),
-        ctl = crate::tor_control::TorControl::connect_if_configured(
+    let mut tor_ctl = shutdown
+        .run_until_cancelled(crate::tor_control::TorControl::connect_if_configured(
             config.tor.control,
             config.tor.cookie.as_deref(),
             config.tor.password.as_deref(),
@@ -639,8 +651,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .tor
                 .io_timeout
                 .unwrap_or(crate::tor_control::CONTROL_TIMEOUT),
-        ) => ctl?,
-    };
+        ))
+        .await?
+        .flatten();
     if tor_ctl.is_some() {
         info!(
             "tor control authenticated on {}",
@@ -650,17 +663,19 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .expect("control addr set when session exists")
         );
     }
-    if config.listen.listen_onion {
+    if config.listen.listen_onion && !shutdown.requested() {
         let ctl = tor_ctl
             .as_mut()
             .expect("validate requires --tor-control with --listen-onion");
         let virt = config.network.default_p2p_port();
-        let hs = ctl
-            .add_p2p_onion(config.datadir.path(), node.local_addr, virt)
-            .await?;
-        info!("p2p onion {}.onion:{}", hs.service_id, virt);
-        node.peers
-            .set_p2p_onion(format!("{}.onion", hs.service_id), virt);
+        if let Some(hs) = shutdown
+            .run_until_cancelled(ctl.add_p2p_onion(config.datadir.path(), node.local_addr, virt))
+            .await?
+        {
+            info!("p2p onion {}.onion:{}", hs.service_id, virt);
+            node.peers
+                .set_p2p_onion(format!("{}.onion", hs.service_id), virt);
+        }
     }
     if config.listen.i2p_sam.is_some() {
         node.peers.set_i2p_reachable(true);
@@ -1133,9 +1148,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     );
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), electrum_handles.first()) {
         if let Some(hs) = shutdown.or_fail(
-            ctl.add_named_onion(config.datadir.path(), "electrum", h.local_addr)
-                .await
-                .map(Some),
+            shutdown
+                .run_until_cancelled(ctl.add_named_onion(
+                    config.datadir.path(),
+                    "electrum",
+                    h.local_addr,
+                ))
+                .await,
         ) {
             info!(
                 "electrum onion {}.onion:{}",
@@ -1168,9 +1187,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if config.esplora_onion {
         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
             if let Some(hs) = shutdown.or_fail(
-                ctl.add_named_onion(config.datadir.path(), "esplora", h.local_addr)
-                    .await
-                    .map(Some),
+                shutdown
+                    .run_until_cancelled(ctl.add_named_onion(
+                        config.datadir.path(),
+                        "esplora",
+                        h.local_addr,
+                    ))
+                    .await,
             ) {
                 info!(
                     "esplora onion http://{}.onion:{} (/ws same port)",
@@ -1302,9 +1325,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     );
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         if let Some(hs) = shutdown.or_fail(
-                            ctl.add_named_onion(config.datadir.path(), "electrum", h.local_addr)
-                                .await
-                                .map(Some),
+                            shutdown
+                                .run_until_cancelled(ctl.add_named_onion(
+                                    config.datadir.path(),
+                                    "electrum",
+                                    h.local_addr,
+                                ))
+                                .await,
                         ) {
                             info!(
                                 "electrum onion {}.onion:{}",
@@ -1363,9 +1390,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     if config.esplora_onion {
                         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                             if let Some(hs) = shutdown.or_fail(
-                                ctl.add_named_onion(config.datadir.path(), "esplora", h.local_addr)
-                                    .await
-                                    .map(Some),
+                                shutdown
+                                    .run_until_cancelled(ctl.add_named_onion(
+                                        config.datadir.path(),
+                                        "esplora",
+                                        h.local_addr,
+                                    ))
+                                    .await,
                             ) {
                                 info!(
                                     "esplora onion http://{}.onion:{} (/ws same port)",
