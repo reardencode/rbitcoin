@@ -370,6 +370,7 @@ let
   workQueueNeedsRpcMsg = "services.rbitcoin.rpc.workQueue requires an RPC listener";
   esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
   electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
+  listenOnionNeedsInboundMsg = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
   onionGroupSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -805,6 +806,13 @@ assert !builtins.elem "tor.service" (badSystem {
   esplora.hiddenService = true;
 }).config.systemd.services.rbitcoin.wants;
 assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
+assert onionGroupSystem.config.users.groups ? tor;
+assert listenOnionGroupSystem.config.users.groups ? tor;
+assert ! (defaultSystem.config.users.groups ? tor);
+assert builtins.elem listenOnionNeedsInboundMsg (failedAssertions (badSystem {
+  p2p.listenOnion = true;
+  p2p.maxInbound = 0;
+}));
 assert builtins.match ".*--tor-control 127.0.0.1:9051.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
 assert builtins.match ".*--esplora-onion($|[= ].*)" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
 assert builtins.match ".*--tor-control-cookie.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart == null;

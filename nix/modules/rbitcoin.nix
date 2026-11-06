@@ -683,7 +683,8 @@ in
         example = "/run/tor/control.authcookie";
         description = ''
           Tor control cookie file. When this is null and Tor control is on, the node reads
-          /run/tor/control.authcookie. The unit joins group tor in either case.
+          /run/tor/control.authcookie. The unit joins group tor in either case, and creates
+          that group when it is missing.
         '';
       };
     };
@@ -827,7 +828,8 @@ in
         description = ''
           ADD_ONION for the P2P port. Binds 127.0.0.1 even with p2p.listen = false.
           Requires tor.control (implied 127.0.0.1:9051) and maxInbound > 0.
-          The unit joins group tor so it can read the default control cookie.
+          The module refuses a 0 cap. The unit joins group tor, and creates that group
+          when it is missing, so it can read the default control cookie.
           Gossip the onion, not a home IPv4, when discover is off.
         '';
       };
@@ -1160,6 +1162,10 @@ in
         message = "services.rbitcoin.trustPeer cannot be combined with p2p.listenOnion";
       }
       {
+        assertion = !cfg.p2p.listenOnion || cfg.p2p.maxInbound > 0;
+        message = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
+      }
+      {
         assertion = cfg.trustPeer == null || cfg.p2p.maxInbound == 0;
         message = "services.rbitcoin.trustPeer cannot be combined with p2p.maxInbound greater than 0";
       }
@@ -1256,7 +1262,11 @@ in
       }
     ];
 
-    users.groups.${cfg.group} = { };
+    users.groups = {
+      ${cfg.group} = { };
+    } // lib.optionalAttrs (needTorControl || cfg.tor.controlCookie != null) {
+      tor = { };
+    };
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;
