@@ -680,7 +680,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if config.listen.i2p_sam.is_some() {
         node.peers.set_i2p_reachable(true);
     }
-    let mut i2p_sam = if let Some(addr) = config.listen.i2p_sam {
+    let mut i2p_sam = if let Some(addr) = config.listen.i2p_sam.filter(|_| !shutdown.requested()) {
         let s = if config.listen.i2p_accept_incoming {
             let dest = config.datadir.path().join("i2p").join("p2p.priv");
             rbitcoin_net::I2pSam::connect_persistent(addr, &dest, rbitcoin_net::SAM_RETRY).await
@@ -693,7 +693,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     } else {
         None
     };
-    if config.listen.i2p_accept_incoming {
+    if config.listen.i2p_accept_incoming && !shutdown.requested() {
         let port = node.local_addr.port();
         let sam = i2p_sam
             .as_mut()
@@ -770,7 +770,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.listen.connect_dns.clone(),
         config.network.default_p2p_port(),
     );
-    let dns_resolved = resolve_connect_dns(&config.listen.connect_dns, config.network).await;
+    let dns_resolved = if shutdown.requested() {
+        Vec::new()
+    } else {
+        resolve_connect_dns(&config.listen.connect_dns, config.network).await
+    };
     if config.trust_peer_host.is_some() {
         for addr in &dns_resolved {
             if let rbitcoin_net::NetAddr::Ip(sock) = addr {
@@ -785,7 +789,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         addrman.add_addr(*c);
     }
     let mut proxy_seeds_queued = false;
-    if should_resolve_default_seeds(&config) {
+    if should_resolve_default_seeds(&config) && !shutdown.requested() {
         info!(
             "ibd: resolving DNS/fixed seeds for {}…",
             config.network.as_str()
@@ -798,7 +802,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );
-    } else if !config.trust_peer_set() && config.listen.proxy.is_some() && config.listen.use_seeds {
+    } else if !config.trust_peer_set()
+        && config.listen.proxy.is_some()
+        && config.listen.use_seeds
+        && !shutdown.requested()
+    {
         proxy_seeds_queued = true;
         let n = queue_proxy_seed_addrfetch(&node.peers, config.network);
         info!("ibd: SOCKS proxy set — queued {n} seed hostnames via SOCKS addrfetch");

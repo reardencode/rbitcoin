@@ -1090,7 +1090,8 @@ async fn termination_signals_run_the_shutdown_flush() {
 /// SIGTERM while the start waits on a Tor control port ends the process
 /// cleanly at once, through the shutdown tail, not after the 20 s control
 /// timeout: first while AUTHENTICATE waits, then, with `--listen-onion`, while
-/// ADD_ONION waits after a good AUTHENTICATE.
+/// ADD_ONION waits after a good AUTHENTICATE. The start skips what it would
+/// still block on: `--i2p-sam` names a closed port, which is 16 s of retries.
 ///
 /// The node is a child process, as in the test above. This process owns the
 /// control port and signals once the child has sent the command it then holds.
@@ -1110,6 +1111,10 @@ async fn sigterm_ends_a_start_waiting_on_tor_control() {
         );
         cfg.tor.password = Some("pw".into());
         cfg.listen.listen_onion = std::env::var("RBTC_TEST_TOR_WAIT_ONION").is_ok();
+        let closed_sam = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port");
+        cfg.listen.i2p_sam = Some(closed_sam);
         run_p2p(cfg).await.expect("SIGTERM during the tor step");
         return;
     }
