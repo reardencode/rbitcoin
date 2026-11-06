@@ -909,9 +909,8 @@ pub struct AdmitSpec {
     pub min_relay: Option<u64>,
     /// This tx came from the current trusted session.
     pub waive: bool,
-    /// See [`rbitcoin_mempool::PreparedAdmit::sibling_eviction`]. On only for
-    /// a tx judged alone.
-    pub sibling_eviction: bool,
+    /// See [`rbitcoin_mempool::SiblingEviction`].
+    pub sibling_eviction: rbitcoin_mempool::SiblingEviction,
 }
 
 /// Local-origin txids. With isolated broadcast on, each is queued once for
@@ -2914,7 +2913,11 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive,
-            sibling_eviction,
+            sibling_eviction: if sibling_eviction {
+                rbitcoin_mempool::SiblingEviction::On
+            } else {
+                rbitcoin_mempool::SiblingEviction::Off
+            },
         };
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -2994,7 +2997,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: true,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::On,
         };
         let mut prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -3229,7 +3232,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: Some(0),
             waive: false,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         };
         let prep_p = match self.admit_staged(parent, utxo, spec_p, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -3262,7 +3265,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         };
         let prep_c = match self.admit_staged(child, utxo, spec_c, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -3573,7 +3576,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: Some(0),
             waive,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         };
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
@@ -3624,7 +3627,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: Some(0),
             waive,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         };
         let mut prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
         prep.keep_mark = waive;
@@ -3974,7 +3977,11 @@ impl MempoolHub {
                 time_prepare_lock: false,
                 min_relay: None,
                 waive,
-                sibling_eviction,
+                sibling_eviction: if sibling_eviction {
+                    rbitcoin_mempool::SiblingEviction::On
+                } else {
+                    rbitcoin_mempool::SiblingEviction::Off
+                },
             }
         })
         .await;
@@ -4296,7 +4303,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: Some(0),
             waive: false,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         })
         .await;
         let prep_p = match self
@@ -4348,7 +4355,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         })
         .await;
         let prep_c = match self
@@ -4487,7 +4494,7 @@ impl MempoolHub {
                 time_prepare_lock: true,
                 min_relay: member_min,
                 waive: false,
-                sibling_eviction: true,
+                sibling_eviction: rbitcoin_mempool::SiblingEviction::for_package(txs.len()),
             };
             let prep = match self
                 .stage_scripts(tx, tx, spec, &mut stages, &mut lock_us)
@@ -4589,7 +4596,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: true,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::On,
         };
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
@@ -4640,7 +4647,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: true,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::On,
         };
         let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -5003,7 +5010,7 @@ impl MempoolHub {
                 time_prepare_lock: true,
                 min_relay: member_min,
                 waive: false,
-                sibling_eviction: true,
+                sibling_eviction: rbitcoin_mempool::SiblingEviction::for_package(txs.len()),
             };
             let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
                 Ok(p) => p,
@@ -5549,7 +5556,7 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
             waive: false,
-            sibling_eviction: false,
+            sibling_eviction: rbitcoin_mempool::SiblingEviction::Off,
         };
         let prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
         let sample = self.sample_chain_coins(tx, utxo);

@@ -521,13 +521,36 @@ pub struct PreparedAdmit {
     /// This tx was already marked and is being put back. The new slot keeps
     /// the byte even when this admit itself does not warn.
     pub keep_mark: bool,
-    /// A second child of a version-3 parent may evict the first (BIP 431
-    /// sibling eviction). Core allows it only when a tx is judged alone,
-    /// which for a package is its per-tx pass. So it applies only when the tx
-    /// pays its own fee floor, and is off unless the admit turns it on:
-    /// single accepts and package members do; 1p1c pairs, put-backs, reorg
-    /// re-adds and multi-tx `testmempoolaccept` do not.
-    pub sibling_eviction: bool,
+    /// Whether a second child of a version-3 parent may evict the first
+    /// (BIP 431 sibling eviction). Off unless the admit turns it on.
+    pub sibling_eviction: SiblingEviction,
+}
+
+/// BIP 431 sibling eviction for one admit. Core allows it only for a tx
+/// judged alone (`SingleAccept`, and `SingleInPackageAccept`: each member's
+/// own pass inside `AcceptPackage`), never for the package-feerate remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingEviction {
+    /// 1p1c pairs, put-backs, reorg re-adds, multi-tx `testmempoolaccept`.
+    Off,
+    /// A single accept, or a one-tx package: it already met its own fee floor.
+    On,
+    /// A member of a multi-tx package, admitted at the package feerate. It
+    /// evicts only when it pays its own floor, which is when Core's per-tx
+    /// pass would have admitted it. Otherwise it is the remainder, and a
+    /// second child is `TRUC-violation`.
+    IfPaysFloor,
+}
+
+impl SiblingEviction {
+    /// For each member of a package of `len` txs.
+    pub fn for_package(len: usize) -> Self {
+        if len > 1 {
+            SiblingEviction::IfPaysFloor
+        } else {
+            SiblingEviction::On
+        }
+    }
 }
 
 struct AdmitInputs {
@@ -1011,7 +1034,7 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
         self.last_accept_stages = AcceptStageUs::default();
-        match self.accept_tx_with(tx, utxos, tip, 0, true, None, true) {
+        match self.accept_tx_with(tx, utxos, tip, 0, true, None, SiblingEviction::On) {
             Ok(r) => {
                 self.promote_orphans_of(r.txid, utxos, tip);
                 Ok(r)
@@ -1035,7 +1058,7 @@ impl ActiveMempool {
         fee_delta: i64,
         report_orphans: bool,
         min_relay: Option<u64>,
-        sibling_eviction: bool,
+        sibling_eviction: SiblingEviction,
     ) -> Result<AcceptResult, AcceptError> {
         // Local `accept_tx` stays strict. The session bit is on the hub admit.
         let waive = false;
@@ -1241,7 +1264,7 @@ impl ActiveMempool {
             keep_accept_secs: None,
             trust_warn,
             keep_mark: false,
-            sibling_eviction: false,
+            sibling_eviction: SiblingEviction::Off,
         })
     }
 
@@ -1737,15 +1760,16 @@ impl ActiveMempool {
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
         let sibling = match self.check_truc(tx, weight.div_ceil(4), &scan)? {
-            // Core's per-tx pass admits a package member only when it pays
-            // its own floor; the package-feerate remainder never evicts.
             Some(s)
-                if prep.sibling_eviction
-                    && policy::meets_min_relay_fee_at(
+                if match prep.sibling_eviction {
+                    SiblingEviction::Off => false,
+                    SiblingEviction::On => true,
+                    SiblingEviction::IfPaysFloor => policy::meets_min_relay_fee_at(
                         admit_fee,
                         weight,
                         self.mempool_min_fee_sat_kvb(),
-                    ) =>
+                    ),
+                } =>
             {
                 Some(s)
             }
@@ -1831,7 +1855,7 @@ impl ActiveMempool {
         let mut queue = VecDeque::new();
         self.push_orphan_children(parent, &mut queue);
         while let Some(child) = queue.pop_front() {
-            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None, true) {
+            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None, SiblingEviction::On) {
                 Ok(r) => {
                     self.orphanage
                         .forget_taken_gen(&child.tx.compute_txid(), child.taken_gen);
@@ -2086,6 +2110,7 @@ impl ActiveMempool {
         Self::check_package_shape(txs)?;
 
         self.last_accept_stages = AcceptStageUs::default();
+        let member_eviction = SiblingEviction::for_package(txs.len());
         let member_min = if self.package_meets_min_relay(
             txs,
             utxos,
@@ -2107,14 +2132,22 @@ impl ActiveMempool {
                 lifted.push(parked);
             }
             // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, true) {
+            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, member_eviction) {
                 Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
                     for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0, None) {
                         let id = item.tx.compute_txid();
-                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None, true) {
+                        match self.accept_tx_with(
+                            &item.tx,
+                            utxos,
+                            tip,
+                            0,
+                            true,
+                            None,
+                            SiblingEviction::On,
+                        ) {
                             Ok(r) => {
                                 // Admitted, so the lift row is not in flight.
                                 self.orphanage.forget_taken_gen(&id, item.taken_gen);

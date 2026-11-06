@@ -710,6 +710,45 @@ fn truc_sibling_eviction() {
     );
 }
 
+/// A single accept already met the fee floor at prepare. A floor that rises
+/// before its commit does not turn its sibling eviction into
+/// `TRUC-violation`.
+#[test]
+fn truc_sibling_eviction_survives_a_floor_rise_before_commit() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(500_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[op], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(199_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+    // 10,000 sat on ~60 vB: well above min relay, below the raised floor.
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(190_000)]);
+    let mut prep = mp
+        .prepare_admit(
+            &paying,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: None,
+                waive: false,
+            },
+        )
+        .unwrap();
+    prep.sibling_eviction = SiblingEviction::On;
+    mp.note_evicted_feerate(1_000_000);
+    let r = mp
+        .commit_after_script(&paying, prep)
+        .expect("the sibling eviction still commits");
+    assert!(
+        r.replaced.contains(&first.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+}
+
 /// Two children staged before either commits: the second commit still sees
 /// the first, so a version-3 parent never ends up with two children.
 #[test]

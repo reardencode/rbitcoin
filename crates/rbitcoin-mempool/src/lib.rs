@@ -65,8 +65,8 @@ pub mod testutil;
 pub use accept::{
     check_mempool_structural, trust_keeps_structural, AcceptError, AcceptFailureRecord,
     AcceptResult, AcceptStageUs, ActiveMempool, ChainPrevout, ChainTipCtx, Coin, LiftedOrphan,
-    PrepareOpts, PreparedAdmit, UtxoProvider, DEFAULT_MAX_MEMPOOL_WEIGHT, MAX_PACKAGE_COUNT,
-    MAX_PACKAGE_WEIGHT,
+    PrepareOpts, PreparedAdmit, SiblingEviction, UtxoProvider, DEFAULT_MAX_MEMPOOL_WEIGHT,
+    MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT,
 };
 pub use core_dat::{CoreDatTx, CoreMempoolDat};
 pub use error::MempoolError;
