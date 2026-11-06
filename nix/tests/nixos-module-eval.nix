@@ -363,6 +363,26 @@ let
   signetChallengeMsg = "services.rbitcoin.signet.challenge requires network = \"signet\"";
   signetTimeMsg = "services.rbitcoin.signet.blockTime requires signet.challenge";
   trustSeedMsg = "services.rbitcoin.trustPeer cannot be combined with p2p.seedNodes";
+  bindNeedsListenMsg = "services.rbitcoin.netPermissionBind requires p2p.listen";
+  bindTrustMsg = "services.rbitcoin.netPermissionBind cannot be combined with trustPeer";
+  esploraSockNeedsEnableMsg = "services.rbitcoin.esplora.socketPath requires esplora.enable";
+  blockTemplateOffExec = execOf {
+    esplora.blockTemplate = true;
+  };
+  apiLogSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          dataDir = "/srv/rbitcoin";
+          apiLog = "/var/log/rbitcoin/api.jsonl";
+        };
+      }
+    ];
+  };
   badSystem = opts: nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -679,5 +699,21 @@ assert builtins.elem trustSeedMsg (failedAssertions (badSystem {
   trustPeer = "192.0.2.1:8333";
   p2p.seedNodes = [ "seed.example" ];
 }));
+assert builtins.elem bindNeedsListenMsg (failedAssertions (badSystem {
+  p2p.listen = false;
+  netPermissionBind = [ "noban@127.0.0.1:18444" ];
+}));
+assert builtins.elem bindTrustMsg (failedAssertions (badSystem {
+  trustPeer = "192.0.2.1:8333";
+  netPermissionBind = [ "noban@127.0.0.1:8333" ];
+}));
+assert builtins.elem esploraSockNeedsEnableMsg (failedAssertions (badSystem {
+  esplora.socketPath = "/run/rbitcoin/esplora.sock";
+}));
+assert builtins.match ".*--esplora-block-template.*" blockTemplateOffExec == null;
+assert builtins.elem "/var/log/rbitcoin" apiLogSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
+assert apiLogSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/log/rbitcoin".d.mode == "0750";
+assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
+assert builtins.match ".*--check-blocks 4294967296.*" (execOf { checkBlocks = 4294967296; }) != null;
 assert !builtins.elem spAndPruneMsg (failedAssertions system);
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"

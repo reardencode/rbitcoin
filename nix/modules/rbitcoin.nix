@@ -119,7 +119,7 @@ let
     else
       socket cfg.esplora.address cfg.esplora.port
   )
-  ++ optional cfg.esplora.blockTemplate "--esplora-block-template"
+  ++ optional (cfg.esplora.enable && cfg.esplora.blockTemplate) "--esplora-block-template"
   ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) "--esplora-max-inflight"
   ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) (
     toString cfg.esplora.maxInflight
@@ -548,7 +548,11 @@ in
       type = types.listOf types.str;
       default = [ ];
       example = [ "noban@127.0.0.1:8333" ];
-      description = "Repeatable `--net-permission-bind` grants.";
+      description = ''
+        Repeatable `--net-permission-bind` grants. Requires `p2p.listen`.
+        Refused with `trustPeer`: the node turns a whitebind into a listen socket,
+        and trust-peer then rejects that socket.
+      '';
     };
 
     netPermissionRelay = mkOption {
@@ -580,7 +584,12 @@ in
       type = types.nullOr types.str;
       default = null;
       example = "/var/lib/rbitcoin/api.jsonl";
-      description = "Pass `--api-log PATH` (one JSON line per Electrum, Esplora, and RPC call).";
+      description = ''
+        Pass `--api-log PATH` (one JSON line per Electrum, Esplora, and RPC call).
+        The parent directory is created mode 0750 when it is not `dataDir`, `coldDataDir`,
+        or an RPC or Esplora socket or token directory, and that directory is writable
+        under ProtectSystem=strict.
+      '';
     };
 
     minChainWork = mkOption {
@@ -604,7 +613,10 @@ in
       type = types.nullOr types.int;
       default = null;
       example = 6;
-      description = "Pass `--check-blocks`. Null keeps the node default (6). 0 or a negative value revalidates the whole chain.";
+      description = ''
+        Pass `--check-blocks`. Null keeps the node default (6).
+        0, a negative value, or a value above 4294967295 revalidates the whole chain.
+      '';
     };
 
     alertNotify = mkOption {
@@ -1009,7 +1021,10 @@ in
       blockTemplate = mkOption {
         type = types.bool;
         default = false;
-        description = "Pass `--esplora-block-template` so GET /block-template serves GBT JSON.";
+        description = ''
+          Pass `--esplora-block-template` so GET /block-template serves GBT JSON.
+          Requires `enable`. The flag is omitted when the listener is off.
+        '';
       };
 
       hiddenService = mkOption {
@@ -1177,6 +1192,18 @@ in
           cfg.trustPeer == null || cfg.p2p.connect == [ ] || cfg.p2p.connect == [ cfg.trustPeer ];
         message = "services.rbitcoin.trustPeer connect list must be empty or that same address";
       }
+      {
+        assertion = cfg.netPermissionBind == [ ] || cfg.p2p.listen;
+        message = "services.rbitcoin.netPermissionBind requires p2p.listen";
+      }
+      {
+        assertion = cfg.trustPeer == null || cfg.netPermissionBind == [ ];
+        message = "services.rbitcoin.netPermissionBind cannot be combined with trustPeer";
+      }
+      {
+        assertion = cfg.esplora.socketPath == null || cfg.esplora.enable;
+        message = "services.rbitcoin.esplora.socketPath requires esplora.enable";
+      }
     ];
 
     users.groups.${cfg.group} = { };
@@ -1220,12 +1247,27 @@ in
       };
     }
     // lib.optionalAttrs (
-      cfg.esplora.socketPath != null
+      cfg.esplora.enable
+      && cfg.esplora.socketPath != null
       && dirOf cfg.esplora.socketPath != cfg.dataDir
       && (cfg.coldDataDir == null || dirOf cfg.esplora.socketPath != cfg.coldDataDir)
       && (cfg.rpc.socketPath == null || dirOf cfg.esplora.socketPath != dirOf cfg.rpc.socketPath)
     ) {
       "${dirOf cfg.esplora.socketPath}".d = {
+        mode = "0750";
+        user = cfg.user;
+        group = cfg.group;
+      };
+    }
+    // lib.optionalAttrs (
+      cfg.apiLog != null
+      && dirOf cfg.apiLog != cfg.dataDir
+      && (cfg.coldDataDir == null || dirOf cfg.apiLog != cfg.coldDataDir)
+      && (cfg.rpc.socketPath == null || dirOf cfg.apiLog != dirOf cfg.rpc.socketPath)
+      && (cfg.rpc.tokenFile == null || dirOf cfg.apiLog != dirOf cfg.rpc.tokenFile)
+      && (cfg.esplora.socketPath == null || dirOf cfg.apiLog != dirOf cfg.esplora.socketPath)
+    ) {
+      "${dirOf cfg.apiLog}".d = {
         mode = "0750";
         user = cfg.user;
         group = cfg.group;
@@ -1269,7 +1311,10 @@ in
           ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
           ++ optional (cfg.rpc.socketPath != null) (dirOf cfg.rpc.socketPath)
           ++ optional (cfg.rpc.tokenFile != null) (dirOf cfg.rpc.tokenFile)
-          ++ optional (cfg.esplora.socketPath != null) (dirOf cfg.esplora.socketPath)
+          ++ optional (cfg.esplora.enable && cfg.esplora.socketPath != null) (
+            dirOf cfg.esplora.socketPath
+          )
+          ++ optional (cfg.apiLog != null) (dirOf cfg.apiLog)
         );
       }
       // lib.optionalAttrs (cfg.tor.controlCookie != null) {
