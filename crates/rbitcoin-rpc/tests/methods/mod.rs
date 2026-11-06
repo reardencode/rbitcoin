@@ -3658,9 +3658,20 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
     )
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
-    let spent = dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap_err();
+    let spent = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
     assert_eq!(spent["code"], ERR_VERIFY_REJECTED, "{spent}");
     assert_eq!(spent["message"], "missing-inputs", "{spent}");
+    // The parent output is spent, but the tx index still has its value.
+    // Core fee-checks only after the inputs resolve, so this stays
+    // missing-inputs rather than the max-fee error.
+    let spent_capped = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex), json!("0.00000001")],
+    )
+    .unwrap_err();
+    assert_eq!(spent_capped["code"], ERR_VERIFY_REJECTED, "{spent_capped}");
+    assert_eq!(spent_capped["message"], "missing-inputs", "{spent_capped}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -825,6 +825,11 @@ pub fn prevout_txout(ctx: &RpcContext, op: &OutPoint) -> Option<TxOut> {
         }
     }
     let want = op.txid.to_byte_array();
+    // Spent chain outputs are not coins. Pricing them makes maxfeerate
+    // hide the missing-input reject. Core fee-checks only after the inputs resolve.
+    if ctx.query.is_outpoint_spent(&want, op.vout).unwrap_or(true) {
+        return None;
+    }
     let (fk, _) = ctx.query.get_tx_by_txid(&want).ok().flatten()?;
     let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
     Some(TxOut {
