@@ -372,29 +372,54 @@ def requested_misses(phase1: str, requested: list[str]) -> list[str]:
 def reconcile_missed(phase1: str, phase2: str, requested: list[str]) -> list[str]:
     """Miss lines after the crate run and, when present, the dependent run.
 
-    Unrequested phase-1 misses (struct-field deletes the ``--re`` filter did
-    not ask for) stay. A requested miss that phase 2 caught or timed out is
-    dropped. A requested miss phase 2 did not finish stays. Phase-2 misses
-    are the phase-2 lines.
+    A phase-2 catch drops the name, including an unrequested struct-field
+    delete that the dependent run happened to catch. A timeout, an unviable
+    result, a phase-2 miss, or no phase-2 line keeps the crate miss. A
+    phase-2 miss uses the phase-2 line.
     """
     wanted = {line.strip() for line in requested if line.strip()}
-    phase2_done = {name: kind for kind, name, _raw in _outcomes(phase2)}
-    extras: list[str] = []
-    unrun: list[str] = []
+    phase2_kind = {name: kind for kind, name, _raw in _outcomes(phase2)}
+    phase2_miss = {
+        name: raw for kind, name, raw in _outcomes(phase2) if kind == "MISSED"
+    }
+    kept: list[str] = []
     for kind, name, raw in _outcomes(phase1):
         if kind != "MISSED":
             continue
-        if name not in wanted:
-            extras.append(raw)
+        later = phase2_kind.get(name)
+        if later == "caught":
             continue
-        if name not in phase2_done:
-            unrun.append(raw)
-    phase2_misses = [
-        raw
-        for kind, name, raw in _outcomes(phase2)
-        if kind == "MISSED" and name in wanted
-    ]
-    return extras + phase2_misses + unrun
+        if name in wanted and later == "MISSED":
+            kept.append(phase2_miss[name])
+            continue
+        kept.append(raw)
+    return kept
+
+
+def outcome_count(log: str) -> int:
+    """How many caught, missed, timeout, or unviable lines a log has."""
+    return len(_outcomes(log))
+
+
+def hide_unrequested(phase1: str, requested: list[str], caught_text: str) -> str:
+    """Caught-list text that tells ``--iterate`` to skip names we will not rerun.
+
+    Requested misses stay off the list so the dependent run still tests them.
+    Every other phase-1 name is added. cargo-mutants 27.1.0 still generates
+    ``..`` struct-field deletes when ``--file`` is set, and ``--re`` does not
+    filter those, so the caught list is what keeps them out of the next run.
+    """
+    rerun = set(requested_misses(phase1, requested))
+    have = [line for line in caught_text.splitlines() if line.strip()]
+    seen = set(have)
+    for _kind, name, _raw in _outcomes(phase1):
+        if name in rerun or name in seen:
+            continue
+        have.append(name)
+        seen.add(name)
+    if not have:
+        return ""
+    return "\n".join(have) + "\n"
 
 
 def finished_mutants(log: str) -> int:
@@ -791,6 +816,14 @@ def main(argv: list[str]) -> int:
     rm_p.add_argument("--phase1", type=Path, required=True)
     rm_p.add_argument("--slice", type=Path, required=True)
 
+    hide_p = sub.add_parser("hide-unrequested")
+    hide_p.add_argument("--phase1", type=Path, required=True)
+    hide_p.add_argument("--slice", type=Path, required=True)
+    hide_p.add_argument("--caught", type=Path, required=True)
+
+    count_p = sub.add_parser("outcome-count")
+    count_p.add_argument("--log", type=Path, required=True)
+
     rem_p = sub.add_parser("remember")
     rem_p.add_argument("--cursor", type=Path, required=True)
     rem_p.add_argument("--new-len", type=int, required=True)
@@ -849,6 +882,16 @@ def main(argv: list[str]) -> int:
     if args.cmd == "requested-misses":
         for line in requested_misses(args.phase1.read_text(), args.slice.read_text().splitlines()):
             print(line)
+        return 0
+    if args.cmd == "hide-unrequested":
+        if not args.caught.is_file():
+            return 0
+        requested = args.slice.read_text().splitlines()
+        updated = hide_unrequested(args.phase1.read_text(), requested, args.caught.read_text())
+        args.caught.write_text(updated)
+        return 0
+    if args.cmd == "outcome-count":
+        print(outcome_count(args.log.read_text()))
         return 0
     if args.cmd == "progress":
         requested = args.slice.read_text().splitlines()

@@ -443,42 +443,70 @@ assert_fail "a non-positive measurement is not a timeout" \
 
 req='crates/rbitcoin-net/src/a.rs:1:1: replace == with != in f'
 extra='crates/rbitcoin-net/src/a.rs:9:1: delete field x in Foo'
+caught_extra='crates/rbitcoin-net/src/a.rs:8:1: delete field y in Foo'
 kept='crates/rbitcoin-net/src/a.rs:2:1: replace > with == in g'
 caught_name='crates/rbitcoin-net/src/a.rs:3:1: replace || with && in h'
 timed='crates/rbitcoin-net/src/a.rs:4:1: replace wait with () in i'
-printf '%s\n' "$req" "$kept" "$caught_name" "$timed" >"$tmp/requested.txt"
+unviable_name='crates/rbitcoin-net/src/a.rs:6:1: replace arm with () in k'
+printf '%s\n' "$req" "$kept" "$caught_name" "$timed" "$unviable_name" >"$tmp/requested.txt"
 cat >"$tmp/phase1.log" <<EOF
 MISSED   $extra in 4s build + 8s test
+MISSED   $caught_extra in 4s build + 8s test
 MISSED   $req in 6s build + 12s test
 MISSED   $kept in 6s build + 12s test
 MISSED   $caught_name in 6s build + 12s test
 MISSED   $timed in 6s build + 12s test
+MISSED   $unviable_name in 6s build + 12s test
 caught   crates/rbitcoin-net/src/a.rs:5:1: replace x with y in j in 6s build + 12s test
+TIMEOUT  crates/rbitcoin-net/src/a.rs:7:1: delete field z in Foo in 6s build + 1200s test
 EOF
 cat >"$tmp/phase2.log" <<EOF
 caught   $caught_name in 9s build + 40s test
+caught   $caught_extra in 9s build + 40s test
 TIMEOUT  $timed in 9s build + 400s test
+unviable $unviable_name in 9s build + 1s test
 MISSED   $req in 9s build + 40s test
 EOF
 python3 "$PY" reconcile-missed --phase1 "$tmp/phase1.log" --phase2 "$tmp/phase2.log" \
   --slice "$tmp/requested.txt" >"$tmp/reconciled.txt"
-assert_ok "an unrequested struct-field miss is kept" \
+assert_ok "an unrequested struct-field miss is kept when phase 2 did not catch it" \
   grep -q "$extra" "$tmp/reconciled.txt"
+assert_ok "a phase-2 catch of an unrequested delete is not a miss" \
+  bash -c '! grep -q "$1" "$2"' _ "$caught_extra" "$tmp/reconciled.txt"
 assert_ok "a phase-2 miss is kept" \
   grep -q "$req" "$tmp/reconciled.txt"
 assert_ok "a requested miss that phase 2 did not run is kept" \
   grep -q "$kept" "$tmp/reconciled.txt"
 assert_ok "a phase-2 catch is not a miss" \
   bash -c '! grep -q "$1" "$2"' _ "$caught_name" "$tmp/reconciled.txt"
-assert_ok "a phase-2 timeout is not a miss" \
-  bash -c '! grep -q "$1" "$2"' _ "$timed" "$tmp/reconciled.txt"
+assert_ok "a phase-2 timeout keeps the crate miss" \
+  grep -q "$timed" "$tmp/reconciled.txt"
+assert_ok "a phase-2 unviable keeps the crate miss" \
+  grep -q "$unviable_name" "$tmp/reconciled.txt"
 python3 "$PY" reconcile-missed --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
   >"$tmp/reconciled-open.txt"
 assert_ok "with no phase-2 log every phase-1 miss is kept" \
-  test "$(grep -c . "$tmp/reconciled-open.txt")" = 5
+  test "$(grep -c . "$tmp/reconciled-open.txt")" = 7
 rerun="$(python3 "$PY" requested-misses --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt")"
 assert_ok "only requested misses are rerun, in slice order" \
-  test "$rerun" = "$(printf '%s\n' "$req" "$kept" "$caught_name" "$timed")"
+  test "$rerun" = "$(printf '%s\n' "$req" "$kept" "$caught_name" "$timed" "$unviable_name")"
+printf '%s\n' 'already-caught' >"$tmp/caught.txt"
+python3 "$PY" hide-unrequested --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
+  --caught "$tmp/caught.txt"
+assert_ok "hide keeps names already in caught.txt" \
+  grep -qx 'already-caught' "$tmp/caught.txt"
+assert_ok "hide adds the unrequested miss so iterate will skip it" \
+  grep -qx "$extra" "$tmp/caught.txt"
+assert_ok "hide adds the unrequested timeout so iterate will skip it" \
+  grep -qx 'crates/rbitcoin-net/src/a.rs:7:1: delete field z in Foo' "$tmp/caught.txt"
+assert_ok "hide does not add a requested miss" \
+  bash -c '! grep -qx "$1" "$2"' _ "$req" "$tmp/caught.txt"
+python3 "$PY" hide-unrequested --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
+  --caught "$tmp/no-such-caught.txt"
+assert_ok "hide does not create a caught.txt the crate run never wrote" \
+  test ! -f "$tmp/no-such-caught.txt"
+assert_ok "outcome-count is the number of result lines" \
+  test "$(python3 "$PY" outcome-count --log "$tmp/phase2.log")" = 5
 
 NIGHTLY="$ROOT/scripts/mutants-nightly.sh"
 TOML="$ROOT/.cargo/mutants.toml"
@@ -547,11 +575,17 @@ assert "--test-workspace" not in phase1, phase1
 assert "--timeout" not in phase1, phase1
 assert "--baseline=skip" in phase2, phase2
 assert "--timeout" in phase2, phase2
+assert "--iterate" in phase2, phase2
+assert "--iterate" not in phase1, phase1
+assert "--output" in phase1 and "--output" in phase2, (phase1, phase2)
 assert "--test-workspace" not in phase2, phase2
 assert "${dep_args[@]}" in phase2, phase2
 assert "dep_args+=(--test-package" in text
-for needle in ("package-for", "dependents", "dependent-timeout", "reconcile-missed", "requested-misses"):
+for needle in ("package-for", "dependents", "dependent-timeout", "reconcile-missed", "requested-misses", "hide-unrequested", "outcome-count"):
     assert needle in text, needle
+no_prog = text.find("dependents made no progress")
+advance = text.find("advance-side")
+assert 0 < no_prog < advance, (no_prog, advance)
 assert "--test-workspace" not in text
 assert "workspace-baseline.log" in text
 ' "$NIGHTLY"

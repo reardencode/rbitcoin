@@ -12,6 +12,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# One cargo-mutants output directory per batch, outside the artifact tree.
+# Removed when the next batch starts, and again when this script exits.
+cm_parent=""
+cleanup_cm() {
+  if [[ -n "$cm_parent" ]]; then
+    rm -rf "$cm_parent"
+    cm_parent=""
+  fi
+}
+trap cleanup_cm EXIT
+
 # 4 hours for this job. The nightly workflow runs two of these, 8 hours
 # total. One crate suite is the unit of work, and two of them in parallel
 # do not fit a hosted runner, so this is -j 1. The job timeout is 30
@@ -147,6 +158,8 @@ while ((SECONDS < deadline)); do
     break
   fi
   file="$(head -n 1 "$slice" | cut -d: -f1)"
+  cleanup_cm
+  cm_parent="$(mktemp -d)"
   RE_ARGS=(--file "$file")
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -161,6 +174,7 @@ while ((SECONDS < deadline)); do
   timeout --signal=TERM --kill-after=60s "$remain" \
     cargo mutants --features mutants --workspace --exclude 'crates/rbitcoin-bench/**/*.rs' \
       --test-package "$pkg" --caught --unviable \
+      --output "$cm_parent" \
       -j 1 \
       "${RE_ARGS[@]}" \
       >"$log" 2>&1
@@ -184,6 +198,7 @@ while ((SECONDS < deadline)); do
     fi
   fi
   deps_ec=0
+  deps_started=0
   deps_log="$OUT/batch-$side-$offset-deps.log"
   if ((ec != 124)); then
     remain=$((deadline - SECONDS))
@@ -204,17 +219,32 @@ while ((SECONDS < deadline)); do
         miss_re+=(--re "$escaped")
       done <"$OUT/batch-$side-$offset.misses"
       if ((${#dep_args[@]} > 0)); then
+        # 27.1.0 still runs `..` struct-field deletes under --file. --iterate
+        # skips names in caught.txt. Add every phase-1 name that is not a
+        # requested miss so those deletes are not run again.
+        python3 "$ROOT/scripts/mutants_queue.py" hide-unrequested \
+          --phase1 "$log" --slice "$slice" \
+          --caught "$cm_parent/mutants.out/caught.txt"
         echo "mutants-nightly: dependents for $pkg ($(wc -l <"$OUT/batch-$side-$offset.misses") misses, ${remain}s left)"
         set +e
         timeout --signal=TERM --kill-after=60s "$remain" \
           cargo mutants --features mutants --workspace --exclude 'crates/rbitcoin-bench/**/*.rs' \
             --baseline=skip --timeout "$DEP_TIMEOUT" --caught --unviable \
+            --output "$cm_parent" --iterate \
             -j 1 "${dep_args[@]}" \
             "${miss_re[@]}" \
             >"$deps_log" 2>&1
         deps_ec=$?
+        deps_started=1
         set -e
       fi
+    fi
+  fi
+  if ((deps_started == 1)); then
+    deps_outcomes="$(python3 "$ROOT/scripts/mutants_queue.py" outcome-count --log "$deps_log")"
+    if ((deps_outcomes == 0)); then
+      echo "mutants-nightly: dependents made no progress (exit $deps_ec); same queue next night"
+      break
     fi
   fi
   if [[ -f "$deps_log" ]]; then
