@@ -821,17 +821,29 @@ pub use rbitcoin_consensus::policy::{fee_exceeds_max, feerate_exceeds_max};
 pub fn prevout_txout(ctx: &RpcContext, op: &OutPoint) -> Option<TxOut> {
     if let Some(mp) = ctx.mempool.as_ref() {
         if let Some(parent) = mp.get_tx(&op.txid) {
-            return parent.output.get(op.vout as usize).cloned();
+            let out = parent.output.get(op.vout as usize)?;
+            // An unspendable mempool output is not a coin.
+            if rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes()) {
+                return None;
+            }
+            return Some(out.clone());
         }
     }
     let want = op.txid.to_byte_array();
-    // Spent chain outputs are not coins. Pricing them makes maxfeerate
-    // hide the missing-input reject. Core fee-checks only after the inputs resolve.
+    // Price only a live coin. Genesis, unspendable outputs, spent outputs,
+    // and archive-only rows are not coins. Pricing them makes maxfeerate
+    // hide the missing-input reject.
+    if want == genesis_coinbase_txid(ctx) {
+        return None;
+    }
+    let fk = ctx.query.tx_fk_by_txid_tip(&want).ok().flatten()?;
     if ctx.query.is_outpoint_spent(&want, op.vout).unwrap_or(true) {
         return None;
     }
-    let (fk, _) = ctx.query.get_tx_by_txid(&want).ok().flatten()?;
     let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
+    if rbitcoin_consensus::policy::is_unspendable(&out.script) {
+        return None;
+    }
     Some(TxOut {
         value: Amount::from_sat(out.value),
         script_pubkey: ScriptBuf::from_bytes(out.script),

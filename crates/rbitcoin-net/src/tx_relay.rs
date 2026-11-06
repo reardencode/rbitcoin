@@ -522,16 +522,20 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
         let Some((_, out)) = outs.into_iter().next() else {
             return ChainPrevout::KnownUnavailable;
         };
+        // Core's coins view never stores an unspendable output.
+        if rbitcoin_consensus::policy::is_unspendable(&out.script) {
+            return ChainPrevout::KnownUnavailable;
+        }
         let value = Amount::from_sat(out.value);
         let is_coinbase = match self.coinbase_flag(fk, create_height) {
             Ok(flag) => flag,
             Err(_) => return ChainPrevout::KnownUnavailable,
         };
-        // Height 0 is the genesis coinbase. A non-coinbase there is not a coin.
-        if create_height == 0 && !is_coinbase {
+        // Height 0 is the genesis block. Its coinbase is not a coin.
+        if create_height == 0 {
             return ChainPrevout::KnownUnavailable;
         }
-        let create_mtp = if create_height == 0 || !self.need_create_mtp.load(Ordering::Relaxed) {
+        let create_mtp = if !self.need_create_mtp.load(Ordering::Relaxed) {
             0
         } else {
             if let Some(m) = self.meter_create_mtp {

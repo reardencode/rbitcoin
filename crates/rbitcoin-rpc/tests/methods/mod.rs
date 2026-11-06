@@ -3672,6 +3672,48 @@ fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
     .unwrap_err();
     assert_eq!(spent_capped["code"], ERR_VERIFY_REJECTED, "{spent_capped}");
     assert_eq!(spent_capped["message"], "missing-inputs", "{spent_capped}");
+
+    // Not a coin, so the implied fee must not become the max-fee error.
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_spend = one_sat_spend(bitcoin::OutPoint {
+        txid: genesis.txdata[0].compute_txid(),
+        vout: 0,
+    });
+    let genesis_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(genesis_spend)]).unwrap_err();
+    assert_eq!(genesis_fee["code"], ERR_VERIFY_REJECTED, "{genesis_fee}");
+    assert_eq!(genesis_fee["message"], "missing-inputs", "{genesis_fee}");
+
+    let (addr, _) = p2wpkh_regtest();
+    let op_sat = generated_coinbase_value(&ctx, 3) - 1_000;
+    let (op_hex, op_tx) =
+        spend_generated_coinbase(&ctx, 3, op_sat, ScriptBuf::from_bytes(vec![0x6a]));
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr.clone()), json!([op_hex])],
+    )
+    .unwrap();
+    let op_spend = one_sat_spend(bitcoin::OutPoint {
+        txid: op_tx.compute_txid(),
+        vout: 0,
+    });
+    let op_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(op_spend)]).unwrap_err();
+    assert_eq!(op_fee["code"], ERR_VERIFY_REJECTED, "{op_fee}");
+    assert_eq!(op_fee["message"], "missing-inputs", "{op_fee}");
+
+    // A disconnected coinbase does not return to the mempool. Its output is
+    // archive-only, so the implied fee must not become the max-fee error.
+    let mined = dispatch(&ctx, "generateblock", vec![json!(addr), json!([])]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![mined["hash"].clone(), json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap();
+    dispatch(&ctx, "invalidateblock", vec![mined["hash"].clone()]).unwrap();
+    let archived = one_sat_spend(bitcoin::OutPoint {
+        txid: Txid::from_byte_array(parse_hash32_display(cb_txid).unwrap()),
+        vout: 0,
+    });
+    let archived_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(archived)]).unwrap_err();
+    assert_eq!(archived_fee["code"], ERR_VERIFY_REJECTED, "{archived_fee}");
+    assert_eq!(archived_fee["message"], "missing-inputs", "{archived_fee}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4313,6 +4355,28 @@ fn rpc_submit_nonstandard_version_is_version() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+fn one_sat_spend(prev: bitcoin::OutPoint) -> String {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Sequence, Transaction, TxIn, TxOut, Witness};
+    let tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prev,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    rbitcoin_primitives::hex_encode(serialize(&tx))
+}
+
 fn child_of(parent: &Transaction, fee_sat: u64) -> Transaction {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;

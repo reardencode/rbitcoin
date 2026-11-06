@@ -5,5 +5,7 @@ Fixed
   `missing-inputs`, which wallets treat as a double spend. The check is
   after `maxburnamount` and before the version and `maxfeerate` rejects.
   A confirmed transaction whose outputs are all spent stays `missing-inputs`,
-  including when its historical fee is over `maxfeerate`.
+  including when its historical fee is over `maxfeerate`. An input that is
+  not a coin (genesis, unspendable, or archive-only) stays `missing-inputs`
+  for the same reason.
   The genesis coinbase stays `bad-txns-is-coinbase`.
