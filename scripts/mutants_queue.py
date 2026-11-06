@@ -265,6 +265,131 @@ def prefix_progress(log: str, requested: list[str]) -> int:
     return count
 
 
+def _norm_path(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/")
+
+
+def package_for(metadata: dict, source_path: str) -> str:
+    """Package whose manifest directory contains ``source_path``.
+
+    Manifest paths in cargo metadata are absolute. Mutant names use a path
+    relative to the workspace, so a relative source matches the suffix of
+    the manifest directory. The longest match wins.
+    """
+    src = _norm_path(source_path)
+    best_name = ""
+    best_len = -1
+    for pkg in metadata.get("packages", []):
+        manifest = _norm_path(str(pkg.get("manifest_path", "")))
+        if not manifest.endswith("/Cargo.toml"):
+            continue
+        man_dir = manifest[: -len("/Cargo.toml")]
+        score = -1
+        if src == man_dir or src.startswith(man_dir + "/"):
+            score = len(man_dir)
+        else:
+            parts = man_dir.split("/")
+            for i in range(len(parts)):
+                tail = "/".join(parts[i:])
+                if tail and (src == tail or src.startswith(tail + "/")):
+                    score = len(tail)
+                    break
+        if score > best_len:
+            best_len = score
+            best_name = str(pkg.get("name", ""))
+    if best_len < 0 or not best_name:
+        raise ValueError(f"no package for {source_path}")
+    return best_name
+
+
+def _dep_names(pkg: dict) -> set[str]:
+    """Normal and dev dependency package names. Build-dependencies are not linked by tests."""
+    names: set[str] = set()
+    for dep in pkg.get("dependencies", []):
+        kind = dep.get("kind")
+        if kind not in (None, "normal", "dev"):
+            continue
+        name = dep.get("name")
+        if name:
+            names.add(str(name))
+    return names
+
+
+def dependents(metadata: dict, package: str) -> list[str]:
+    """Packages that link ``package``, transitively, through normal or dev deps.
+
+    The package itself is not included. ``rbitcoin-bench`` is not included
+    and is not walked through.
+    """
+    rev: dict[str, set[str]] = {}
+    for pkg in metadata.get("packages", []):
+        name = str(pkg.get("name", ""))
+        if not name:
+            continue
+        rev.setdefault(name, set())
+        if name == "rbitcoin-bench":
+            continue
+        for dep_name in _dep_names(pkg):
+            rev.setdefault(dep_name, set()).add(name)
+    seen: set[str] = set()
+    stack = list(rev.get(package, ()))
+    out: list[str] = []
+    while stack:
+        name = stack.pop()
+        if name in seen or name == package or name == "rbitcoin-bench":
+            continue
+        seen.add(name)
+        out.append(name)
+        stack.extend(rev.get(name, ()))
+    return sorted(out)
+
+
+def dependent_timeout(measured_test_seconds: int) -> int:
+    """Five times a green workspace test run, floored at 60s and capped at 20 minutes."""
+    if measured_test_seconds <= 0:
+        raise ValueError("measured test seconds")
+    return min(1200, max(60, 5 * measured_test_seconds))
+
+
+def _outcomes(log: str) -> list[tuple[str, str, str]]:
+    found = []
+    for raw in log.splitlines():
+        match = _OUTCOME_NAME.match(raw.strip())
+        if not match:
+            continue
+        kind = raw.strip().split(None, 1)[0]
+        found.append((kind, match.group(1), raw.strip()))
+    return found
+
+
+def reconcile_missed(phase1: str, phase2: str, requested: list[str]) -> list[str]:
+    """Miss lines after the crate run and, when present, the dependent run.
+
+    Unrequested phase-1 misses (struct-field deletes the ``--re`` filter did
+    not ask for) stay. A requested miss that phase 2 caught or timed out is
+    dropped. A requested miss phase 2 did not finish stays. Phase-2 misses
+    are the phase-2 lines.
+    """
+    wanted = {line.strip() for line in requested if line.strip()}
+    phase2_done = {name: kind for kind, name, _raw in _outcomes(phase2)}
+    extras: list[str] = []
+    unrun: list[str] = []
+    for kind, name, raw in _outcomes(phase1):
+        if kind != "MISSED":
+            continue
+        if name not in wanted:
+            extras.append(raw)
+            continue
+        if name not in phase2_done:
+            unrun.append(raw)
+    phase2_misses = [
+        raw
+        for kind, name, raw in _outcomes(phase2)
+        if kind == "MISSED" and name in wanted
+    ]
+    return extras + phase2_misses + unrun
+
+
 def finished_mutants(log: str) -> int:
     """How many mutants a cargo-mutants batch actually finished.
 
@@ -639,6 +764,22 @@ def main(argv: list[str]) -> int:
     roll_p.add_argument("--out-new", type=Path, required=True)
     roll_p.add_argument("--out-old", type=Path, required=True)
 
+    pkg_p = sub.add_parser("package-for")
+    pkg_p.add_argument("--metadata", type=Path, required=True)
+    pkg_p.add_argument("--path", required=True)
+
+    dep_p = sub.add_parser("dependents")
+    dep_p.add_argument("--metadata", type=Path, required=True)
+    dep_p.add_argument("--package", required=True)
+
+    dto_p = sub.add_parser("dependent-timeout")
+    dto_p.add_argument("--seconds", type=int, required=True)
+
+    rec_p = sub.add_parser("reconcile-missed")
+    rec_p.add_argument("--phase1", type=Path, required=True)
+    rec_p.add_argument("--phase2", type=Path)
+    rec_p.add_argument("--slice", type=Path, required=True)
+
     rem_p = sub.add_parser("remember")
     rem_p.add_argument("--cursor", type=Path, required=True)
     rem_p.add_argument("--new-len", type=int, required=True)
@@ -675,6 +816,23 @@ def main(argv: list[str]) -> int:
     if args.cmd == "file-batch":
         lines = file_batch(args.queue.read_text().splitlines(), args.offset, args.cap)
         for line in lines:
+            print(line)
+        return 0
+    if args.cmd == "package-for":
+        metadata = json.loads(args.metadata.read_text())
+        print(package_for(metadata, args.path))
+        return 0
+    if args.cmd == "dependents":
+        metadata = json.loads(args.metadata.read_text())
+        for name in dependents(metadata, args.package):
+            print(name)
+        return 0
+    if args.cmd == "dependent-timeout":
+        print(dependent_timeout(args.seconds))
+        return 0
+    if args.cmd == "reconcile-missed":
+        phase2 = args.phase2.read_text() if args.phase2 else ""
+        for line in reconcile_missed(args.phase1.read_text(), phase2, args.slice.read_text().splitlines()):
             print(line)
         return 0
     if args.cmd == "progress":
