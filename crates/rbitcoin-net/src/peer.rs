@@ -1866,14 +1866,14 @@ pub async fn announce_unsent_tip(
         return Ok(false);
     }
     let sent = session.and_then(|s| s.header_marks().0);
-    if sent == Some(tip) || session.is_some_and(|s| s.catchup_announced() == Some(tip)) {
+    if sent == Some(tip) || session.is_some_and(|s| s.last_tip_offered() == Some(tip)) {
         return Ok(false);
     }
     match current_tip_announce(hub) {
         TipRecvAnnounce::Announce(ev) => {
             let closed = on_tip_event(hub, out_tx, follow, session, Ok(ev)).await?;
             if let Some(s) = session {
-                s.note_catchup_announced(tip);
+                s.note_last_tip_offered(tip);
             }
             Ok(closed)
         }
@@ -1913,6 +1913,7 @@ pub async fn on_tip_event(
             queue_cmpct_tip_announce(out_tx, msg)?;
             if let Some(s) = session {
                 s.note_best_header_sent(ev.hash);
+                s.note_last_tip_offered(ev.hash);
             }
             if !follow.wants_headers {
                 return Ok(false);
@@ -1924,12 +1925,18 @@ pub async fn on_tip_event(
         TipAnnounce::Inv(h) => {
             // An inv is not a header the peer has. `pindexBestHeaderSent`
             // stays unset so the next block after a long reorg is still an inv.
+            // The hash is still the tip we offered, so a burst of other tips waits.
+            if let Some(s) = session {
+                s.note_last_tip_offered(h);
+            }
             queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::Block(h)]))?;
         }
         TipAnnounce::Headers(hs) => {
             if let Some(last) = hs.last() {
                 if let Some(s) = session {
-                    s.note_best_header_sent(last.block_hash());
+                    let hash = last.block_hash();
+                    s.note_best_header_sent(hash);
+                    s.note_last_tip_offered(hash);
                 }
             }
             queue_out(out_tx, NetworkMessage::Headers(hs))?;
@@ -6341,9 +6348,10 @@ pub fn current_tip_announce(hub: &ChainHub) -> TipRecvAnnounce {
     }
 }
 
-/// True when `tip` is not the header we last sent this peer, and not a
-/// descendant of it. Those announcements wait [`TIP_ANNOUNCE_BATCH`] so a
-/// reorg is one message.
+/// True when `tip` is not the tip we last offered this peer, and not a
+/// descendant of it. An inv counts. The header cursor counts only when no
+/// tip has been offered yet. Those announcements wait [`TIP_ANNOUNCE_BATCH`]
+/// so a reorg is one message.
 #[doc(hidden)]
 pub fn tip_is_reorg_vs_sent(
     hub: &ChainHub,
@@ -6353,7 +6361,7 @@ pub fn tip_is_reorg_vs_sent(
     if matches!(tip, Err(broadcast::error::RecvError::Closed)) {
         return false;
     }
-    let Some(mark) = session.and_then(|s| s.header_marks().0) else {
+    let Some(mark) = session.and_then(|s| s.last_tip_offered().or(s.header_marks().0)) else {
         return false;
     };
     let hash = match tip {
@@ -6655,6 +6663,7 @@ pub async fn relay_new_pow_valid_block(
         };
         if queue_cmpct_tip_announce(&out, msg.clone()).is_ok() {
             s.note_best_header_sent(hash);
+            s.note_last_tip_offered(hash);
         }
     }
 }

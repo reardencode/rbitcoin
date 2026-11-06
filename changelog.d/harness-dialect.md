@@ -14,3 +14,8 @@ Changed
   v2 handshake, log a native sentence.** The transaction still leaves the
   unbroadcast set, and the handshake still disconnects. The functional
   debug-log map still emits Bitcoin Core's sentences for those lines.
+- **An inv of a tip starts the same 200ms hold as a header.** A burst of
+  tips that are not descendants of that inv goes out as one announcement.
+  The inv still does not mark the header cursor, so the block after a
+  reorg longer than 8 blocks stays an inv. Offering that same tip again
+  sends nothing.

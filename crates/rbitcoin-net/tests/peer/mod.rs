@@ -451,7 +451,7 @@ async fn session_start_announces_a_tip_mined_during_handshake() {
         None,
         "an inv does not count as a header the peer has"
     );
-    assert_eq!(sess.live.catchup_announced(), Some(tip));
+    assert_eq!(sess.live.last_tip_offered(), Some(tip));
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
     let closed = announce_unsent_tip(
@@ -467,6 +467,119 @@ async fn session_start_announces_a_tip_mined_during_handshake() {
     assert!(
         out_rx.try_recv().is_err(),
         "the same tip is not offered twice"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tip already queued on the receiver when the session starts is announced
+/// once. The header cursor stays empty, and a second offer sends nothing.
+#[tokio::test]
+async fn queued_tip_before_session_start_is_one_inv() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("queued-tip");
+    hub.ensure_genesis().unwrap();
+    let at_handshake = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let tip_rx = hub.subscribe_tips();
+    hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let tip = hub.tip_hash().unwrap();
+    assert_ne!(at_handshake, tip);
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session_with(
+        Arc::clone(&hub),
+        &peers,
+        18473,
+        Some(at_handshake),
+        Some(tip_rx),
+    )
+    .await;
+    assert_eq!(
+        count_block_invs(&mut sess.reader, sess.magic, tip, Duration::from_secs(2)).await,
+        1,
+        "a tip queued before the session starts is one block inv"
+    );
+    assert_eq!(
+        sess.live.header_marks().0,
+        None,
+        "an inv does not count as a header the peer has"
+    );
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let closed = announce_unsent_tip(
+        hub.as_ref(),
+        &out_tx,
+        &mut follow,
+        Some(sess.live.as_ref()),
+        Some(at_handshake),
+    )
+    .await
+    .unwrap();
+    assert!(!closed);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "the same tip is not offered twice"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An inv with an empty header cursor is the tip we offered. A burst of
+/// tips that are not descendants of that inv waits out the batch and leaves
+/// as one announcement. The header cursor stays empty.
+#[tokio::test]
+async fn inv_then_non_descendant_waits_out_the_batch() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("inv-batch");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18472, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    assert_eq!(
+        sess.live.last_tip_offered(),
+        None,
+        "a quiet connect offers nothing"
+    );
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    assert_eq!(
+        count_block_invs(
+            &mut sess.reader,
+            sess.magic,
+            offered,
+            Duration::from_secs(2)
+        )
+        .await,
+        1,
+        "the first tip is one inv"
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    assert_eq!(
+        sess.live.last_tip_offered(),
+        Some(offered),
+        "an inv is the tip we offered"
+    );
+    hub.invalidate_block(offered).unwrap();
+    let early = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(120)).await;
+    assert!(
+        early.is_empty(),
+        "a non-descendant tip waits out the batch, got {early:?}"
+    );
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let next = hub.tip_hash().unwrap();
+    assert_ne!(next, offered);
+    let later = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(500)).await;
+    assert_eq!(
+        later,
+        vec![next],
+        "the burst is one announcement of the final tip"
+    );
+    assert_eq!(
+        sess.live.header_marks().0,
+        None,
+        "an inv does not set the header cursor"
     );
     sess.session.abort();
     let _ = std::fs::remove_dir_all(dir);
@@ -495,6 +608,31 @@ async fn count_block_invs(
         }
     }
     n
+}
+
+async fn collect_block_invs(
+    reader: &mut rbitcoin_net::v2::V2Reader,
+    magic: Magic,
+    wait: Duration,
+) -> Vec<BlockHash> {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + wait;
+    let mut hashes = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame = match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
+            Ok(Ok(frame)) => frame,
+            _ => break,
+        };
+        if let NetworkMessage::Inv(inv) = frame.decode().payload() {
+            for item in inv {
+                if let Inventory::Block(h) = item {
+                    hashes.push(*h);
+                }
+            }
+        }
+    }
+    hashes
 }
 
 #[test]
@@ -1371,6 +1509,16 @@ async fn open_decode_session(
     port: u16,
     tip_at_handshake: Option<BlockHash>,
 ) -> DecodeSession {
+    open_decode_session_with(hub, peers, port, tip_at_handshake, None).await
+}
+
+async fn open_decode_session_with(
+    hub: Arc<ChainHub>,
+    peers: &Arc<rbitcoin_net::peers::PeerHub>,
+    port: u16,
+    tip_at_handshake: Option<BlockHash>,
+    tip_rx: Option<broadcast::Receiver<rbitcoin_net::chain::TipEvent>>,
+) -> DecodeSession {
     use rbitcoin_net::v2::open_v2;
     use tokio::net::TcpListener;
 
@@ -1386,7 +1534,7 @@ async fn open_decode_session(
     let (server_stream, _) = listener.accept().await.unwrap();
     let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
     let (c_reader, c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
+    let tip_rx = tip_rx.unwrap_or_else(|| hub.subscribe_tips());
     let session_peer = Arc::clone(&live);
     let session = tokio::spawn(async move {
         let _ = peer_session_with(
