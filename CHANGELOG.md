@@ -13,46 +13,63 @@ before 1.0).
 
 ### Highlights
 
-- **0.9.0 is the published release.** The patch line is `v0.9.x`. Linux
-  aarch64 binaries ship beside the x86_64 musl build, and the container
-  image is `ghcr.io/rbitcoin-org/rbitcoin` (tags `0.9.0`, `0.9`, and
-  `latest`, with no leading `v`). Release binaries are not signed. A
-  support window and signed binaries are what 1.0 is for. A 0.7 or 0.8
-  datadir opens in place. A datadir from 0.6 or earlier is refused.
-- **Default milestones match Bitcoin Core 32.1.** Mainnet anchors block
-  966143,
-  `00000000000000000000748969ec33043c0e52a763c6dd5193861f559f2c72e3`.
-  Testnet3 anchors block 5128859. The script skip is two header-path
-  lookups. Stored minimum chain work is not that gate. Signet and
-  testnet4 check every script. `--network testnet4` is Bitcoin Core’s
-  testnet4.
-- **v2 handshakes vary in length.** Each side sends 0 to 4095 bytes of
-  BIP324 garbage, as Core does. A fixed 64-byte opening no longer
-  identifies the node.
-- **Private broadcast uses fresh peers.** Each transaction gets a new
-  pair and a VERSION that does not name this node. It finishes when the
-  transaction comes back. The node does not dial clearnet directly for
-  that send.
-- **A crash does not publish a tip the files do not cover.** The
-  spend-durability mark stays behind those files. A torn tip is repaired
-  instead of sealed. A scripthash index with no progress mark is rebuilt
-  from the archive. A datadir for another chain is refused, and a store
-  opened without `store.secret` fails closed. Witness bytes are still
-  not checksummed: a flipped bit in that table is served.
-- **Compact blocks follow Core’s high-bandwidth rule.** An unsolicited
-  compact block is reconstructed only from a peer we sent `sendcmpct(1)`.
-  A high-bandwidth announcement can be served as soon as the block is
-  connected.
-- **Fee quotes use the chunk rate.** Clusters linearize by ancestor-set
-  feerate. A CPFP package is metered once, at that rate. Quotes stay at
-  least `mempoolminfee`, and a full near-term target does not fall back
-  to the minimum relay rate.
-- **Wallet RPCs use Core’s reject codes.** `sendrawtransaction` of a
-  confirmed transaction that still has an unspent output is `-27`. A
-  missing or spent input is `-25`. `getrawtransaction` of an unknown
-  txid is `-5`.
-- **SIGHUP, SIGUSR1, and SIGUSR2 shut the node down,** as SIGTERM does.
-  A listener that cannot bind stops the process.
+- **The consensus rules were checked hard since 0.8.** This code was
+  used to add a rule and tighten others in Hornet's written rules. It
+  was compared with Rob Hamilton's btc-lean description of Bitcoin's
+  rules, and that comparison helped write those rules down more
+  completely. Matt Corallo tried to prove the compiled code matches
+  Bitcoin. The rules held up. A split from Bitcoin Core on mainnet is
+  very unlikely. Signed release files and a support window are still
+  the plan for 1.0.
+- **0.9 is easier to install, and a 0.8 data directory still opens.**
+  There is a Linux ARM build, and a container image:
+  `docker pull ghcr.io/rbitcoin-org/rbitcoin:0.9.0`. The tag has no
+  leading `v`. A 0.8 directory opens unchanged. A 0.7 directory is
+  updated when you open it. A directory from 0.6 or earlier is refused:
+  delete it and sync again. Do not point an older program at a directory
+  this version has opened.
+- **Mainnet skips old script checks up to a later block.** The default
+  is block 966143, the same block Bitcoin Core 32.1 uses. 0.8 stopped
+  at block 840,000. The node still checks that inputs exist, are not
+  spent twice, and that the fees add up. Set `--milestone 0` before the
+  first sync if you want every old script checked. Changing it later
+  does not go back over blocks already stored. Signet still checks
+  every script. `--network testnet4` is new, and it checks every script
+  too.
+- **Wallets that speak Bitcoin Core can publish again.** The fee cap on
+  `sendrawtransaction` is read the way Bitcoin Core reads it. LND was
+  sending `0.1` and getting rejected. Sending a transaction that is
+  already in a block, and still has money left on it, returns "already
+  there" (`-27`) instead of "missing inputs." A missing or already-spent
+  input returns `-25`. Asking for an unknown transaction returns `-5`.
+- **Electrum and Esplora handle a page of addresses together.** A batch
+  of history lookups no longer waits for each address in turn. You can
+  ask for history as of a given block without a special protocol
+  version.
+- **The node is harder to pick out on the network.** An encrypted
+  connection starts with a random amount of extra data, as Bitcoin Core
+  does, instead of a fixed size. A private send uses new peers, does not
+  put this node's name in the first message, and does not dial the open
+  internet directly.
+- **A crash during sync is less likely to leave a bad tip.** Startup
+  repairs a tip that was only half written. A data directory from
+  another network is refused. If the address index has no progress
+  mark, it is rebuilt from the blocks you already have. Hangup and the
+  two user signals shut the node down cleanly, the same way Ctrl+C does.
+- **Macs sync faster.** Reading the data directory on macOS no longer
+  sends every read through one lock. That old path was about 20% slower
+  on a signet sync. It is still available with `RBITCOIN_IO=pool`.
+- **Fee estimates stay useful when the mempool is busy.** A short target
+  no longer drops to the minimum relay fee just because every higher
+  rate is already full. The number you get is at least the mempool's
+  minimum fee. A block template orders transactions the way Bitcoin
+  Core does: a transaction plus the unconfirmed parents it needs,
+  ranked by their combined fee rate.
+- **A stranger cannot make the node rebuild a compact block.** Only a
+  peer this node chose for compact blocks can send one it did not ask
+  for. From anyone else, that message is just a new header. When this
+  node has the block, it can hand the compact form to those peers right
+  away.
 
 ### Changed
 
