@@ -1840,6 +1840,11 @@ fn regtest_ctx(
     relay: bool,
 ) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), hub.query.clone(), max_wu).unwrap();
+    // The node names the network genesis before it serves RPC. Unset, that
+    // height-0 coinbase stays an ordinary output (synthetic chains).
+    hub.query.set_genesis_coinbase_txid(
+        rbitcoin_consensus::ChainParams::regtest().genesis_coinbase_txid,
+    );
     // The node attaches this pool before it serves RPC. Connects and
     // disconnects move the template mark on that same pool.
     assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
@@ -3572,6 +3577,177 @@ fn gettxout_leftover_is_connected_not_unconfirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `BroadcastTransaction` returns `-27` when any of the submitted
+/// transaction's own outputs is still a coin. A confirmed transaction whose
+/// outputs are all spent stays a missing-input reject.
+#[test]
+fn sendrawtransaction_confirmed_output_is_already_in_utxo_set() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = hash_hex_display(&spend.compute_txid().to_byte_array());
+    assert_eq!(
+        dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap(),
+        json!(txid)
+    );
+    // Live mempool duplicate is success, not the utxo-set error.
+    assert_eq!(
+        dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap(),
+        json!(txid)
+    );
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let utxo = dispatch(&ctx, "gettxout", vec![json!(txid.clone()), json!(0)]).unwrap();
+    assert!(utxo["confirmations"].as_u64().unwrap() >= 1, "{utxo}");
+    let again = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
+    assert_eq!(again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{again}");
+    assert_eq!(
+        again["message"], "Transaction outputs already in utxo set",
+        "{again}"
+    );
+    // The historical fee is over this cap. Core still answers -27: the coin
+    // check is before maxfeerate.
+    let capped = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex.clone()), json!("0.00000001")],
+    )
+    .unwrap_err();
+    assert_eq!(capped["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{capped}");
+    assert_eq!(
+        capped["message"], "Transaction outputs already in utxo set",
+        "{capped}"
+    );
+
+    // nVersion outside 1/2 is an RPC reject for a new tx. A confirmed output
+    // still in the set is -27 first. generateblock mines the tx without that
+    // RPC gate.
+    let (addr, _) = p2wpkh_regtest();
+    let odd_sat = generated_coinbase_value(&ctx, 2);
+    let (_, mut odd) =
+        spend_generated_coinbase(&ctx, 2, odd_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    odd.version = bitcoin::transaction::Version::non_standard(0xffff_ffffu32 as i32);
+    let odd_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&odd));
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([odd_hex.clone()])],
+    )
+    .unwrap();
+    let odd_again = dispatch(&ctx, "sendrawtransaction", vec![json!(odd_hex)]).unwrap_err();
+    assert_eq!(
+        odd_again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET,
+        "{odd_again}"
+    );
+    assert_eq!(
+        odd_again["message"], "Transaction outputs already in utxo set",
+        "{odd_again}"
+    );
+
+    // Genesis is confirmed and has no spender. It is not a coin.
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_hex =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&genesis.txdata[0]));
+    let genesis_err = dispatch(&ctx, "sendrawtransaction", vec![json!(genesis_hex)]).unwrap_err();
+    assert_eq!(genesis_err["code"], ERR_VERIFY_REJECTED, "{genesis_err}");
+    assert_eq!(
+        genesis_err["message"], "bad-txns-is-coinbase",
+        "{genesis_err}"
+    );
+
+    let child = child_of(&spend, 1_000);
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(rbitcoin_primitives::hex_encode(
+            bitcoin::consensus::encode::serialize(&child)
+        ))],
+    )
+    .unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let spent = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
+    assert_eq!(spent["code"], ERR_VERIFY_REJECTED, "{spent}");
+    assert_eq!(spent["message"], "missing-inputs", "{spent}");
+    // The parent output is spent, but the tx index still has its value.
+    // Core fee-checks only after the inputs resolve, so this stays
+    // missing-inputs rather than the max-fee error.
+    let spent_capped = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex), json!("0.00000001")],
+    )
+    .unwrap_err();
+    assert_eq!(spent_capped["code"], ERR_VERIFY_REJECTED, "{spent_capped}");
+    assert_eq!(spent_capped["message"], "missing-inputs", "{spent_capped}");
+
+    // Not a coin, so the implied fee must not become the max-fee error.
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_spend = one_sat_spend(bitcoin::OutPoint {
+        txid: genesis.txdata[0].compute_txid(),
+        vout: 0,
+    });
+    let genesis_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(genesis_spend)]).unwrap_err();
+    assert_eq!(genesis_fee["code"], ERR_VERIFY_REJECTED, "{genesis_fee}");
+    assert_eq!(genesis_fee["message"], "missing-inputs", "{genesis_fee}");
+
+    let (addr, _) = p2wpkh_regtest();
+    let op_sat = generated_coinbase_value(&ctx, 3) - 1_000;
+    let (op_hex, op_tx) =
+        spend_generated_coinbase(&ctx, 3, op_sat, ScriptBuf::from_bytes(vec![0x6a]));
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr.clone()), json!([op_hex])],
+    )
+    .unwrap();
+    let op_spend = one_sat_spend(bitcoin::OutPoint {
+        txid: op_tx.compute_txid(),
+        vout: 0,
+    });
+    let op_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(op_spend)]).unwrap_err();
+    assert_eq!(op_fee["code"], ERR_VERIFY_REJECTED, "{op_fee}");
+    assert_eq!(op_fee["message"], "missing-inputs", "{op_fee}");
+
+    // A disconnected coinbase does not return to the mempool. Its output is
+    // archive-only, so the implied fee must not become the max-fee error.
+    let mined = dispatch(&ctx, "generateblock", vec![json!(addr), json!([])]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![mined["hash"].clone(), json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap();
+    dispatch(&ctx, "invalidateblock", vec![mined["hash"].clone()]).unwrap();
+    let archived = one_sat_spend(bitcoin::OutPoint {
+        txid: Txid::from_byte_array(parse_hash32_display(cb_txid).unwrap()),
+        vout: 0,
+    });
+    let archived_fee = dispatch(&ctx, "sendrawtransaction", vec![json!(archived)]).unwrap_err();
+    assert_eq!(archived_fee["code"], ERR_VERIFY_REJECTED, "{archived_fee}");
+    assert_eq!(archived_fee["message"], "missing-inputs", "{archived_fee}");
+
+    // OP_RETURN was never a coin. Once the spendable output is spent, the
+    // resubmit stays missing-inputs. Treating the OP_RETURN as unspent is -27.
+    let parent_sat = generated_coinbase_value(&ctx, 5) - 1_000;
+    let (_, mut parent) =
+        spend_generated_coinbase(&ctx, 5, parent_sat, ScriptBuf::from_bytes(vec![0x51]));
+    parent.output.push(bitcoin::TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+    });
+    let parent_hex =
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&parent));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex.clone())]).unwrap();
+    let child = child_of(&parent, 1_000);
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(rbitcoin_primitives::hex_encode(
+            bitcoin::consensus::encode::serialize(&child)
+        ))],
+    )
+    .unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let parent_again = dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex)]).unwrap_err();
+    assert_eq!(parent_again["code"], ERR_VERIFY_REJECTED, "{parent_again}");
+    assert_eq!(parent_again["message"], "missing-inputs", "{parent_again}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `gettxout` describes its coin with the same `scriptPubKey` object as
 /// `getrawtransaction`, in the mempool and once confirmed: Core's `type`
 /// and, for a standard script, `address`.
@@ -4210,6 +4386,28 @@ fn rpc_submit_nonstandard_version_is_version() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+fn one_sat_spend(prev: bitcoin::OutPoint) -> String {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Sequence, Transaction, TxIn, TxOut, Witness};
+    let tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prev,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    rbitcoin_primitives::hex_encode(serialize(&tx))
+}
+
 fn child_of(parent: &Transaction, fee_sat: u64) -> Transaction {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;
@@ -8421,6 +8619,18 @@ fn request_task_methods_answer_as_core() {
         err["message"],
         format!("TX decode failed: {superfluous_witness} Make sure the tx has at least one input."),
         "{err}"
+    );
+
+    // HTTP `sendrawtransaction` is this path. A confirmed output still in
+    // the set is -27 here, not only on the sync `dispatch` path.
+    let (hex, _) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    assert!(call("sendrawtransaction", vec![json!(hex.clone())]).is_ok());
+    assert!(call("generate", vec![json!(1)]).is_ok());
+    let again = call("sendrawtransaction", vec![json!(hex)]).unwrap_err();
+    assert_eq!(again["code"], ERR_VERIFY_ALREADY_IN_UTXO_SET, "{again}");
+    assert_eq!(
+        again["message"], "Transaction outputs already in utxo set",
+        "{again}"
     );
 }
 

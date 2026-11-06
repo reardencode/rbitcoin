@@ -821,12 +821,29 @@ pub use rbitcoin_consensus::policy::{fee_exceeds_max, feerate_exceeds_max};
 pub fn prevout_txout(ctx: &RpcContext, op: &OutPoint) -> Option<TxOut> {
     if let Some(mp) = ctx.mempool.as_ref() {
         if let Some(parent) = mp.get_tx(&op.txid) {
-            return parent.output.get(op.vout as usize).cloned();
+            let out = parent.output.get(op.vout as usize)?;
+            // An unspendable mempool output is not a coin.
+            if rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes()) {
+                return None;
+            }
+            return Some(out.clone());
         }
     }
     let want = op.txid.to_byte_array();
-    let (fk, _) = ctx.query.get_tx_by_txid(&want).ok().flatten()?;
+    // Price only a live coin. Genesis, unspendable outputs, spent outputs,
+    // and archive-only rows are not coins. Pricing them makes maxfeerate
+    // hide the missing-input reject.
+    if want == genesis_coinbase_txid(ctx) {
+        return None;
+    }
+    let fk = ctx.query.tx_fk_by_txid_tip(&want).ok().flatten()?;
+    if ctx.query.is_outpoint_spent(&want, op.vout).unwrap_or(true) {
+        return None;
+    }
     let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
+    if rbitcoin_consensus::policy::is_unspendable(&out.script) {
+        return None;
+    }
     Some(TxOut {
         value: Amount::from_sat(out.value),
         script_pubkey: ScriptBuf::from_bytes(out.script),
@@ -995,6 +1012,8 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
     if burn_exceeds_max(&tx, max_burn) {
         return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
     }
+    // Core checks burn, then CoinsTip, then version and max fee.
+    reject_outputs_already_in_utxo_set(ctx, &tx)?;
     if rpc_tx_version_nonstandard(&tx) {
         return Err(rpc_error(ERR_VERIFY_REJECTED, "version"));
     }
@@ -1032,6 +1051,12 @@ pub async fn sendrawtransaction_async(
     if burn_exceeds_max(&tx, max_burn) {
         return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
     }
+    let ctx_coins = Arc::clone(ctx);
+    let tx_coins = tx.clone();
+    rbitcoin_net::off_pool_budgeted(move || {
+        reject_outputs_already_in_utxo_set(&ctx_coins, &tx_coins)
+    })
+    .await?;
     if rpc_tx_version_nonstandard(&tx) {
         return Err(rpc_error(ERR_VERIFY_REJECTED, "version"));
     }
@@ -1133,6 +1158,48 @@ fn sendraw_after_accept(
         }
         Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
     }
+}
+
+/// Core `BroadcastTransaction` returns `-27` when one of the tx's own outputs
+/// is still a coin. Burn is already handled. Version and max fee are later.
+fn reject_outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<(), Value> {
+    if outputs_already_in_utxo_set(ctx, tx)? {
+        return Err(rpc_error(
+            ERR_VERIFY_ALREADY_IN_UTXO_SET,
+            "Transaction outputs already in utxo set",
+        ));
+    }
+    Ok(())
+}
+
+/// True when a spendable output of `tx` is an unspent confirmed coin.
+fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
+    let txid = tx.compute_txid().to_byte_array();
+    // ConnectBlock never adds the genesis coinbase. No spender does not
+    // make that output a coin.
+    if txid == genesis_coinbase_txid(ctx) {
+        return Ok(false);
+    }
+    let Some(fk) = confirmed_tip_fk(ctx, &txid)? else {
+        return Ok(false);
+    };
+    let vouts: Vec<u32> = tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, out)| {
+            !rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes())
+        })
+        .map(|(i, _)| i as u32)
+        .collect();
+    if vouts.is_empty() {
+        return Ok(false);
+    }
+    let unspent = ctx
+        .query
+        .unspent_create_vouts(fk, &vouts)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?;
+    Ok(!unspent.is_empty())
 }
 
 pub fn accept_reject_reason(e: &impl std::fmt::Display) -> String {
@@ -1624,15 +1691,27 @@ pub fn package_error_rows(txs: &[Transaction], msg: &str) -> Value {
 
 #[doc(hidden)]
 pub fn tx_confirmed_on_active_chain(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
-    let txid = tx.compute_txid().to_byte_array();
-    match ctx.query.tx_fk_by_txid_tip(&txid) {
-        Ok(None) => Ok(false),
-        Ok(Some(fk)) => ctx
-            .query
-            .store()
-            .is_confirmed_strong(fk)
-            .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}"))),
-        Err(e) => Err(rpc_error(ERR_MISC, format!("query failed: {e}"))),
+    Ok(confirmed_tip_fk(ctx, &tx.compute_txid().to_byte_array())?.is_some())
+}
+
+/// Confirmed-strong create on the active chain, if this txid has one.
+fn confirmed_tip_fk(ctx: &RpcContext, txid: &[u8; 32]) -> Result<Option<Fk>, Value> {
+    let Some(fk) = ctx
+        .query
+        .tx_fk_by_txid_tip(txid)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    else {
+        return Ok(None);
+    };
+    if ctx
+        .query
+        .store()
+        .is_confirmed_strong(fk)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
+    {
+        Ok(Some(fk))
+    } else {
+        Ok(None)
     }
 }
 

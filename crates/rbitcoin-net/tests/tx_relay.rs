@@ -1149,8 +1149,8 @@ fn over_standard_sigops_still_fit_a_block() {
 }
 
 /// A Class C coinbase read that errors is not "not a coinbase". The
-/// genesis coinbase is unspent; forcing that read to fail must make the
-/// prevout unavailable. `Ok(false)` on height 0 is not a non-coinbase coin.
+/// genesis coinbase is not a coin, including when that read succeeds.
+/// `Ok(false)` on height 0 is not a non-coinbase coin.
 #[test]
 fn coinbase_table_error_makes_the_prevout_unavailable() {
     use rbitcoin_consensus::{ChainParams, Milestone};
@@ -1181,9 +1181,14 @@ fn coinbase_table_error_makes_the_prevout_unavailable() {
     provider.coinbase_read.store(0, Ordering::Relaxed);
     match provider.chain_prevout(&op) {
         ChainPrevout::Unspent(coin) => assert!(coin.is_coinbase, "genesis is the coinbase"),
-        ChainPrevout::KnownUnavailable => panic!("genesis coinbase is unspent"),
+        ChainPrevout::KnownUnavailable => panic!("unset genesis id leaves the height-0 coinbase"),
         ChainPrevout::Unknown => panic!("genesis coinbase is a known create"),
     }
+    q.set_genesis_coinbase_txid(genesis.txdata[0].compute_txid().to_byte_array());
+    assert!(
+        matches!(provider.chain_prevout(&op), ChainPrevout::KnownUnavailable),
+        "the named network genesis coinbase is not a coin"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
