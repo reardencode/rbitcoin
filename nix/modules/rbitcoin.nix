@@ -615,7 +615,7 @@ in
         Pass `--api-log PATH` (one JSON line per Electrum, Esplora, and RPC call).
         The parent directory is created mode 0750 when it is not `dataDir`, `coldDataDir`,
         or an RPC or Esplora socket or token directory, and that directory is writable
-        under ProtectSystem=strict.
+        under ProtectSystem=strict. A file directly in `/` is refused.
       '';
     };
 
@@ -910,6 +910,7 @@ in
           Bind the unix JSON-RPC socket here (mode 0660) instead of {dataDir}/rpc.sock (0600).
           Its directory is created mode 0750, so members of `group` (for example mempool's
           backend) can connect without reading the datadir. Independent of `enable` (TCP).
+          A file directly in `/` is refused.
         '';
       };
 
@@ -931,6 +932,7 @@ in
           Requires `enable`, `unixSocket`, or `socketPath` (the node writes the file only when an RPC listener starts).
           The node creates the file mode 0600. The parent directory is created mode 0750
           when it is not `dataDir` and not the `socketPath` directory.
+          A file directly in `/` is refused.
         '';
       };
 
@@ -1071,7 +1073,7 @@ in
         description = ''
           Pass `--esplora-listen` a filesystem path (unix HTTP, mode 0660) instead of `address`:`port`.
           Requires `enable`. The parent directory is created mode 0750 when it is not `dataDir`.
-          `openFirewall` is ignored.
+          A file directly in `/` is refused. `openFirewall` is ignored.
         '';
       };
 
@@ -1280,6 +1282,22 @@ in
       {
         assertion = cfg.rpc.tokenFile == null || rpcListening;
         message = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
+      }
+      {
+        assertion = cfg.apiLog == null || dirOf cfg.apiLog != "/";
+        message = "services.rbitcoin.apiLog must not live in /";
+      }
+      {
+        assertion = cfg.rpc.tokenFile == null || dirOf cfg.rpc.tokenFile != "/";
+        message = "services.rbitcoin.rpc.tokenFile must not live in /";
+      }
+      {
+        assertion = cfg.rpc.socketPath == null || dirOf cfg.rpc.socketPath != "/";
+        message = "services.rbitcoin.rpc.socketPath must not live in /";
+      }
+      {
+        assertion = cfg.esplora.socketPath == null || dirOf cfg.esplora.socketPath != "/";
+        message = "services.rbitcoin.esplora.socketPath must not live in /";
       }
       {
         assertion = cfg.rpc.workQueue == null || rpcListening;

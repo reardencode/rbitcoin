@@ -371,6 +371,10 @@ let
   esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
   electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
   listenOnionNeedsInboundMsg = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
+  apiLogRootMsg = "services.rbitcoin.apiLog must not live in /";
+  tokenRootMsg = "services.rbitcoin.rpc.tokenFile must not live in /";
+  rpcSockRootMsg = "services.rbitcoin.rpc.socketPath must not live in /";
+  esploraSockRootMsg = "services.rbitcoin.esplora.socketPath must not live in /";
   onionGroupSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -802,6 +806,17 @@ assert builtins.elem esploraSockNeedsEnableMsg (failedAssertions (badSystem {
 assert builtins.match ".*--esplora-block-template.*" blockTemplateOffExec == null;
 assert builtins.elem "/var/log/rbitcoin" apiLogSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
 assert apiLogSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/log/rbitcoin".d.mode == "0750";
+assert builtins.elem apiLogRootMsg (failedAssertions (badSystem { apiLog = "/api.jsonl"; }));
+assert !builtins.elem apiLogRootMsg (failedAssertions (badSystem { apiLog = "/var/log/rbitcoin/api.jsonl"; }));
+assert builtins.elem tokenRootMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/rpc.token";
+}));
+assert builtins.elem rpcSockRootMsg (failedAssertions (badSystem { rpc.socketPath = "/rpc.sock"; }));
+assert builtins.elem esploraSockRootMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.socketPath = "/esplora.sock";
+}));
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
 assert builtins.match ".*--check-blocks 4294967296.*" (execOf { checkBlocks = 4294967296; }) != null;
 assert builtins.elem 18444 bindFwSystem.config.networking.firewall.allowedTCPPorts;
