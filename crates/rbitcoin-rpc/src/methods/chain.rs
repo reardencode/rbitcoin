@@ -1257,7 +1257,7 @@ pub fn getblockfilter(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
 pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["txid", "n", "include_mempool"])?;
     let hex = params.req_str(0, "txid")?;
-    let n = params.req_u64(1, "n")? as u32;
+    let n: u32 = params.req_core_int(1, "n")?;
     let include_mempool = params.opt_bool(2, "include_mempool")?.unwrap_or(true);
     let want = parse_hash32_display(hex)?;
     if want == genesis_coinbase_txid(ctx) {
@@ -1474,9 +1474,17 @@ pub fn waitforblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value
 
 pub fn waitforblockheight(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["height", "timeout"])?;
-    let want = params.req_u64(0, "height")? as u32;
+    let want = params.req_core_int(0, "height")?;
     let timeout_ms = wait_timeout_ms(params, 1, "timeout")?;
-    wait_for_tip(ctx, timeout_ms, |_hash, height| height >= want)
+    wait_for_tip(ctx, timeout_ms, |_hash, height| {
+        height_reached(height, want)
+    })
+}
+
+/// Core's `waitforblockheight` loop: a tip at or above `want`, so a
+/// negative height is reached at genesis.
+pub(crate) fn height_reached(tip: u32, want: i32) -> bool {
+    i64::from(tip) >= i64::from(want)
 }
 
 pub fn waitfornewblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {

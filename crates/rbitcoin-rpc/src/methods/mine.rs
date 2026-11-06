@@ -374,7 +374,7 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
 /// Core reads the count with `getInt<int>`, and `generateBlocks` mines
 /// nothing for a count at or below zero.
 fn generate_count(params: &RpcParams, name: &str) -> Result<u32, Value> {
-    Ok(params.req_core_int(0, name)?.max(0) as u32)
+    Ok(params.req_core_int::<i32>(0, name)?.max(0) as u32)
 }
 
 pub fn generatetoaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {

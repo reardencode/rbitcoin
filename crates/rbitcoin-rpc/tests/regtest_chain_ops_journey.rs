@@ -310,6 +310,7 @@ fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
     chain_ops_wrong_json_types(ctx);
     chain_ops_regtest_type_errors(ctx);
     chain_ops_generate_count_is_core_int(ctx);
+    chain_ops_index_args_are_core_ints(ctx);
     chain_ops_junk_tx_hex(ctx);
     chain_ops_network_identity(ctx);
     ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -544,7 +545,6 @@ fn chain_ops_wrong_json_types(ctx: &RpcContext) {
             "outputs array required",
         ),
         ("waitforblock", vec![json!(1)], "must be a string"),
-        ("waitforblockheight", vec![json!("1")], "must be an integer"),
         ("waitfornewblock", vec![json!("1")], "must be an integer"),
         ("getnetworkhashps", vec![json!("120")], "must be an integer"),
         ("getrawmempool", vec![json!("true")], "must be a bool"),
@@ -634,6 +634,41 @@ fn chain_ops_generate_count_is_core_int(ctx: &RpcContext) {
         );
     }
     assert_eq!(tip_count(ctx), 0);
+}
+
+/// Core reads `gettxout` `n` with `getInt<uint32_t>` and `waitforblockheight`
+/// `height` with `getInt<int>`. A value outside that type is `-1` `JSON
+/// integer out of range`, not a vout or height cut to 32 bits, and a
+/// negative height is already reached.
+fn chain_ops_index_args_are_core_ints(ctx: &RpcContext) {
+    let txid = json!("00".repeat(32));
+    for n in [json!(4_294_967_296_u64), json!(-1), json_num("1.5")] {
+        let err = dispatch(ctx, "gettxout", vec![txid.clone(), n.clone()]).unwrap_err();
+        assert_eq!(err["code"], ERR_MISC, "gettxout n={n}: {err}");
+        assert_eq!(err["message"], "JSON integer out of range", "gettxout n={n}: {err}");
+    }
+    let last_vout = dispatch(ctx, "gettxout", vec![txid, json!(u32::MAX)]).unwrap();
+    assert!(last_vout.is_null(), "{last_vout}");
+
+    for height in [json!(4_294_967_296_u64), json!(2_147_483_648_u64), json_num("1.5")] {
+        let err = dispatch(ctx, "waitforblockheight", vec![height.clone(), json!(100)]).unwrap_err();
+        assert_eq!(err["code"], ERR_MISC, "height={height}: {err}");
+        assert_eq!(err["message"], "JSON integer out of range", "height={height}: {err}");
+    }
+    let below_genesis = dispatch(ctx, "waitforblockheight", vec![json!(-1), json!(100)]).unwrap();
+    assert_eq!(below_genesis["height"], 0, "{below_genesis}");
+
+    for (method, params) in [
+        ("gettxout", vec![json!("00".repeat(32)), json!("0")]),
+        ("waitforblockheight", vec![json!("1")]),
+    ] {
+        let err = dispatch(ctx, method, params).unwrap_err();
+        assert_eq!(err["code"], ERR_TYPE_ERROR, "{method}: {err}");
+        assert_eq!(
+            err["message"], "JSON value of type string is not of expected type number",
+            "{method}: {err}"
+        );
+    }
 }
 
 /// Version 2, an empty vin, flags 0, locktime 0. Core's witness decode reads

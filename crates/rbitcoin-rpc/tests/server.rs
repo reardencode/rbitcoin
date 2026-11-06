@@ -3227,6 +3227,25 @@ async fn http_wait_met_height_does_not_sleep() {
     );
 }
 
+/// The HTTP wait reads `height` as Core `getInt<int>`: a negative height is
+/// met at once, and one past `i32` does not wait, so the method answers
+/// `JSON integer out of range`.
+#[tokio::test]
+async fn http_wait_height_is_a_core_int() {
+    let (ctx, _dir) = http_wait_ctx();
+    let wait = |height: serde_json::Value| serde_json::json!({ "method": "waitforblockheight", "params": [height, 2_000] });
+    let t0 = Instant::now();
+    assert_eq!(
+        satisfy_http_wait(&ctx, &wait(serde_json::json!(-1))).await,
+        vec![true]
+    );
+    assert_eq!(
+        satisfy_http_wait(&ctx, &wait(serde_json::json!(4_294_967_296_u64))).await,
+        vec![false]
+    );
+    assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+}
+
 #[tokio::test]
 async fn http_wait_unmet_height_and_same_tip_use_the_timeout() {
     let (ctx, _dir) = http_wait_ctx();
