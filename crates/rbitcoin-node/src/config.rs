@@ -1221,11 +1221,11 @@ impl NodeConfig {
             match applied {
                 ConfApply::Applied => {}
                 ConfApply::Unknown(other) => {
-                    rbitcoin_log::warn!(
-                        "node: conf {}:{}: unknown key `{other}` ignored",
+                    return Err(NodeError::Config(format!(
+                        "conf {}:{}: unknown key `{other}`",
                         path.display(),
                         lineno + 1
-                    );
+                    )));
                 }
             }
         }
@@ -1885,10 +1885,34 @@ impl NodeConfig {
                 }
             }
             "no_seeds" => self.listen.use_seeds = !is_conf_true(val),
-            "regtest" if is_conf_true(val) => self.network = Network::Regtest,
-            "signet" if is_conf_true(val) => self.network = Network::Signet,
-            "testnet" if is_conf_true(val) => self.network = Network::Testnet,
-            "testnet4" if is_conf_true(val) => self.network = Network::Testnet4,
+            "regtest" => {
+                if parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf regtest: {e}")))?
+                {
+                    self.network = Network::Regtest;
+                }
+            }
+            "signet" => {
+                if parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf signet: {e}")))?
+                {
+                    self.network = Network::Signet;
+                }
+            }
+            "testnet" => {
+                if parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf testnet: {e}")))?
+                {
+                    self.network = Network::Testnet;
+                }
+            }
+            "testnet4" => {
+                if parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf testnet4: {e}")))?
+                {
+                    self.network = Network::Testnet4;
+                }
+            }
             _ => return Ok(ConfApply::Unknown(key.to_string())),
         }
         Ok(ConfApply::Applied)

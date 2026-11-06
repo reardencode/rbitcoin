@@ -574,12 +574,10 @@ fn max_inbound_conf_is_explicit_not_core_total_slots() {
     let conf2 = dir.join("mc.conf");
     std::fs::write(&conf2, "maxconnections=32\n").unwrap();
     let mut cfg2 = NodeConfig::default().with_datadir(dir.join("d2"));
-    cfg2.merge_conf_file(&conf2).unwrap();
-    assert_eq!(
-        cfg2.listen.max_inbound, DEFAULT_MAX_INBOUND,
-        "Core maxconnections is unknown on the node (shim-only)"
-    );
-    assert!(!cfg2.listen.max_inbound_explicit);
+    let err = cfg2.merge_conf_file(&conf2).unwrap_err().to_string();
+    assert!(err.contains("unknown key"), "{err}");
+    assert!(err.contains("maxconnections"), "{err}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -746,7 +744,6 @@ fn conf_keys_parse_and_error_paths() {
          mempool_size_mb=50\n\
          log_level=info\n\
          no_seeds=0\n\
-         unknown_key=1\n\
          network=regtest\n",
     )
     .unwrap();
@@ -849,4 +846,48 @@ fn connect_hostname_is_dns_not_netaddr() {
         .to_string()
         .contains("bad"));
     assert!(cfg.listen.has_pinned_connect());
+}
+
+#[test]
+fn conf_unknown_key_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("rbitcoin-conf-unknown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bad.conf");
+    std::fs::write(&path, "not_a_real_key=1\n").unwrap();
+
+    let err = NodeConfig::default()
+        .merge_conf_file(&path)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("bad.conf:1"), "{err}");
+    assert!(err.contains("unknown key"), "{err}");
+    assert!(err.contains("not_a_real_key"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn network_names_are_recognized_and_reject_invalid() {
+    for (name, expected) in [
+        ("regtest", Network::Regtest),
+        ("signet", Network::Signet),
+        ("testnet", Network::Testnet),
+        ("testnet4", Network::Testnet4),
+    ] {
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv(name, "1").unwrap(), ConfApply::Applied);
+        assert_eq!(c.network, expected);
+
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv(name, "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.network, Network::Mainnet);
+
+        for bad in ["ture", "yess", "2", "-1", "maybe", "on1"] {
+            let mut c = NodeConfig::default();
+            let err = c.apply_kv(name, bad).unwrap_err().to_string();
+            assert!(err.contains(name), "name={name} bad={bad:?} err={err}");
+        }
+    }
 }

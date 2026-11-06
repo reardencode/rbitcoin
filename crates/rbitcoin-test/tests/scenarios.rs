@@ -32,7 +32,7 @@ fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
     let unknown_conf = unknown_dir.join("rbitcoin.conf");
     std::fs::write(&unknown_conf, "network=regtest\nunknown_key=1\n").unwrap();
     assert!(
-        exit_success(node_cli_main(
+        !exit_success(node_cli_main(
             [
                 "rbitcoin-node",
                 "--datadir",
@@ -43,12 +43,13 @@ fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
             ],
             NodeEnv::default()
         )),
-        "unknown conf key must be ignored"
+        "unknown conf key must be an error"
     );
 
     for (name, body) in [
         ("minrelay-neg", "network=regtest\nmin_relay_tx_fee=-1\n"),
         ("network-nope", "network=nope\n"),
+        ("regtest-ture", "regtest=ture\n"),
     ] {
         let d = td.path().join(name);
         std::fs::create_dir_all(&d).unwrap();
