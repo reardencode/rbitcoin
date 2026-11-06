@@ -98,7 +98,7 @@ pub use peers::{
 pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;
 pub use rbitcoin_mempool::{
-    AcceptError, AcceptResult, CoreDatTx, CoreMempoolDat, SelectBudget, Selected,
+    AcceptError, AcceptResult, CoreDatTx, CoreMempoolDat, SelectBudget, Selected, UtxoProvider,
 };
 pub use reactor::{
     acquire_armed_store_budget, hold_store_permit, off_pool, off_pool_budgeted,
@@ -117,7 +117,7 @@ pub use socks::{install_i2p_dialer, Dialer, NetProxies};
 pub use tx_relay::{
     arm_template_prev_sample, sample_template_prev_for_build, CoreDatImport, ElectrumMempoolItem,
     FeeHistoryBackfillStats, MempoolAnnounce, MempoolHub, MempoolPerfSample, MempoolTxSnapEntry,
-    MempoolTxSnapshot, TemplateBuildSample, TxOrigin,
+    MempoolTxSnapshot, QueryUtxoProvider, TemplateBuildSample, TxOrigin,
 };
 pub use v2::{encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, WireBytes};
 pub use versionbits_warn::{trust_warning_line, versionbit_warning_strings};

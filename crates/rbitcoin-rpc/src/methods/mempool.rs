@@ -2,7 +2,7 @@ use super::*;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
-use rbitcoin_net::MempoolHub;
+use rbitcoin_net::{MempoolHub, QueryUtxoProvider, UtxoProvider};
 use rbitcoin_primitives::Fk;
 use rbitcoin_primitives::Height;
 use serde_json::{json, Value};
@@ -822,32 +822,15 @@ pub fn prevout_txout(ctx: &RpcContext, op: &OutPoint) -> Option<TxOut> {
     if let Some(mp) = ctx.mempool.as_ref() {
         if let Some(parent) = mp.get_tx(&op.txid) {
             let out = parent.output.get(op.vout as usize)?;
-            // An unspendable mempool output is not a coin.
+            // Admission still loads this output. Pricing it turns a 1 sat
+            // spend into the fee cap and hides the script reject.
             if rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes()) {
                 return None;
             }
             return Some(out.clone());
         }
     }
-    let want = op.txid.to_byte_array();
-    // Price only a live coin. Genesis, unspendable outputs, spent outputs,
-    // and archive-only rows are not coins. Pricing them makes maxfeerate
-    // hide the missing-input reject.
-    if want == genesis_coinbase_txid(ctx) {
-        return None;
-    }
-    let fk = ctx.query.tx_fk_by_txid_tip(&want).ok().flatten()?;
-    if ctx.query.is_outpoint_spent(&want, op.vout).unwrap_or(true) {
-        return None;
-    }
-    let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
-    if rbitcoin_consensus::policy::is_unspendable(&out.script) {
-        return None;
-    }
-    Some(TxOut {
-        value: Amount::from_sat(out.value),
-        script_pubkey: ScriptBuf::from_bytes(out.script),
-    })
+    QueryUtxoProvider::new(&ctx.query).get_txout(op)
 }
 
 #[derive(Debug)]
@@ -1156,7 +1139,17 @@ fn sendraw_after_accept(
             }
             Ok(json!(hash_hex_display(&tid.to_byte_array())))
         }
-        Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
+        Err(e) => {
+            let reason = accept_reject_reason(&e);
+            // Core maps MISSING_INPUTS to RPC_TRANSACTION_ERROR (-25) and
+            // `bad-txns-inputs-missingorspent`. testmempoolaccept keeps
+            // the reason string `missing-inputs`.
+            if reason == "missing-inputs" {
+                Err(rpc_error(ERR_VERIFY_ERROR, MISSING_OR_SPENT))
+            } else {
+                Err(rpc_error(ERR_VERIFY_REJECTED, reason))
+            }
+        }
     }
 }
 
@@ -1201,6 +1194,9 @@ fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<boo
         .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?;
     Ok(!unspent.is_empty())
 }
+
+/// Core `TransactionError::MISSING_INPUTS` text on `sendrawtransaction`.
+const MISSING_OR_SPENT: &str = "bad-txns-inputs-missingorspent";
 
 pub fn accept_reject_reason(e: &impl std::fmt::Display) -> String {
     let owned = e.to_string();
@@ -2508,7 +2504,7 @@ fn submitpackage_apply(
 pub fn submitpackage_member_error(e: &impl std::fmt::Display) -> String {
     let mapped = accept_reject_reason(e);
     if mapped == "missing-inputs" {
-        return "bad-txns-inputs-missingorspent".into();
+        return MISSING_OR_SPENT.into();
     }
     mapped
 }
