@@ -776,8 +776,8 @@ pub async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), Net
         tip_at_handshake: prepared.tip_at_handshake,
     };
     let out = peer_session_with(
-        prepared.reader,
-        prepared.writer,
+        prepared.reader.into(),
+        prepared.writer.into(),
         prepared.magic,
         prepared.hub,
         tip_rx,

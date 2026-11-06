@@ -1,6 +1,7 @@
 //! Bitcoin P2P message framing helpers (limits + [`FramedMessage`]).
 //!
-//! **Transport:** production wire is **BIP324 v2 only** — see [`crate::v2`].
+//! **Transport:** production wire is **BIP324 v2** ([`crate::v2`]), and v1
+//! only on a `v1@` wallet-sync listener ([`crate::v1`]).
 //! This module holds Core-aligned size limits, CPU-heavy encode/decode hints,
 //! and the framed-message type used after decrypt.
 //!

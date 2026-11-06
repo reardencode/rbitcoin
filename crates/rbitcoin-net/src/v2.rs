@@ -5,7 +5,8 @@
 //! is the BIP324 v2 message encoding (1-byte short ID or 13-byte long command +
 //! payload — no network magic, length, or checksum).
 //!
-//! Peers that only speak v1 are disconnected ([`NetError::V1Peer`]).
+//! Peers that only speak v1 are disconnected ([`NetError::V1Peer`]), except on
+//! a `v1@` wallet-sync listener ([`crate::v1`]).
 
 use crate::codec::{
     command_bytes_ok, encode_is_cpu_heavy, FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE,
@@ -629,7 +630,7 @@ fn parse_v2_packet(magic: Magic, mut plaintext: Vec<u8>) -> Result<FramedMessage
     framed_payload(magic, command, plaintext)
 }
 
-fn v2_command(contents: &[u8]) -> Result<([u8; 12], usize), NetError> {
+pub(crate) fn v2_command(contents: &[u8]) -> Result<([u8; 12], usize), NetError> {
     if contents.is_empty() {
         return Err(NetError::Protocol("empty v2 message contents"));
     }
@@ -782,27 +783,57 @@ pub async fn open_v2_with_wire(
     inbound: bool,
     wire: WireBytes,
 ) -> Result<(V2Reader, V2Writer, WireBytes, std::net::TcpStream), NetError> {
+    let (mut reader, writer, tcp_shutdown) = counted_halves(stream, &wire)?;
+    let prefix = if inbound {
+        wait_v1_prefix_mismatch(&mut reader, magic.to_bytes()).await?
+    } else {
+        Vec::new()
+    };
+    let (r, w) = bip324_halves(reader, writer, prefix, magic, inbound).await?;
+    Ok((r, w, wire, tcp_shutdown))
+}
+
+/// Buffered read half, write half, and a std handle for `shutdown`.
+pub(crate) type CountedHalves = (
+    BufReader<CountRead<OwnedReadHalf>>,
+    CountWrite<OwnedWriteHalf>,
+    std::net::TcpStream,
+);
+
+/// Split `stream` into byte-counted halves. Protocol performs many small
+/// reads; BufReader is required for performance.
+pub(crate) fn counted_halves(
+    stream: TcpStream,
+    wire: &WireBytes,
+) -> Result<CountedHalves, NetError> {
     let _ = stream.set_nodelay(true);
     let std = stream.into_std().map_err(NetError::Io)?;
     std.set_nonblocking(true).map_err(NetError::Io)?;
     let tcp_shutdown = std.try_clone().map_err(NetError::Io)?;
     let stream = TcpStream::from_std(std).map_err(NetError::Io)?;
+    let (rh, wh) = stream.into_split();
+    Ok((
+        BufReader::new(wire.count_read(rh)),
+        wire.count_write(wh),
+        tcp_shutdown,
+    ))
+}
+
+/// BIP324 handshake on counted halves. `prefix` replays bytes an inbound
+/// v1-prefix check already read.
+pub(crate) async fn bip324_halves(
+    reader: BufReader<CountRead<OwnedReadHalf>>,
+    writer: CountWrite<OwnedWriteHalf>,
+    prefix: Vec<u8>,
+    magic: Magic,
+    inbound: bool,
+) -> Result<(V2Reader, V2Writer), NetError> {
     let role = if inbound {
         Role::Responder
     } else {
         Role::Initiator
     };
     let magic_bytes = magic.to_bytes();
-    let (rh, wh) = stream.into_split();
-    let reader = BufReader::new(wire.count_read(rh));
-    let writer = wire.count_write(wh);
-    // Protocol performs many small reads; BufReader is required for performance.
-    let mut reader = reader;
-    let prefix = if inbound {
-        wait_v1_prefix_mismatch(&mut reader, magic_bytes).await?
-    } else {
-        Vec::new()
-    };
     let reader = PrefixedRead {
         prefix,
         pos: 0,
@@ -823,12 +854,7 @@ pub async fn open_v2_with_wire(
         }
     };
     let (r, w) = protocol.into_split();
-    Ok((
-        V2SessionReader::from_protocol_reader(r),
-        w,
-        wire,
-        tcp_shutdown,
-    ))
+    Ok((V2SessionReader::from_protocol_reader(r), w))
 }
 
 /// Encrypt and send raw BIP324 application contents (short/long command + payload).

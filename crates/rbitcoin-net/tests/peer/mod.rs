@@ -1390,8 +1390,8 @@ async fn open_decode_session(
     let session_peer = Arc::clone(&live);
     let session = tokio::spawn(async move {
         let _ = peer_session_with(
-            reader,
-            writer,
+            reader.into(),
+            writer.into(),
             magic,
             hub,
             tip_rx,
