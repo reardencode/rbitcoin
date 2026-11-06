@@ -73,12 +73,24 @@ let
     "--log-level"
     cfg.logLevel
   ]
-  ++ optional (cfg.p2p.maxInbound != 125) "--max-inbound"
-  ++ optional (cfg.p2p.maxInbound != 125) (toString cfg.p2p.maxInbound)
+  ++ optional (cfg.p2p.maxInbound != 200) "--max-inbound"
+  ++ optional (cfg.p2p.maxInbound != 200) (toString cfg.p2p.maxInbound)
+  ++ optional (cfg.p2p.maxOutbound != null) "--max-outbound"
+  ++ optional (cfg.p2p.maxOutbound != null) (toString cfg.p2p.maxOutbound)
+  ++ lib.concatMap (a: [ "--connect" a ]) cfg.p2p.connect
+  ++ lib.concatMap (a: [ "--seed-node" a ]) cfg.p2p.seedNodes
+  ++ optional cfg.p2p.noSeeds "--no-seeds"
+  ++ lib.concatMap (a: [ "--external-ip" a ]) cfg.p2p.externalIp
+  ++ optional (cfg.p2p.peerTimeout != null) "--peer-timeout"
+  ++ optional (cfg.p2p.peerTimeout != null) (toString cfg.p2p.peerTimeout)
+  ++ optional (cfg.asmap != null) "--asmap"
+  ++ optional (cfg.asmap != null) cfg.asmap
+  ++ lib.concatMap (c: [ "--ua-comment" c ]) cfg.uaComment
   ++ optional (!cfg.p2p.discover) "--no-discover"
   ++ optional cfg.p2p.listenOnion "--listen-onion"
   ++ optional (cfg.coldDataDir != null) "--datadir-cold"
   ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
+  ++ optional (cfg.rpc.unixSocket && !cfg.rpc.enable && cfg.rpc.socketPath == null) "--rpc"
   ++ optional cfg.rpc.enable "--rpc-listen"
   ++ optional cfg.rpc.enable (socket cfg.rpc.address cfg.rpc.port)
   ++ optional (cfg.rpc.enable && cfg.rpc.rest) "--rest"
@@ -90,6 +102,10 @@ let
   ++ optional (cfg.rpc.cookiePerms != null) cfg.rpc.cookiePerms
   ++ optional (cfg.rpc.clientVersion != null) "--rpc-client-version"
   ++ optional (cfg.rpc.clientVersion != null) (toString cfg.rpc.clientVersion)
+  ++ optional (cfg.rpc.tokenFile != null) "--rpc-token-file"
+  ++ optional (cfg.rpc.tokenFile != null) cfg.rpc.tokenFile
+  ++ optional (cfg.rpc.workQueue != null) "--rpc-work-queue"
+  ++ optional (cfg.rpc.workQueue != null) (toString cfg.rpc.workQueue)
   ++ optional cfg.electrum.enable "--electrum-listen"
   ++ optional cfg.electrum.enable (socket cfg.electrum.address cfg.electrum.port)
   ++ optional (cfg.electrum.enable && cfg.electrum.maxSubs != null) "--electrum-max-subs"
@@ -97,7 +113,13 @@ let
     toString cfg.electrum.maxSubs
   )
   ++ optional cfg.esplora.enable "--esplora-listen"
-  ++ optional cfg.esplora.enable (socket cfg.esplora.address cfg.esplora.port)
+  ++ optional cfg.esplora.enable (
+    if cfg.esplora.socketPath != null then
+      cfg.esplora.socketPath
+    else
+      socket cfg.esplora.address cfg.esplora.port
+  )
+  ++ optional cfg.esplora.blockTemplate "--esplora-block-template"
   ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) "--esplora-max-inflight"
   ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) (
     toString cfg.esplora.maxInflight
@@ -121,8 +143,67 @@ let
   ++ optional needI2pSam cfg.i2p.sam
   ++ optional cfg.i2p.acceptIncoming "--i2p-accept-incoming"
   ++ optional cfg.cjdns.reachable "--cjdns-reachable"
-  ++ optional cfg.esplora.hiddenService "--esplora-onion"
+  ++ optional (cfg.esplora.enable && cfg.esplora.hiddenService) "--esplora-onion"
+  ++ optional (
+    cfg.esplora.enable && !cfg.esplora.hiddenService && torControlAddr != null
+  ) "--esplora-onion=0"
   ++ optional cfg.pruneSeqSigWit "--prune-seqsigwit"
+  ++ optional (cfg.pruneSeqSigwitRamThresholdBytes != null) "--prune-seqsigwit-ram-threshold-bytes"
+  ++ optional (cfg.pruneSeqSigwitRamThresholdBytes != null) (
+    toString cfg.pruneSeqSigwitRamThresholdBytes
+  )
+  ++ optional cfg.blockFilterIndex "--block-filter-index"
+  ++ optional (cfg.maxShCreates != null) "--max-sh-creates"
+  ++ optional (cfg.maxShCreates != null) (toString cfg.maxShCreates)
+  ++ optional (cfg.spTweaksDust != null) "--sp-tweaks-dust"
+  ++ optional (cfg.spTweaksDust != null) (toString cfg.spTweaksDust)
+  ++ optional (cfg.signet.challenge != null) "--signet-challenge"
+  ++ optional (cfg.signet.challenge != null) cfg.signet.challenge
+  ++ optional (cfg.signet.blockTime != null) "--signet-block-time"
+  ++ optional (cfg.signet.blockTime != null) (toString cfg.signet.blockTime)
+  ++ optional cfg.mempool.blocksOnly "--blocks-only"
+  ++ optional (!cfg.mempool.persist) "--persist-mempool=0"
+  ++ optional (!cfg.mempool.prefillCompact) "--prefill-compact=0"
+  ++ optional (cfg.mempool.sizeMb != null) "--mempool-size-mb"
+  ++ optional (cfg.mempool.sizeMb != null) (toString cfg.mempool.sizeMb)
+  ++ optional (cfg.mempool.expiry != null) "--mempool-expiry"
+  ++ optional (cfg.mempool.expiry != null) (toString cfg.mempool.expiry)
+  ++ optional (cfg.mempool.minRelayTxFee != null) "--min-relay-tx-fee"
+  ++ optional (cfg.mempool.minRelayTxFee != null) cfg.mempool.minRelayTxFee
+  ++ optional (cfg.mempool.limitClusterCount != null) "--limit-cluster-count"
+  ++ optional (cfg.mempool.limitClusterCount != null) (toString cfg.mempool.limitClusterCount)
+  ++ optional (cfg.mempool.limitClusterSize != null) "--limit-cluster-size"
+  ++ optional (cfg.mempool.limitClusterSize != null) (toString cfg.mempool.limitClusterSize)
+  ++ optional (cfg.mempool.bytesPerSigop != null) "--bytes-per-sigop"
+  ++ optional (cfg.mempool.bytesPerSigop != null) (toString cfg.mempool.bytesPerSigop)
+  ++ optional (cfg.mempool.blockReservedSigops != null) "--block-reserved-sigops"
+  ++ optional (cfg.mempool.blockReservedSigops != null) (
+    toString cfg.mempool.blockReservedSigops
+  )
+  ++ optional cfg.trusted "--trusted"
+  ++ optional cfg.alwaysRelay "--always-relay"
+  ++ optional cfg.relay "--relay"
+  ++ lib.concatMap (s: [ "--net-permission" s ]) cfg.netPermission
+  ++ lib.concatMap (s: [ "--net-permission-bind" s ]) cfg.netPermissionBind
+  ++ optional (!cfg.netPermissionRelay) "--net-permission-relay=0"
+  ++ optional cfg.netPermissionForceRelay "--net-permission-force-relay"
+  ++ optional (cfg.blockVersion != null) "--block-version"
+  ++ optional (cfg.blockVersion != null) (toString cfg.blockVersion)
+  ++ optional (cfg.blockMinTxFee != null) "--block-min-tx-fee"
+  ++ optional (cfg.blockMinTxFee != null) cfg.blockMinTxFee
+  ++ optional (cfg.apiLog != null) "--api-log"
+  ++ optional (cfg.apiLog != null) cfg.apiLog
+  ++ optional (cfg.minChainWork != null) "--min-chain-work"
+  ++ optional (cfg.minChainWork != null) cfg.minChainWork
+  ++ optional (cfg.maxTipAge != null) "--max-tip-age"
+  ++ optional (cfg.maxTipAge != null) (toString cfg.maxTipAge)
+  ++ optional (cfg.checkBlocks != null) "--check-blocks"
+  ++ optional (cfg.checkBlocks != null) (toString cfg.checkBlocks)
+  ++ optional (cfg.alertNotify != null) "--alert-notify"
+  ++ optional (cfg.alertNotify != null) cfg.alertNotify
+  ++ optional (cfg.startupNotify != null) "--startup-notify"
+  ++ optional (cfg.startupNotify != null) cfg.startupNotify
+  ++ optional cfg.inhibitSuspend "--inhibit-suspend"
   ++ optional cfg.datadirHdd "--datadir-hdd"
   ++ optional (cfg.milestone != null) "--milestone"
   ++ optional (cfg.milestone != null) (toString cfg.milestone)
@@ -145,6 +226,8 @@ let
     (toString cfg.sv2.tp.feeDelta)
     "--sv2-tp-template-interval"
     (toString cfg.sv2.tp.templateInterval)
+    "--sv2-tp-idle-timeout"
+    (toString cfg.sv2.tp.idleTimeout)
   ]
   ++ cfg.extraArgs;
 in
@@ -289,6 +372,261 @@ in
       '';
     };
 
+    asmap = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/var/lib/rbitcoin/ip_asn.dat";
+      description = ''
+        Pass `--asmap PATH` (a Core `ip_asn.dat`, absolute or relative to the datadir).
+        Null omits the flag: the node still uses `{dataDir}/ip_asn.dat` when that file exists.
+      '';
+    };
+
+    uaComment = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "nixos" ];
+      description = "Repeatable `--ua-comment` strings in the BIP14 subversion.";
+    };
+
+    blockFilterIndex = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--block-filter-index` (BIP158 basic filters). Independent of the scripthash index.";
+    };
+
+    pruneSeqSigwitRamThresholdBytes = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 0;
+      description = ''
+        Pass `--prune-seqsigwit-ram-threshold-bytes`. Null keeps the node default
+        (268435456). 0 keeps nothing in RAM.
+      '';
+    };
+
+    maxShCreates = mkOption {
+      type = types.nullOr (types.ints.between 0 4294967295);
+      default = null;
+      example = 0;
+      description = ''
+        Pass `--max-sh-creates`. Null keeps the node default (10000). 0 is unlimited.
+        An unpaged Electrum or Esplora join above the cap is refused. A paged request still returns that page.
+      '';
+    };
+
+    spTweaksDust = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 546;
+      description = ''
+        Pass `--sp-tweaks-dust SATS`. Null keeps the node default (1000).
+        0 serves every P2TR output. 546 matches Cake electrs.
+      '';
+    };
+
+    signet = {
+      challenge = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "51";
+        description = ''
+          Pass `--signet-challenge HEX` for a custom signet. Requires `network = "signet"`.
+          Null keeps the default global signet challenge.
+        '';
+      };
+
+      blockTime = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 600;
+        description = ''
+          Pass `--signet-block-time SECS`. Requires `signet.challenge`.
+          Null keeps the node default (600) once a custom challenge is set.
+        '';
+      };
+    };
+
+    mempool = {
+      sizeMb = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 100;
+        description = ''
+          Pass `--mempool-size-mb`. The node stores `N × 1_000_000` weight units, not MiB.
+          Null keeps the node default (300).
+        '';
+      };
+
+      expiry = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 336;
+        description = "Pass `--mempool-expiry` hours. Null keeps the node default. Minimum 1.";
+      };
+
+      minRelayTxFee = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "0.00000100";
+        description = ''
+          Pass `--min-relay-tx-fee` as a BTC decimal. Null keeps the Libre default (100 sat/kvB).
+          `0` is no floor.
+        '';
+      };
+
+      blocksOnly = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Pass `--blocks-only`.";
+      };
+
+      persist = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Mempool persistence. False passes `--persist-mempool=0`. True omits the flag.";
+      };
+
+      prefillCompact = mkOption {
+        type = types.bool;
+        default = true;
+        description = "BIP152 compact prefills. False passes `--prefill-compact=0`. True omits the flag.";
+      };
+
+      limitClusterCount = mkOption {
+        type = types.nullOr (types.ints.between 0 4294967295);
+        default = null;
+        description = "Pass `--limit-cluster-count`. Null keeps the node default.";
+      };
+
+      limitClusterSize = mkOption {
+        type = types.nullOr (types.ints.between 0 4294967295);
+        default = null;
+        description = "Pass `--limit-cluster-size` in thousands of virtual bytes. Null keeps the node default.";
+      };
+
+      bytesPerSigop = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 20;
+        description = "Pass `--bytes-per-sigop`. Null keeps the node default (20). 0 disables the sigop size floor.";
+      };
+
+      blockReservedSigops = mkOption {
+        type = types.nullOr (types.ints.between 0 80000);
+        default = null;
+        description = "Pass `--block-reserved-sigops`. Null keeps the node default (400). At most 80000.";
+      };
+    };
+
+    trusted = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--trusted` so inbound peers are not evicted or banned.";
+    };
+
+    alwaysRelay = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--always-relay` so inbound transactions are always announced.";
+    };
+
+    relay = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--relay` to permit transaction relay to inbound peers while `mempool.blocksOnly` is set.";
+    };
+
+    netPermission = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "noban@192.0.2.0/24" ];
+      description = "Repeatable `--net-permission` CIDR grants (IPv4 and IPv6).";
+    };
+
+    netPermissionBind = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "noban@127.0.0.1:8333" ];
+      description = "Repeatable `--net-permission-bind` grants.";
+    };
+
+    netPermissionRelay = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Implicit relay on a bare CIDR grant. False passes `--net-permission-relay=0`.";
+    };
+
+    netPermissionForceRelay = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--net-permission-force-relay` so a bare CIDR grant includes forcerelay.";
+    };
+
+    blockVersion = mkOption {
+      type = types.nullOr (types.ints.between (-2147483648) 2147483647);
+      default = null;
+      description = "Pass `--block-version` for the generate and template version overlay. Null omits the flag.";
+    };
+
+    blockMinTxFee = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "0.00001000";
+      description = "Pass `--block-min-tx-fee` as a BTC decimal for template selection. Null keeps the node default.";
+    };
+
+    apiLog = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/var/lib/rbitcoin/api.jsonl";
+      description = "Pass `--api-log PATH` (one JSON line per Electrum, Esplora, and RPC call).";
+    };
+
+    minChainWork = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "0x0000000000000000000000000000000000000000000000000000000100000000";
+      description = ''
+        Pass `--min-chain-work HEX` (optional `0x`, at most 64 hex digits).
+        Null keeps Core's minimum on mainnet, testnet3, and testnet4, and leaves signet and regtest unset.
+      '';
+    };
+
+    maxTipAge = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 86400;
+      description = "Pass `--max-tip-age` seconds. Null keeps the node default (24h). 0 is allowed.";
+    };
+
+    checkBlocks = mkOption {
+      type = types.nullOr types.int;
+      default = null;
+      example = 6;
+      description = "Pass `--check-blocks`. Null keeps the node default (6). 0 or a negative value revalidates the whole chain.";
+    };
+
+    alertNotify = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/run/rbitcoin/alert";
+      description = "Pass `--alert-notify CMD`. The node substitutes `%s` with the warning and runs the command once.";
+    };
+
+    startupNotify = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/run/rbitcoin/ready";
+      description = "Pass `--startup-notify CMD`. The node runs it once the process is ready.";
+    };
+
+    inhibitSuspend = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Pass `--inhibit-suspend` so logind does not suspend while the node runs.";
+    };
+
     environment = mkOption {
       type = types.attrsOf types.str;
       default = { };
@@ -393,8 +731,55 @@ in
 
       maxInbound = mkOption {
         type = types.ints.unsigned;
-        default = 125;
-        description = "Inbound P2P session cap. 0 with listen=false is outbound-only.";
+        default = 200;
+        description = ''
+          Inbound P2P session cap (`--max-inbound`). 200 omits the flag and matches the node default.
+          0 with listen=false is outbound-only.
+        '';
+      };
+
+      maxOutbound = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 8;
+        description = "Pass `--max-outbound`. Null keeps the node default (16). Minimum 1.";
+      };
+
+      connect = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "192.0.2.10:8333" ];
+        description = ''
+          Repeatable `--connect` addresses (host:port, `.onion:port`, or `{52}.b32.i2p:port`).
+          With `trustPeer`, leave this empty or set it to that same single address.
+        '';
+      };
+
+      seedNodes = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "seed.example.com" ];
+        description = "Repeatable `--seed-node` hosts. Refused together with `trustPeer`.";
+      };
+
+      noSeeds = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Pass `--no-seeds`.";
+      };
+
+      externalIp = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "203.0.113.5" ];
+        description = "Repeatable `--external-ip` values (an IP or a v3 `.onion` host) for `getnetworkinfo.localaddresses`.";
+      };
+
+      peerTimeout = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 60;
+        description = "Pass `--peer-timeout` seconds. Null keeps the node default. 0 is refused.";
       };
 
       discover = mkOption {
@@ -463,6 +848,35 @@ in
           Bind the unix JSON-RPC socket here (mode 0660) instead of {dataDir}/rpc.sock (0600).
           Its directory is created mode 0750, so members of `group` (for example mempool's
           backend) can connect without reading the datadir. Independent of `enable` (TCP).
+        '';
+      };
+
+      unixSocket = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Pass `--rpc` so `{dataDir}/rpc.sock` is served without TCP.
+          `enable` and `socketPath` already turn the unix socket on, and then this option adds no flag.
+        '';
+      };
+
+      tokenFile = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/rbitcoin/rpc.token";
+        description = ''
+          Pass `--rpc-token-file`. Null keeps `{dataDir}/rpc.token`.
+          The node creates the file mode 0600. The parent directory is created mode 0750
+          when it is not `dataDir` and not the `socketPath` directory.
+        '';
+      };
+
+      workQueue = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 32;
+        description = ''
+          Pass `--rpc-work-queue`. Null keeps the node default (16). 0 is that same default.
         '';
       };
 
@@ -581,10 +995,31 @@ in
         description = "Open the Esplora listen port in the NixOS firewall.";
       };
 
+      socketPath = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/rbitcoin/esplora.sock";
+        description = ''
+          Pass `--esplora-listen` a filesystem path (unix HTTP, mode 0660) instead of `address`:`port`.
+          Requires `enable`. The parent directory is created mode 0750 when it is not `dataDir`.
+          `openFirewall` is ignored.
+        '';
+      };
+
+      blockTemplate = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Pass `--esplora-block-template` so GET /block-template serves GBT JSON.";
+      };
+
       hiddenService = mkOption {
         type = types.bool;
         default = false;
-        description = "ADD_ONION for Esplora when --esplora-listen is on. Implies tor.control 127.0.0.1:9051 if unset. REST and /ws share the TCP port.";
+        description = ''
+          ADD_ONION for Esplora when the listener is on. True implies tor.control 127.0.0.1:9051
+          if unset and passes `--esplora-onion`. False passes `--esplora-onion=0` when Tor control
+          is on for another reason. REST and /ws share the TCP port.
+        '';
       };
 
       maxInflight = mkOption {
@@ -644,6 +1079,15 @@ in
         type = types.ints.between 1 86400;
         default = 5;
         description = "Seconds between fee checks; a fee push never comes sooner than this after a client's last template.";
+      };
+
+      idleTimeout = mkOption {
+        type = types.ints.between 0 86400;
+        default = 0;
+        description = ''
+          Pass `--sv2-tp-idle-timeout` seconds after the first CoinbaseOutputConstraints with no client frame.
+          0 never drops a quiet pool. Passed whenever `enable` is set.
+        '';
       };
 
       openFirewall = mkOption {
@@ -708,6 +1152,31 @@ in
           || !lib.hasPrefix "${builtins.storeDir}/" cfg.sv2.tp.authoritySecretFile;
         message = "services.rbitcoin.sv2.tp.authoritySecretFile must not be a store path (the store is world-readable)";
       }
+      {
+        assertion = !cfg.silentPaymentIndex || !cfg.pruneSeqSigWit;
+        message = "services.rbitcoin.silentPaymentIndex cannot be combined with pruneSeqSigWit";
+      }
+      {
+        assertion = cfg.signet.challenge == null || cfg.network == "signet";
+        message = "services.rbitcoin.signet.challenge requires network = \"signet\"";
+      }
+      {
+        assertion = cfg.signet.blockTime == null || cfg.network == "signet";
+        message = "services.rbitcoin.signet.blockTime requires network = \"signet\"";
+      }
+      {
+        assertion = cfg.signet.blockTime == null || cfg.signet.challenge != null;
+        message = "services.rbitcoin.signet.blockTime requires signet.challenge";
+      }
+      {
+        assertion = cfg.trustPeer == null || cfg.p2p.seedNodes == [ ];
+        message = "services.rbitcoin.trustPeer cannot be combined with p2p.seedNodes";
+      }
+      {
+        assertion =
+          cfg.trustPeer == null || cfg.p2p.connect == [ ] || cfg.p2p.connect == [ cfg.trustPeer ];
+        message = "services.rbitcoin.trustPeer connect list must be empty or that same address";
+      }
     ];
 
     users.groups.${cfg.group} = { };
@@ -733,6 +1202,30 @@ in
     }
     // lib.optionalAttrs (cfg.rpc.socketPath != null) {
       "${dirOf cfg.rpc.socketPath}".d = {
+        mode = "0750";
+        user = cfg.user;
+        group = cfg.group;
+      };
+    }
+    // lib.optionalAttrs (
+      cfg.rpc.tokenFile != null
+      && dirOf cfg.rpc.tokenFile != cfg.dataDir
+      && (cfg.coldDataDir == null || dirOf cfg.rpc.tokenFile != cfg.coldDataDir)
+      && (cfg.rpc.socketPath == null || dirOf cfg.rpc.tokenFile != dirOf cfg.rpc.socketPath)
+    ) {
+      "${dirOf cfg.rpc.tokenFile}".d = {
+        mode = "0750";
+        user = cfg.user;
+        group = cfg.group;
+      };
+    }
+    // lib.optionalAttrs (
+      cfg.esplora.socketPath != null
+      && dirOf cfg.esplora.socketPath != cfg.dataDir
+      && (cfg.coldDataDir == null || dirOf cfg.esplora.socketPath != cfg.coldDataDir)
+      && (cfg.rpc.socketPath == null || dirOf cfg.esplora.socketPath != dirOf cfg.rpc.socketPath)
+    ) {
+      "${dirOf cfg.esplora.socketPath}".d = {
         mode = "0750";
         user = cfg.user;
         group = cfg.group;
@@ -769,11 +1262,15 @@ in
         PrivateTmp = true;
         ProtectHome = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [
-          cfg.dataDir
-        ]
-        ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
-        ++ optional (cfg.rpc.socketPath != null) (dirOf cfg.rpc.socketPath);
+        ReadWritePaths = lib.unique (
+          [
+            cfg.dataDir
+          ]
+          ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
+          ++ optional (cfg.rpc.socketPath != null) (dirOf cfg.rpc.socketPath)
+          ++ optional (cfg.rpc.tokenFile != null) (dirOf cfg.rpc.tokenFile)
+          ++ optional (cfg.esplora.socketPath != null) (dirOf cfg.esplora.socketPath)
+        );
       }
       // lib.optionalAttrs (cfg.tor.controlCookie != null) {
         SupplementaryGroups = [ "tor" ];
@@ -783,7 +1280,9 @@ in
     networking.firewall.allowedTCPPorts =
       optional (cfg.p2p.openFirewall && cfg.p2p.listen) cfg.p2p.port
       ++ optional (cfg.electrum.enable && cfg.electrum.openFirewall) cfg.electrum.port
-      ++ optional (cfg.esplora.enable && cfg.esplora.openFirewall) cfg.esplora.port
+      ++ optional (
+        cfg.esplora.enable && cfg.esplora.openFirewall && cfg.esplora.socketPath == null
+      ) cfg.esplora.port
       ++ optional (cfg.health.enable && cfg.health.openFirewall) cfg.health.port
       ++ optional (cfg.sv2.tp.enable && cfg.sv2.tp.openFirewall) cfg.sv2.tp.port;
 
