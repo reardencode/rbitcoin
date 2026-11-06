@@ -1196,7 +1196,7 @@ impl ActiveMempool {
         let min_relay = min_relay.unwrap_or(floor);
         // Standardness on raw weight; the fee floor on sigop-adjusted vsize.
         if let PolicyResult::NonStandard(s) =
-            policy::check_libre_admission_at(tx, admit_fee, weight, 0)
+            policy::check_libre_admission_at(tx, fee_sat, fee_delta, weight, 0)
         {
             return Err(AcceptError::Policy(s));
         }
@@ -1597,6 +1597,77 @@ impl ActiveMempool {
         Ok(())
     }
 
+    /// BIP 431 TRUC, as Core `SingleTRUCChecks` without sibling eviction.
+    ///
+    /// Runs under the commit lock, so two children staged together cannot
+    /// both pass against a parent that has neither yet.
+    fn check_truc(
+        &self,
+        tx: &Transaction,
+        vsize: u64,
+        scan: &ConflictScan,
+    ) -> Result<(), AcceptError> {
+        const VIOLATION: AcceptError = AcceptError::Policy("TRUC-violation");
+        let is_truc = tx.version.0 == policy::TRUC_VERSION;
+        for id in &scan.parent_txids {
+            let body = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("parent body missing".into()))?;
+            if (body.version.0 == policy::TRUC_VERSION) != is_truc {
+                return Err(VIOLATION);
+            }
+        }
+        if !is_truc {
+            return Ok(());
+        }
+        if vsize > policy::TRUC_MAX_VSIZE || scan.parent_txids.len() > 1 {
+            return Err(VIOLATION);
+        }
+        let Some(parent) = scan.parent_txids.first() else {
+            return Ok(());
+        };
+        let entry = self
+            .graph
+            .get(parent)
+            .ok_or_else(|| AcceptError::Durable("parent entry missing".into()))?;
+        if !entry.parents.is_empty() || vsize > policy::TRUC_CHILD_MAX_VSIZE {
+            return Err(VIOLATION);
+        }
+        let child_replaced = entry
+            .children
+            .iter()
+            .any(|c| scan.direct_conflicts.contains(c));
+        if !entry.children.is_empty() && !child_replaced {
+            return Err(VIOLATION);
+        }
+        Ok(())
+    }
+
+    /// A child of a parent with a dust output must spend that output (Core
+    /// `CheckEphemeralSpends`). Otherwise the 0-fee parent would sit in the
+    /// pool with nothing paying for it.
+    fn check_ephemeral_spends(
+        &self,
+        tx: &Transaction,
+        scan: &ConflictScan,
+    ) -> Result<(), AcceptError> {
+        for id in &scan.parent_txids {
+            let body = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("parent body missing".into()))?;
+            let unspent = policy::dust_vouts(body).any(|vout| {
+                let dust = OutPoint { txid: *id, vout };
+                !tx.input.iter().any(|i| i.previous_output == dust)
+            });
+            if unspent {
+                return Err(AcceptError::Policy("missing-ephemeral-spends"));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns (conflict set, fee, sigop-adjusted weight).
     #[doc(hidden)]
     pub fn plan_after_script(
@@ -1629,6 +1700,8 @@ impl ActiveMempool {
         let fee_sat = prep.fee_sat;
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
+        self.check_truc(tx, weight.div_ceil(4), &scan)?;
+        self.check_ephemeral_spends(tx, &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
@@ -2014,6 +2087,43 @@ impl ActiveMempool {
             self.promote_orphans_of(id, utxos, tip);
         }
         Ok(accepted)
+    }
+
+    /// Lift one parked orphan that waits only on `parent` and spends its
+    /// dust output, so it can be admitted with `parent` as 1p1c (Core finds
+    /// the orphan child of a reconsiderable parent the same way). A child
+    /// that `peer`, the parent's sender, announced goes first, as in Core's
+    /// `Find1P1CPackage`. `tried` skips a child whose pair with `parent`
+    /// already failed.
+    pub fn lift_dust_spender(
+        &mut self,
+        parent: &Transaction,
+        peer: u64,
+        tried: impl Fn(&Transaction) -> bool,
+    ) -> Option<LiftedOrphan> {
+        let pid = parent.compute_txid();
+        let mut untried = self
+            .orphanage
+            .by_parent
+            .get(&pid)?
+            .iter()
+            .filter_map(|id| self.orphanage.by_txid.get(id))
+            .filter(|e| {
+                e.missing.len() == 1 && policy::spends_dust_of(parent, &e.tx) && !tried(&e.tx)
+            });
+        let mut other = None;
+        let child = loop {
+            let Some(e) = untried.next() else {
+                break other?;
+            };
+            if e.announcers.contains(&peer) {
+                break e;
+            }
+            other.get_or_insert(e);
+        }
+        .tx
+        .clone();
+        self.lift_parked_member(&child)
     }
 
     /// Take `tx` out of the orphanage so a package can admit it.
@@ -2465,6 +2575,13 @@ impl ActiveMempool {
                 Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
             }
             AcceptError::Policy("min relay fee") => Some(AcceptFailureRecord::Extra),
+            // Under the rolling floor, keep only an anchor parent: a dust
+            // output reaches the fee check only on a 0-fee tx, and its child
+            // pays for both (1p1c). Other sub-floor txs stay out of the
+            // small extra pool.
+            AcceptError::Policy("mempool min fee") if policy::dust_vouts(tx).next().is_some() => {
+                Some(AcceptFailureRecord::Extra)
+            }
             _ => None,
         }
     }
@@ -2526,16 +2643,18 @@ impl ActiveMempool {
             return None;
         }
         let parent = self.extra_by_txid(pid)?.clone();
-        if !self.package_pays_min_relay(&parent, child, utxos) {
+        if !self.package_clears_floor(&parent, child, utxos) {
             return None;
         }
         Some(parent)
     }
 
-    /// Combined parent+child fee must meet min-relay. Parent inputs must be
-    /// confirmed (no unconfirmed grandparent — same limit as Core 1p1c).
+    /// Combined parent+child fee must meet the mempool fee floor, the rolling
+    /// minimum included, as Core checks a package against `GetMinFee`. Parent
+    /// inputs must be confirmed (no unconfirmed grandparent — same limit as
+    /// Core 1p1c).
     #[doc(hidden)]
-    pub fn package_pays_min_relay(
+    pub fn package_clears_floor(
         &self,
         parent: &Transaction,
         child: &Transaction,
@@ -2572,7 +2691,7 @@ impl ActiveMempool {
         policy::meets_min_relay_fee_at(
             pf.saturating_add(cf),
             pw.saturating_add(cw),
-            self.min_relay_sat_kvb,
+            self.mempool_min_fee_sat_kvb(),
         )
     }
 

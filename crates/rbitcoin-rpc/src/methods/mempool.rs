@@ -888,10 +888,11 @@ pub fn submitpackage_topology_disallowed(txs: &[Transaction], dialect: bool) -> 
     dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_parents_tree(txs)
 }
 
+/// RPC submit admits versions 1, 2, and 3 (BIP 431 TRUC). P2P admits any
+/// `nVersion`.
 #[doc(hidden)]
 pub fn rpc_tx_version_nonstandard(tx: &Transaction) -> bool {
-    tx.version != bitcoin::transaction::Version::ONE
-        && tx.version != bitcoin::transaction::Version::TWO
+    !(1..=3).contains(&tx.version.0)
 }
 
 #[doc(hidden)]
@@ -1940,6 +1941,17 @@ pub fn prioritisetransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         .mempool
         .as_ref()
         .ok_or_else(|| rpc_error(ERR_MISC, "no mempool"))?;
+    // A dust output enters only on a 0-fee tx whose child spends it. A fee
+    // on the parent would let a template take it alone (Core refuses too).
+    let dust = mp
+        .get_tx(&txid)
+        .is_some_and(|tx| rbitcoin_consensus::policy::dust_vouts(&tx).next().is_some());
+    if dust {
+        return Err(rpc_error(
+            ERR_INVALID_PARAMETER,
+            "Priority is not supported for transactions with dust outputs.",
+        ));
+    }
     mp.prioritise_tx(txid, fee_delta);
     Ok(json!(true))
 }

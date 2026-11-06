@@ -896,20 +896,12 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
     hub.accept_tx(&sib).expect("paying sibling of live parent");
     assert!(hub.relay_seq_of(&sib_w).is_some());
     assert!(hub.accept_time_txid(&sib_id).is_some());
-    let tmpl = hub.template_updates();
+    // A 1p1c rollback keeps a parent that another admit's child spends.
     hub.rollback_1p1c_parent(&lpid, &[]);
-    assert!(!hub.contains(&lpid));
-    assert!(!hub.contains(&sib_id));
-    assert!(!hub.is_local_origin(&payer.compute_txid()));
-    assert!(
-        hub.relay_seq_of(&sib_w).is_none(),
-        "published spender must leave wtxid/relay maps"
-    );
-    assert!(hub.accept_time_txid(&sib_id).is_none());
-    assert!(
-        hub.template_updates() > tmpl,
-        "template must bump like remove_for_block_spent"
-    );
+    assert!(hub.contains(&lpid));
+    assert!(hub.contains(&sib_id));
+    assert!(hub.relay_seq_of(&sib_w).is_some());
+    assert!(hub.is_local_origin(&payer.compute_txid()));
     // The local submit path is async. A child of a below-relay parent still
     // brings that parent in without a blocking-pool thread.
     let hub = Arc::new(hub);
@@ -3211,6 +3203,387 @@ fn copy_maturity_pad(n: u32) -> (std::path::PathBuf, Arc<Query>, Vec<Txid>) {
 
 fn copy_store_tree(src: &std::path::Path, dst: &std::path::Path) {
     rbitcoin_store::testutil::copy_store_tree(src, dst);
+}
+
+fn pay_true(value: u64) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(value),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+fn v3_spend(prevs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
+    Transaction {
+        version: Version::non_standard(3),
+        lock_time: LockTime::ZERO,
+        input: prevs
+            .iter()
+            .map(|&previous_output| TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: outputs,
+    }
+}
+
+const COINBASE_SAT: u64 = 50_0000_0000;
+
+/// A Bark-style exit parent: 0 fee, its value out, and one 0-value anchor.
+fn zero_fee_anchor(coin: Txid) -> Transaction {
+    v3_spend(
+        &[OutPoint::new(coin, 0)],
+        vec![pay_true(COINBASE_SAT), pay_true(0)],
+    )
+}
+
+/// The CPFP child: spends the anchor and a confirmed coin, and pays `fee`.
+fn spend_anchor(parent: &Transaction, fund: Txid, fee: u64) -> Transaction {
+    v3_spend(
+        &[
+            OutPoint::new(parent.compute_txid(), 1),
+            OutPoint::new(fund, 0),
+        ],
+        vec![pay_true(COINBASE_SAT - fee)],
+    )
+}
+
+/// `submitpackage` admits a 0-fee anchor parent beside the child that spends
+/// the anchor. Alone it is a low-fee parent; a child that skips the anchor
+/// is `missing-ephemeral-spends` and the parent does not stay.
+#[test]
+fn submit_package_rpc_admits_zero_fee_anchor() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+
+    let parent = zero_fee_anchor(cbs[0]);
+    let err = hub.accept_tx(&parent).expect_err("a lone anchor parent");
+    assert!(
+        matches!(err, AcceptError::Policy("min relay fee")),
+        "{err:?}"
+    );
+    let alone = hub.submit_package_rpc(std::slice::from_ref(&parent));
+    assert!(alone[0].result.is_err(), "{alone:?}");
+
+    let skips = v3_spend(
+        &[OutPoint::new(parent.compute_txid(), 0)],
+        vec![pay_true(COINBASE_SAT - 50_000)],
+    );
+    let err = hub
+        .accept_package(&[parent.clone(), skips.clone()])
+        .expect_err("the child leaves the anchor unspent");
+    assert!(
+        matches!(err, AcceptError::Policy("missing-ephemeral-spends")),
+        "{err:?}"
+    );
+    let rows = hub.submit_package_rpc(&[parent.clone(), skips]);
+    assert!(rows.iter().all(|r| r.result.is_err()), "{rows:?}");
+    assert!(!hub.try_contains(&parent.compute_txid()));
+
+    // An unrelated member with a fee and a 0-value output is `dust` on its
+    // own and does not stop the CPFP pair beside it.
+    let child = spend_anchor(&parent, cbs[1], 50_000);
+    let stray = Transaction {
+        version: Version::TWO,
+        ..v3_spend(
+            &[OutPoint::new(cbs[2], 0)],
+            vec![pay_true(COINBASE_SAT - 10_000), pay_true(0)],
+        )
+    };
+    let rows = hub.submit_package_rpc(&[parent.clone(), child.clone(), stray]);
+    assert!(rows[0].result.is_ok(), "{rows:?}");
+    assert!(rows[1].result.is_ok(), "{rows:?}");
+    assert!(
+        matches!(rows[2].result, Err(AcceptError::Policy("dust"))),
+        "{rows:?}"
+    );
+    assert!(
+        rows[..2]
+            .iter()
+            .all(|r| r.fee_with.as_ref().is_some_and(|ids| ids.len() == 2)),
+        "the anchor clears inside the package remainder, got {rows:?}"
+    );
+    assert!(hub.try_contains(&parent.compute_txid()));
+    assert!(hub.try_contains(&child.compute_txid()));
+}
+
+/// A package that replaces an anchor pair and then fails puts the pair back.
+/// Restoring the 0-fee parent must not bounce it as dust.
+#[test]
+fn failed_package_restores_the_anchor_pair_it_replaced() {
+    let (_store, q, cbs) = pad_cbs(12);
+    let dir = tmp();
+    let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+
+    let parent = zero_fee_anchor(cbs[3]);
+    let child = spend_anchor(&parent, cbs[4], 50_000);
+    let rows = hub.submit_package_rpc(&[parent.clone(), child.clone()]);
+    assert!(rows.iter().all(|r| r.result.is_ok()), "{rows:?}");
+
+    let replacer = v3_spend(
+        &[OutPoint::new(cbs[3], 0)],
+        vec![pay_true(COINBASE_SAT - 200_000)],
+    );
+    let bad_child = v3_spend(
+        &[OutPoint::new(replacer.compute_txid(), 0)],
+        vec![pay_true(COINBASE_SAT - 300_000), pay_true(0)],
+    );
+    let err = hub
+        .accept_package(&[replacer.clone(), bad_child])
+        .expect_err("the second member is dust");
+    assert!(matches!(err, AcceptError::Policy("dust")), "{err:?}");
+    assert!(!hub.try_contains(&replacer.compute_txid()));
+    assert!(hub.try_contains(&parent.compute_txid()), "parent restored");
+    assert!(hub.try_contains(&child.compute_txid()), "child restored");
+}
+
+/// Peer admits run on the async path in production; the sync twin is the
+/// same decision for callers without a runtime.
+fn from_peer(
+    hub: &Arc<MempoolHub>,
+    tx: &Transaction,
+    peer: u64,
+    on_async: bool,
+) -> Result<rbitcoin_mempool::AcceptResult, AcceptError> {
+    let origin = TxOrigin::Relay(Some(peer));
+    if !on_async {
+        return hub.accept_tx_from(tx, origin);
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.accept_tx_from_async(tx.clone(), origin))
+}
+
+/// A peer's anchor parent and the child that spends the anchor admit as
+/// 1p1c in either order. A peer's child of any other low-fee parent still
+/// waits in the orphanage (`mempool_under_pressure`).
+#[test]
+fn peer_anchor_pair_admits_in_either_order() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for (round, on_async) in [false, true].into_iter().enumerate() {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let base = round * 4;
+
+        let parent = zero_fee_anchor(cbs[base]);
+        let child = spend_anchor(&parent, cbs[base + 1], 50_000);
+        let err = from_peer(&hub, &parent, 7, on_async).expect_err("alone");
+        assert!(
+            matches!(err, AcceptError::Policy("min relay fee")),
+            "{err:?}"
+        );
+        from_peer(&hub, &child, 8, on_async).expect("parent first");
+        assert!(hub.contains(&parent.compute_txid()));
+        assert!(hub.contains(&child.compute_txid()));
+
+        let parent = zero_fee_anchor(cbs[base + 2]);
+        let child = spend_anchor(&parent, cbs[base + 3], 50_000);
+        let err = from_peer(&hub, &child, 8, on_async).expect_err("orphan");
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        let r = from_peer(&hub, &parent, 7, on_async).expect("child first");
+        assert_eq!(r.txid, parent.compute_txid());
+        assert!(hub.contains(&parent.compute_txid()));
+        assert!(hub.contains(&child.compute_txid()));
+        assert_eq!(hub.orphan_count(), 0);
+    }
+}
+
+/// Under fee pressure a lone anchor parent fails the rolling floor
+/// (`mempool min fee`), not `min relay fee`. The pair still relays from
+/// peers in either order, as `submitpackage` admits it.
+#[test]
+fn peer_anchor_pair_relays_under_fee_pressure() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.lock_write().note_evicted_feerate(5_000);
+
+        let parent = zero_fee_anchor(cbs[0]);
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        let err = from_peer(&hub, &parent, 7, on_async).expect_err("alone");
+        assert!(
+            matches!(err, AcceptError::Policy("mempool min fee")),
+            "{err:?}"
+        );
+        from_peer(&hub, &child, 8, on_async).expect("parent first");
+        assert!(hub.contains(&child.compute_txid()));
+
+        let parent = zero_fee_anchor(cbs[2]);
+        let child = spend_anchor(&parent, cbs[3], 50_000);
+        let err = from_peer(&hub, &child, 8, on_async).expect_err("orphan");
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        from_peer(&hub, &parent, 7, on_async).expect("child first");
+        assert!(hub.contains(&child.compute_txid()));
+    }
+}
+
+/// The anchor is anyone-can-spend, so a peer can park invalid spenders of
+/// it. Each parent delivery tries one waiting child; a child that failed is
+/// dropped, not tried again, so the paying child is reached.
+#[test]
+fn invalid_anchor_spenders_do_not_hold_the_slot() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = zero_fee_anchor(cbs[0]);
+        for fee in 1..=5u64 {
+            let mut bad = spend_anchor(&parent, cbs[1], 50_000 + fee);
+            bad.output.push(pay_true(0));
+            let err = from_peer(&hub, &bad, 9, on_async).expect_err("parked");
+            assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        }
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert_eq!(hub.orphan_count(), 6);
+        for _ in 0..6 {
+            if from_peer(&hub, &parent, 7, on_async).is_ok() {
+                break;
+            }
+        }
+        assert!(
+            hub.contains(&child.compute_txid()),
+            "the paying child got in"
+        );
+        assert_eq!(hub.orphan_count(), 0, "the dust spenders were dropped");
+    }
+}
+
+/// [`zero_fee_anchor`] grown to about `pad` vbytes by an OP_RETURN.
+fn padded_anchor(coin: Txid, pad: usize) -> Transaction {
+    let mut parent = zero_fee_anchor(coin);
+    let mut script = vec![0x6a];
+    script.resize(1 + pad, 0);
+    parent.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(script),
+    });
+    parent
+}
+
+/// Under fee pressure the pair's combined feerate must clear the rolling
+/// floor. A large 0-fee parent whose child pays the floor only for itself
+/// stays out in either order.
+#[test]
+fn peer_anchor_pair_pays_the_rolling_floor_as_a_package() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.lock_write().note_evicted_feerate(5_000);
+
+        let parent = padded_anchor(cbs[0], 9_000);
+        let child = spend_anchor(&parent, cbs[1], 2_000);
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert!(!hub.contains(&parent.compute_txid()), "parent first");
+
+        let parent = padded_anchor(cbs[2], 9_000);
+        let child = spend_anchor(&parent, cbs[3], 2_000);
+        assert!(from_peer(&hub, &child, 8, on_async).is_err());
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        assert!(!hub.contains(&parent.compute_txid()), "child first");
+    }
+}
+
+/// A parent that fails inside a peer pair is remembered by wtxid, so the
+/// next child of it does not verify and commit the parent again.
+#[test]
+fn failed_anchor_parent_is_not_tried_again_per_child() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        // Over the TRUC size limit, which only the commit checks.
+        let parent = padded_anchor(cbs[0], 10_100);
+        let err = from_peer(&hub, &parent, 7, on_async).expect_err("alone");
+        assert!(
+            matches!(err, AcceptError::Policy("min relay fee")),
+            "{err:?}"
+        );
+        let first = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &first, 8, on_async).is_err());
+        assert!(
+            hub.try_recent_reject(&parent.compute_wtxid()),
+            "the parent's commit failure is remembered"
+        );
+        let second = spend_anchor(&parent, cbs[1], 60_000);
+        assert!(from_peer(&hub, &second, 8, on_async).is_err());
+        assert!(
+            !hub.try_recent_reject(&package_hash(&parent, &second)),
+            "the second pair is not tried"
+        );
+    }
+}
+
+/// Free spenders of the anchor that another peer parked do not use up the
+/// parent's one try: the child its sender announced goes first.
+#[test]
+fn anchor_parent_tries_its_senders_child_first() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for on_async in [false, true] {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = zero_fee_anchor(cbs[0]);
+        for height in 1..=10 {
+            let free = Transaction {
+                lock_time: LockTime::from_height(height).unwrap(),
+                ..v3_spend(
+                    &[OutPoint::new(parent.compute_txid(), 1)],
+                    vec![pay_true(0)],
+                )
+            };
+            let err = from_peer(&hub, &free, 9, on_async).expect_err("parked");
+            assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        }
+        let child = spend_anchor(&parent, cbs[1], 50_000);
+        assert!(from_peer(&hub, &child, 7, on_async).is_err());
+        from_peer(&hub, &parent, 7, on_async).expect("the sender's child pays");
+        assert!(hub.contains(&child.compute_txid()));
+    }
+}
+
+/// A peer pair that failed is not tried again until the next block, so a
+/// re-sent child or parent does not repeat the parent's verify and commit.
+#[test]
+fn failed_peer_anchor_pair_waits_for_the_next_block() {
+    let (_store, q, cbs) = pad_cbs(12);
+    for (round, on_async) in [false, true].into_iter().enumerate() {
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = zero_fee_anchor(cbs[8 + round * 2]);
+        let child = spend_anchor(&parent, cbs[9 + round * 2], 50_000);
+        hub.prioritise_tx(child.compute_txid(), -50_000);
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        let err = from_peer(&hub, &child, 8, on_async).expect_err("child pays 0");
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        assert!(!hub.contains(&parent.compute_txid()));
+
+        hub.prioritise_tx(child.compute_txid(), 50_000);
+        assert!(from_peer(&hub, &parent, 7, on_async).is_err());
+        assert!(
+            !hub.contains(&child.compute_txid()),
+            "the failed pair is not tried again in this block"
+        );
+        hub.note_recent_confirmed(&[]);
+        from_peer(&hub, &parent, 7, on_async).expect("a new block clears it");
+        assert!(hub.contains(&child.compute_txid()));
+    }
 }
 
 #[test]

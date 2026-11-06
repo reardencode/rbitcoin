@@ -4388,6 +4388,71 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A 0-fee parent's anchor stays in only while a child spends it, so
+/// `prioritisetransaction` refuses it, as Core does.
+#[test]
+fn prioritise_refuses_a_tx_with_dust() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (_, mut parent) =
+        spend_generated_coinbase(&ctx, 1, 50_0000_0000, ScriptBuf::from_bytes(vec![0x51]));
+    parent.version = TxVersion::non_standard(3);
+    parent.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    });
+    let (_, mut child) = spend_generated_coinbase(
+        &ctx,
+        2,
+        50_0000_0000 - 50_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    child.version = TxVersion::non_standard(3);
+    child.input.push(TxIn {
+        previous_output: OutPoint::new(parent.compute_txid(), 1),
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    });
+    let hex = |tx: &Transaction| rbitcoin_primitives::hex_encode(serialize(tx));
+    let pkg = dispatch(
+        &ctx,
+        "submitpackage",
+        vec![json!([hex(&parent), hex(&child)])],
+    )
+    .unwrap();
+    assert_eq!(pkg["package_msg"], "success", "{pkg}");
+    let refused = dispatch(
+        &ctx,
+        "prioritisetransaction",
+        vec![
+            json!(parent.compute_txid().to_string()),
+            json!(0),
+            json!(1_000),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(refused["code"], ERR_INVALID_PARAMETER, "{refused}");
+    assert_eq!(
+        rpc_message(&refused),
+        "Priority is not supported for transactions with dust outputs.",
+    );
+    let child_ok = dispatch(
+        &ctx,
+        "prioritisetransaction",
+        vec![
+            json!(child.compute_txid().to_string()),
+            json!(0),
+            json!(1_000),
+        ],
+    )
+    .unwrap();
+    assert_eq!(child_ok, json!(true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn rpc_submit_nonstandard_version_is_version() {
     use bitcoin::absolute::LockTime;
@@ -4443,6 +4508,31 @@ fn rpc_submit_nonstandard_version_is_version() {
             .contains(&parent.compute_txid()),
         "parent must admit: {pkg}"
     );
+    let (_, mut v3) = spend_generated_coinbase(
+        &ctx,
+        2,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    v3.version = TxVersion::non_standard(3);
+    let v3_hex = rbitcoin_primitives::hex_encode(serialize(&v3));
+    let sent = dispatch(&ctx, "sendrawtransaction", vec![json!(v3_hex)]).unwrap();
+    assert_eq!(sent, json!(v3.compute_txid().to_string()));
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&v3.compute_txid()),
+        "version 3 must enter the mempool"
+    );
+    let mut onto_v2 = child.clone();
+    onto_v2.version = TxVersion::non_standard(3);
+    let truc = dispatch(
+        &ctx,
+        "testmempoolaccept",
+        vec![json!([rbitcoin_primitives::hex_encode(serialize(
+            &onto_v2
+        ))])],
+    )
+    .unwrap();
+    assert_eq!(truc[0]["reject-reason"], json!("TRUC-violation"), "{truc}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn one_sat_spend(prev: bitcoin::OutPoint) -> String {
@@ -8204,12 +8294,12 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     let child_out = dispatch(&ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
     assert_eq!(child_out["confirmations"], 0, "{child_out}");
 
-    let v3a = loose_tx(3, 0x31, marker_outpoint(0x31), 1);
-    let v3b = loose_tx(3, 0x32, marker_outpoint(0x32), 1);
+    let v4a = loose_tx(4, 0x31, marker_outpoint(0x31), 1);
+    let v4b = loose_tx(4, 0x32, marker_outpoint(0x32), 1);
     let versions = dispatch(
         &ctx,
         "testmempoolaccept",
-        vec![json!([serialize_hex(&v3a), serialize_hex(&v3b)])],
+        vec![json!([serialize_hex(&v4a), serialize_hex(&v4b)])],
     )
     .unwrap();
     assert_eq!(versions[0]["reject-reason"], "version", "{versions}");
@@ -8240,7 +8330,7 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
         &ctx,
         "testmempoolaccept",
         vec![
-            json!([serialize_hex(&fat), serialize_hex(&v3a)]),
+            json!([serialize_hex(&fat), serialize_hex(&v4a)]),
             json!("0.00001"),
         ],
     )

@@ -10,13 +10,20 @@
 //! min relay, **no dust limit** (1-sat OK; 0-value spendable is dust), full
 //! RBF, Libre annex.
 
-use bitcoin::{Transaction, Weight};
+use bitcoin::{Transaction, TxOut, Weight};
 
 /// Minimum relay feerate: **0.1 sat/vB** = 100 sat/kvB.
 pub const MIN_RELAY_FEE_RATE_SAT_PER_KVB: u64 = 100;
 
 /// Absolute weight cap for a single transaction (4_000_000 = block weight).
 pub const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
+
+/// BIP 431 TRUC: the `nVersion` that opts in (Core `TRUC_VERSION`).
+pub const TRUC_VERSION: i32 = 3;
+/// Largest TRUC tx, in sigop-adjusted vbytes (Core `TRUC_MAX_VSIZE`).
+pub const TRUC_MAX_VSIZE: u64 = 10_000;
+/// Largest TRUC tx with an unconfirmed parent (Core `TRUC_CHILD_MAX_VSIZE`).
+pub const TRUC_CHILD_MAX_VSIZE: u64 = 1_000;
 
 /// Result of a policy check (not consensus).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,17 +146,35 @@ pub fn is_unspendable(script: &[u8]) -> bool {
 }
 
 /// Libre has no dust *limit*; a 0-value spendable output is still dust.
-pub fn zero_value_spendable_is_dust(tx: &Transaction) -> bool {
+pub fn is_dust(out: &TxOut) -> bool {
+    out.value.to_sat() == 0 && !is_unspendable(out.script_pubkey.as_bytes())
+}
+
+/// Indexes of `tx`'s dust outputs (Core `GetDust`).
+pub fn dust_vouts(tx: &Transaction) -> impl Iterator<Item = u32> + '_ {
     tx.output
         .iter()
-        .any(|o| o.value.to_sat() == 0 && !is_unspendable(o.script_pubkey.as_bytes()))
+        .enumerate()
+        .filter(|(_, o)| is_dust(o))
+        .map(|(i, _)| i as u32)
+}
+
+/// Whether `child` spends one of `parent`'s dust outputs.
+pub fn spends_dust_of(parent: &Transaction, child: &Transaction) -> bool {
+    let txid = parent.compute_txid();
+    dust_vouts(parent).any(|vout| {
+        child
+            .input
+            .iter()
+            .any(|i| i.previous_output.txid == txid && i.previous_output.vout == vout)
+    })
 }
 
 /// Libre admission for a single tx given fee and weight (no dust limit, no template ban).
 ///
 /// Callers still enforce consensus, cluster limits, and DoS caps separately.
 pub fn check_libre_admission(tx: &Transaction, fee_sat: u64, weight: u64) -> PolicyResult {
-    check_libre_admission_at(tx, fee_sat, weight, MIN_RELAY_FEE_RATE_SAT_PER_KVB)
+    check_libre_admission_at(tx, fee_sat, 0, weight, MIN_RELAY_FEE_RATE_SAT_PER_KVB)
 }
 
 /// Libre admission with an explicit min-relay floor (Core `-minrelaytxfee`).
@@ -165,7 +190,7 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     }) {
         return PolicyResult::NonStandard("scriptpubkey");
     }
-    if zero_value_spendable_is_dust(tx) {
+    if dust_vouts(tx).nth(1).is_some() {
         return PolicyResult::NonStandard("dust");
     }
     if weight > MAX_STANDARD_TX_WEIGHT {
@@ -174,9 +199,15 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     check_libre_annex(tx)
 }
 
+/// Libre admission at an explicit min-relay floor (Core `-minrelaytxfee`).
+///
+/// `fee_delta` is the `prioritisetransaction` delta. A tx with a dust output
+/// must pay nothing, base or modified (Core `PreCheckEphemeralTx`): it enters
+/// only beside a child that spends that output and pays for both.
 pub fn check_libre_admission_at(
     tx: &Transaction,
     fee_sat: u64,
+    fee_delta: i64,
     weight: u64,
     min_relay_sat_kvb: u64,
 ) -> PolicyResult {
@@ -184,6 +215,11 @@ pub fn check_libre_admission_at(
         PolicyResult::Standard => {}
         other => return other,
     }
+    let modified = i128::from(fee_sat) + i128::from(fee_delta);
+    if (fee_sat != 0 || modified != 0) && dust_vouts(tx).next().is_some() {
+        return PolicyResult::NonStandard("dust");
+    }
+    let fee_sat = modified.max(0) as u64;
     if !meets_min_relay_fee_at(fee_sat, weight, min_relay_sat_kvb) {
         return PolicyResult::NonStandard("min relay fee");
     }
