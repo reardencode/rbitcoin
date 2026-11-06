@@ -42,6 +42,8 @@ assert_ok "only Windows lists the default session kind test" \
   test "$(grep -c 'uring_session::default_kind_follows_os' <<<"$out" || true)" = "0"
 assert_ok "dry-run lists pool session tests" \
   grep -q "uring_session::pool_" <<<"$out"
+assert_ok "only Windows lists the exclusive listen bind" \
+  grep -qx "net=" <<<"$out"
 
 out="$(CI_OS_SMOKE_DRY_RUN=1 CI_OS_SMOKE_UNAME=MINGW64_NT-10.0-20348 "$RUN")"
 assert_ok "Windows dry-run skips concurrent grow/read abort" \
@@ -58,6 +60,8 @@ assert_ok "Windows dry-run lists IOCP session tests" \
   grep -q "io_session_iocp" <<<"$out"
 assert_ok "Windows dry-run pins the IOCP default session kind" \
   grep -q "uring_session::default_kind_follows_os" <<<"$out"
+assert_ok "Windows dry-run lists the exclusive listen bind" \
+  grep -qx "net=listen::" <<<"$out"
 assert_ok "Windows dry-run pins loc SIMD (SSE2) vs scalar" \
   grep -qx "primitives=loc_simd::" <<<"$out"
 
