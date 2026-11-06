@@ -1,3 +1,0 @@
-Changed
-
-- **A malformed `RBITCOIN_*` value stops the node.** `rbitcoin-node` exits 2 with `error: configuration error: RBITCOIN_…` when `RBITCOIN_P2P_MAX_INBOUND`, `RBITCOIN_BLOCK_QUEUE_BYTES`, `RBITCOIN_BLOCK_QUEUE_GB`, `RBITCOIN_SH_FORCE_REBUILD`, `RBITCOIN_RPC_PACKAGE_DIALECT`, `RBITCOIN_RPC_WAIT_TIP_IDLE`, or `RBITCOIN_TEST_DROP_STORE` is set to a value it cannot parse. It used to ignore the value and run with the default. Flags take `1` or `true` (on) and `0` or `false` (off); an empty value is the same as unset. `RBITCOIN_P2P_MAX_INBOUND=0` now means no inbound slots, as `--max-inbound 0` does, where it used to keep the default 125.

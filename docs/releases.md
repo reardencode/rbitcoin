@@ -39,8 +39,8 @@ platform blurb + Highlights + a pointer at CHANGELOG. Thanks are part of
 Highlights. `release.yml` calls that script. Do not dump Unreleased into
 the GitHub Release.
 
-Existing line: **`v0.8.x`** (tag `v0.8.0`). Next minor from
-today’s `0.8.99` is **0.9.0**, then **`v0.9.x`**, then master **0.9.99**.
+Existing line: **`v0.9.x`** (tag `v0.9.0`). Next minor from a **0.9.99**
+tree is **0.10.0**, then **`v0.10.x`**, then master **0.10.99**.
 
 ---
 

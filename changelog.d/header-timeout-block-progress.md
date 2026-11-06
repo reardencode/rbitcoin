@@ -1,4 +1,0 @@
-Fixed
-
-- **A peer that is still delivering blocks is not dropped for a late header reply.** After repeated late header replies, initial download prefers another header peer. It keeps the connection when that peer delivered a requested block within the last 30 seconds and still has requests on the wire. Recent block traffic allows two extra header misses. Four unanswered header asks in a row still disconnect that peer, even if it is the only one. A header reply clears the miss count. The first miss does not move which peer owns the download frontier.
-- **Keeping that peer does not block the next block.** If later bodies are queued and another peer is connected, the kept peer's request for the next block no longer counts as covering that height. The request stays out, and a reply can still be used. Another eligible peer can be asked without waiting for the usual racing limit. Other downloads, header checks, body budgets, and block stalls are unchanged.
