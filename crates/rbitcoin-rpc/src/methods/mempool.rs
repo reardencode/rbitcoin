@@ -950,7 +950,7 @@ pub fn package_tx_fee_exceeds_max(
     }
 }
 
-/// RPC-submit `maxburnamount` (BTC). Omitted → 0. Sum of unspendable output values vs cap.
+/// RPC-submit `maxburnamount` (BTC). Omitted → 0.
 #[doc(hidden)]
 pub fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
     match params.get(index, "maxburnamount") {
@@ -959,18 +959,20 @@ pub fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
     }
 }
 
-#[doc(hidden)]
-pub fn unspendable_output_sat(tx: &Transaction) -> u64 {
-    tx.output
-        .iter()
-        .filter(|o| crate::blockstats::is_unspendable(o.script_pubkey.as_bytes()))
-        .map(|o| o.value.to_sat())
-        .sum()
-}
-
-#[doc(hidden)]
-pub fn burn_exceeds_max(tx: &Transaction, max_burn_sat: u64) -> bool {
-    unspendable_output_sat(tx) > max_burn_sat
+/// Core `sendrawtransaction` / `submitpackage`: any one output that is
+/// unspendable or does not parse, worth more than the cap, is
+/// `MAX_BURN_EXCEEDED` (`-25`).
+fn reject_burn_over_max(tx: &Transaction, max_burn_sat: u64) -> Result<(), Value> {
+    let over = tx.output.iter().any(|o| {
+        let spk = o.script_pubkey.as_script();
+        (crate::blockstats::is_unspendable(spk.as_bytes())
+            || !rbitcoin_consensus::wire::has_valid_ops(spk))
+            && o.value.to_sat() > max_burn_sat
+    });
+    if over {
+        return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
+    }
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -993,9 +995,7 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         .mempool
         .as_ref()
         .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
-    if burn_exceeds_max(&tx, max_burn) {
-        return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
-    }
+    reject_burn_over_max(&tx, max_burn)?;
     // Core checks burn, then CoinsTip, then version and max fee.
     reject_outputs_already_in_utxo_set(ctx, &tx)?;
     if rpc_tx_version_nonstandard(&tx) {
@@ -1032,9 +1032,7 @@ pub async fn sendrawtransaction_async(
         .mempool
         .clone()
         .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
-    if burn_exceeds_max(&tx, max_burn) {
-        return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
-    }
+    reject_burn_over_max(&tx, max_burn)?;
     let ctx_coins = Arc::clone(ctx);
     let tx_coins = tx.clone();
     rbitcoin_net::off_pool_budgeted(move || {
@@ -2247,9 +2245,7 @@ fn submitpackage_txs(
             .as_str()
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
         let tx = decode_package_tx_hex(hex)?;
-        if burn_exceeds_max(&tx, max_burn) {
-            return Err(rpc_error(ERR_VERIFY_ERROR, MAX_BURN_MSG));
-        }
+        reject_burn_over_max(&tx, max_burn)?;
         txs.push(tx);
     }
     if submitpackage_topology_disallowed(&txs, ctx.package_dialect) {

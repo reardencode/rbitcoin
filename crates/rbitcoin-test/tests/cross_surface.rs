@@ -1640,7 +1640,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         exact_cb,
         50_0000_0000,
         exact_min,
-        ScriptBuf::from_bytes(vec![0x4e]),
+        ScriptBuf::from_bytes(vec![0x5b]),
     );
     let at_min_hex = encode_tx(&at_min);
     let at_min_txid = at_min.compute_txid().to_string();
