@@ -710,6 +710,61 @@ fn truc_sibling_eviction() {
     );
 }
 
+/// A sibling eviction must pay Core's absolute replacement fee. Libre's
+/// replace-by-feerate does not apply: a smaller sibling at a higher feerate
+/// but a lower fee would cut the pool's fee (Core `PaysForRBF`).
+#[test]
+fn truc_sibling_eviction_pays_the_absolute_fee() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(500_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[op], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    // About 200 vB at 1,000 sat.
+    let first = ver_tx(
+        &[out_of(&parent, 0)],
+        3,
+        vec![pay(199_000), return_pad(130)],
+    );
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+    // About 61 vB at 600 sat: over 1.25x the feerate, less absolute fee.
+    let smaller = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(199_400)]);
+    let err = mp.accept_tx(&smaller, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
+    assert!(mp.graph.contains(&first.compute_txid()));
+}
+
+/// A package that fails puts back what it replaced. Re-admitting a lifted
+/// member afterwards must not evict that put-back child again while the
+/// caller is told the package failed.
+#[test]
+fn failed_package_putback_does_not_evict_a_sibling() {
+    let dir = tmp_dir();
+    let (ops, mut utxos) = chain_coins(&[500_000, 500_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[ops[0]], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(199_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+
+    // A paying sibling parked on a coin this node has not seen yet.
+    let late = OutPoint {
+        txid: Txid::from_byte_array([0xcd; 32]),
+        vout: 0,
+    };
+    let sibling = ver_tx(&[out_of(&parent, 1), late], 3, vec![pay(250_000)]);
+    let _ = mp.park_announced(&sibling, BTreeSet::from([late.txid]), &[]);
+    utxos.map.insert(late, coin(pay(100_000)));
+
+    // Two 0-value outputs: `dust`, after the sibling has committed.
+    let bad = ver_tx(&[ops[1]], 2, vec![pay(0), pay(0)]);
+    assert!(mp
+        .accept_package(&[sibling.clone(), bad], &utxos, TIP_OK)
+        .is_err());
+    assert!(mp.graph.contains(&first.compute_txid()));
+    assert!(!mp.graph.contains(&sibling.compute_txid()));
+}
+
 /// A single accept already met the fee floor at prepare. A floor that rises
 /// before its commit does not turn its sibling eviction into
 /// `TRUC-violation`.

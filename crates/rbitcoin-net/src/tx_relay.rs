@@ -3353,13 +3353,14 @@ impl MempoolHub {
                 .copied()
                 .find(|&peer| self.tx_from_trusted(Some(peer)))
                 .or_else(|| item.announcers.first().copied());
+            // A put-back: it does not evict a child the rollback restored.
             let _ = self.accept_with_utxo(
                 &item.tx,
                 &utxo,
                 TxOrigin::Relay(from),
                 false,
                 &item.announcers,
-                true,
+                false,
             );
             self.forget_taken_orphan(id, item.taken_gen);
         }
@@ -3424,7 +3425,7 @@ impl MempoolHub {
                     TxOrigin::Relay(from),
                     false,
                     item.announcers,
-                    true,
+                    false,
                 )
                 .await;
             let hub = Arc::clone(self);

@@ -1789,14 +1789,21 @@ impl ActiveMempool {
             let (direct_fee, direct_weight) = self
                 .graph
                 .set_fee_weight(&direct.iter().copied().collect::<BTreeSet<_>>());
-            if !rbf_allows_replacement(
-                admit_fee,
-                weight,
-                old_fee,
-                old_weight,
-                direct_fee,
-                direct_weight,
-            ) {
+            // Sibling eviction is Core's rule, so it pays Core's absolute fee
+            // (`PaysForRBF`); Libre's replace-by-feerate could lower it.
+            let pays = if sibling.is_some() {
+                rbf_pays_for_replacement(admit_fee, weight, old_fee, old_weight)
+            } else {
+                rbf_allows_replacement(
+                    admit_fee,
+                    weight,
+                    old_fee,
+                    old_weight,
+                    direct_fee,
+                    direct_weight,
+                )
+            };
+            if !pays {
                 return Err(if sibling.is_some() {
                     AcceptError::RbfInsufficientSibling
                 } else {
@@ -2139,6 +2146,8 @@ impl ActiveMempool {
                     self.rollback_accepted_package(&accepted, utxos, tip);
                     for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0, None) {
                         let id = item.tx.compute_txid();
+                        // A put-back after the failed package: it does not
+                        // evict the child the rollback just restored.
                         match self.accept_tx_with(
                             &item.tx,
                             utxos,
@@ -2146,7 +2155,7 @@ impl ActiveMempool {
                             0,
                             true,
                             None,
-                            SiblingEviction::On,
+                            SiblingEviction::Off,
                         ) {
                             Ok(r) => {
                                 // Admitted, so the lift row is not in flight.
