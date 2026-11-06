@@ -548,6 +548,7 @@ pub fn spawn_inbound_accept(
                     let our = local_addr;
                     let hub = hub.clone();
                     let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
+                    let tip_at_handshake = hub.tip_hash();
                     let tip_rx = hub.subscribe_tips();
                     let peers = peers.clone();
                     let ua = user_agent.clone();
@@ -593,6 +594,7 @@ pub fn spawn_inbound_accept(
                             peer: Some(peer_addr),
                             live: None,
                             session: Some(sess),
+                            tip_at_handshake,
                         };
                         let _ = peer_session_with(reader, writer, magic, hub, tip_rx, meta).await;
                         peers.unregister(id);
@@ -630,6 +632,9 @@ pub struct PreparedOutbound {
     pub writer: V2Writer,
     pub sess: Arc<LivePeer>,
     pub id: u64,
+    /// Tip before the outbound handshake. A block mined while dialing is
+    /// not in the receiver `run_prepared_outbound` subscribes afterwards.
+    pub tip_at_handshake: Option<bitcoin::BlockHash>,
 }
 
 /// A transient accept error should not stop the listen loop.
@@ -678,6 +683,7 @@ pub async fn prepare_outbound_session(
     typ: PeerConnType,
     dialer: crate::socks::Dialer,
 ) -> Result<PreparedOutbound, NetError> {
+    let tip_at_handshake = hub.tip_hash();
     hub.clock.note_connection_attempt();
     rbitcoin_log::debug!("{}", crate::peers::trying_connection_log(typ, &peer));
     // Until this returns, the redial pass and `addnode` treat `peer` as
@@ -757,6 +763,7 @@ pub async fn prepare_outbound_session(
         writer,
         sess,
         id,
+        tip_at_handshake,
     })
 }
 
@@ -766,6 +773,7 @@ pub async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), Net
         peer: Some(prepared.peer_hint),
         live: Some(prepared.follow_live),
         session: Some(prepared.sess),
+        tip_at_handshake: prepared.tip_at_handshake,
     };
     let out = peer_session_with(
         prepared.reader,

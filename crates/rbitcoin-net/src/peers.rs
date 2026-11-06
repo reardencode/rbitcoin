@@ -347,8 +347,11 @@ pub struct LivePeer {
     pub hb_from: AtomicBool,
     /// Session should send `sendcmpct` (`PendingSendCmpct` as u8).
     pub pending_sendcmpct: std::sync::atomic::AtomicU8,
-    /// Last header we announced to this peer.
+    /// Last header or compact block we announced to this peer.
+    /// An `inv` does not set this. The peer does not have that header yet.
     pub best_header_sent: Mutex<Option<BlockHash>>,
+    /// Tip we already offered because it moved during the handshake.
+    catchup_announced: Mutex<Option<BlockHash>>,
     /// Best connected block this peer advertised.
     pub best_known: Mutex<Option<BlockHash>>,
     /// Block hashes this peer just sent us — do not announce them back.
@@ -827,6 +830,22 @@ impl LivePeer {
             .best_header_sent
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(hash);
+    }
+
+    #[doc(hidden)]
+    pub fn note_catchup_announced(&self, hash: BlockHash) {
+        *self
+            .catchup_announced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hash);
+    }
+
+    #[doc(hidden)]
+    pub fn catchup_announced(&self) -> Option<BlockHash> {
+        *self
+            .catchup_announced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn note_best_known(&self, hash: BlockHash) {
@@ -2992,6 +3011,7 @@ impl PeerHub {
             hb_from: AtomicBool::new(false),
             pending_sendcmpct: std::sync::atomic::AtomicU8::new(0),
             best_header_sent: Mutex::new(None),
+            catchup_announced: Mutex::new(None),
             best_known: Mutex::new(None),
             recently_from: Mutex::new(HashSet::new()),
             inv_asked_headers: AtomicBool::new(false),

@@ -996,6 +996,9 @@ pub struct FollowSessionMeta {
     pub live: Option<Arc<AtomicUsize>>,
     /// RPC session row (bytes + disconnect).
     pub session: Option<Arc<crate::peers::LivePeer>>,
+    /// Tip when the handshake started. Catch-up announces only a tip that
+    /// moved after this. `None` means there was no tip yet.
+    pub tip_at_handshake: Option<BlockHash>,
 }
 
 /// Decrements the live follow counter when a session task exits.
@@ -1842,24 +1845,38 @@ pub async fn on_heartbeat(
     Ok(())
 }
 
-/// Announce the hub tip when this session has not marked it sent.
+/// Announce a tip that moved during this session's handshake.
 ///
-/// `subscribe` does not replay a tip from before the outbound task existed.
-/// That tip takes the same path as a live [`on_tip_event`]. `Ok(true)` means
-/// the broadcast is closed and the session should exit.
+/// The outbound task subscribes after the handshake returns, so a block
+/// mined in that window is not in `tip_rx`. A tip that was already in place
+/// when the handshake started is not offered: the peer asks with getheaders.
+/// `tip_at_handshake` is that earlier hash (`None` when there was no tip).
+/// `Ok(true)` means the broadcast is closed and the session should exit.
 pub async fn announce_unsent_tip(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
     follow: &mut PeerFollowState,
     session: Option<&crate::peers::LivePeer>,
+    tip_at_handshake: Option<BlockHash>,
 ) -> Result<bool, NetError> {
-    let tip = hub.tip_hash();
+    let Some(tip) = hub.tip_hash() else {
+        return Ok(false);
+    };
+    if Some(tip) == tip_at_handshake {
+        return Ok(false);
+    }
     let sent = session.and_then(|s| s.header_marks().0);
-    if tip.is_none() || sent == tip {
+    if sent == Some(tip) || session.is_some_and(|s| s.catchup_announced() == Some(tip)) {
         return Ok(false);
     }
     match current_tip_announce(hub) {
-        TipRecvAnnounce::Announce(ev) => on_tip_event(hub, out_tx, follow, session, Ok(ev)).await,
+        TipRecvAnnounce::Announce(ev) => {
+            let closed = on_tip_event(hub, out_tx, follow, session, Ok(ev)).await?;
+            if let Some(s) = session {
+                s.note_catchup_announced(tip);
+            }
+            Ok(closed)
+        }
         TipRecvAnnounce::Skip | TipRecvAnnounce::Closed => Ok(false),
     }
 }
@@ -1905,10 +1922,9 @@ pub async fn on_tip_event(
     match tip_announce_decision(hub, &ev, follow.wants_headers, sent, known, from_peer) {
         TipAnnounce::Skip => {}
         TipAnnounce::Inv(h) => {
+            // An inv is not a header the peer has. `pindexBestHeaderSent`
+            // stays unset so the next block after a long reorg is still an inv.
             queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::Block(h)]))?;
-            if let Some(s) = session {
-                s.note_best_header_sent(h);
-            }
         }
         TipAnnounce::Headers(hs) => {
             if let Some(last) = hs.last() {
@@ -2267,9 +2283,19 @@ pub async fn peer_session_with(
     // cannot pass it and the request is not dropped.
     let mut hold_front = false;
     let result = async {
-        // Catch a tip that moved before this task subscribed. Later events
-        // still arrive on `tip_rx` inside the loop.
-        if announce_unsent_tip(hub.as_ref(), &out_tx, follow, session.as_deref()).await? {
+        // Drop tips already sitting in the receiver so catch-up and the
+        // loop do not both announce them. A later block still arrives here.
+        drain_queued_tips(&mut tip_rx);
+        if hub.tip_hash() != meta.tip_at_handshake
+            && announce_unsent_tip(
+                hub.as_ref(),
+                &out_tx,
+                follow,
+                session.as_deref(),
+                meta.tip_at_handshake,
+            )
+            .await?
+        {
             return Ok(());
         }
         loop {
@@ -6338,6 +6364,11 @@ pub fn tip_is_reorg_vs_sent(
         },
     };
     hash != mark && !hub.is_header_ancestor(mark, hash)
+}
+
+/// Forget tip events already queued. Catch-up offers the current tip once.
+fn drain_queued_tips(tip_rx: &mut broadcast::Receiver<crate::chain::TipEvent>) {
+    while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = tip_rx.try_recv() {}
 }
 
 /// Map a `tip_rx.recv()` result to the tip we should announce.

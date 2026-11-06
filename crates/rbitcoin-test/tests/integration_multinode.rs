@@ -3309,13 +3309,13 @@ async fn node_run_p2p_short() {
             );
             assert_eq!(
                 rows[0]["synced_headers"].as_i64(),
-                Some(3),
-                "the seeder announces its tip when the session starts, so the inv sets best_known: {peers}"
+                Some(-1),
+                "a quiet connect announces no header hash, so synced_headers stays -1: {peers}"
             );
             assert_eq!(
                 rows[0]["synced_blocks"].as_i64(),
-                Some(3),
-                "synced_blocks follows that best_known header once the block is connected: {peers}"
+                Some(-1),
+                "synced_blocks stays -1 until that hash is on our chain: {peers}"
             );
             assert!(
                 rows[0]["servicesnames"]
