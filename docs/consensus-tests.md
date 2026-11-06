@@ -70,6 +70,10 @@ refreshing; do not check copies into `tests/fixtures/`.
 
 See `crates/rbitcoin-consensus/tests/fixtures/README.md`.
 
+The BLVM / Orange Paper register (163 ids) is a separate crosswalk:
+[`blvm-consensus-crosswalk.md`](./blvm-consensus-crosswalk.md). It does
+not own these S/H/C rows.
+
 Hornet’s published 34-rule table is a **gap checklist** against this
 matrix, not a second spec. Full ID-by-ID happy/boundary map (Hornet `main`
 `spec.h` @ `151462fa` vs spec.html):

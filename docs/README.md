@@ -48,6 +48,7 @@ into `AGENTS.md`.
 | [`experimental-mainnet.md`](./experimental-mainnet.md) | Pointer. The runbook moved to `operator/mainnet.md`. |
 | [`rpc.md`](./rpc.md) | Core-class JSON-RPC subset. |
 | [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. |
+| [`blvm-consensus-crosswalk.md`](./blvm-consensus-crosswalk.md) | BLVM register ids mapped to our code and tests. Gaps both ways stay there. |
 | [`core-functional.md`](./core-functional.md) | Core v32.1 functional harness. |
 | [`overlay-functional.md`](./overlay-functional.md) | Private Tor / i2pd / cjdns mesh harness (labeled / nightly). |
 | [`how-we-plan.md`](./how-we-plan.md) | Agent contract (cycle, Agent RAM, keep-compiling), then human rationale. |
