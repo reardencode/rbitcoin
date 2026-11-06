@@ -8,8 +8,8 @@ A consensus split on mainnet is vanishingly unlikely. The on-disk format
 and APIs can still change before **1.0** (a named refuse or wipe, not a
 silent wipe), and there is no long-term support window yet. **1.0** is
 where that window, further hardening, and signed release binaries are
-planned. In-tree is **0.8.99** (pre-0.9.0). **0.8.x** (tag 0.8.0) is the
-supported published line until 0.9. Occupied **0.6.x** stores refuse
+planned. **0.9.0** is this release. **`v0.9.x`** is the patch line.
+Occupied **0.6.x** stores refuse
 (wipe and sync again). Schema 24 and 25 open in place and rewrite to 26.
 A published 0.8 directory is already schema 26. The runbook is
 [`docs/operator/mainnet.md`](./docs/operator/mainnet.md). Day-to-day flags
@@ -23,8 +23,8 @@ point a wallet at that node unless you accept that peer. The fault list is
 
 | Version | Support |
 |---------|---------|
-| **0.8.99** (in-tree) | Untagged master toward **0.9.0**. Report against the git commit (and binary digest if you built musl static). |
-| **0.8.x** | Supported **published** line (0.8.0). Security-relevant fixes land here until **0.9** or **1.0**. No LTS. Report against the tag. |
+| **0.9.x** | Published line (0.9.0). No LTS. Report against the tag. |
+| **0.8.x** | Previous published line (0.8.0). Report against the tag. |
 | **0.7.x** | Previous published line (0.7.0). Report against the tag. |
 | **0.6.x** | Previous published line (0.6.0 / 0.6.1). Report against the tag. |
 | **0.5.x** | Previous published line (0.5.1 / 0.5.2). Report against the tag. |

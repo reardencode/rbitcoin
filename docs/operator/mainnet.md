@@ -7,9 +7,9 @@ release binaries. Operators who want those can wait. This page is the
 runbook. Day-to-day flags stay in [`OPERATOR.md`](../../OPERATOR.md). The
 on-disk format stays in [`SCHEMA.md`](../../SCHEMA.md).
 
-In-tree is **0.8.99**, toward 0.9.0. The published GitHub Release is
-**0.8.0** until 0.9 is tagged. The container image and the Linux aarch64
-binaries ship with 0.9 ([`setup.md`](setup.md)).
+This runbook matches **0.9.0**. The patch line is **`v0.9.x`**. The
+container image and the Linux aarch64 binaries ship with this release
+([`setup.md`](setup.md)).
 
 ## What you are running
 

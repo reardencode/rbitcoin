@@ -1,5 +1,0 @@
-Fixed
-
-- **`estimatesmartfee` and `estimaterawfee` read `conf_target` as Core's 32-bit integer.** `4294967297` used to be cut to 32 bits and answered as target 1. A value outside that range, or a fraction, is `-1` `JSON integer out of range`. `-1` is `-8`, the same as `0` and `1009`.
-- **Near-term fee targets no longer fall back to the minimum relay rate when every priced rate is already full.** Live arrivals above 1000 sat/vB could overfill the next blocks at every rate the flow estimator prices. A pool holding less than those blocks then quoted 0.1 sat/vB for the 1- to 5-block targets and capped every longer target at that rate. Those targets now come from block history, and there is no estimate when history has none.
-- **Electrum, Esplora, and `estimaterawfee` quotes are at least `mempoolminfee`.** `estimatesmartfee` already was. The others were floored at 0.1 sat/vB only, so a raised `-minrelaytxfee` or a full pool could make them quote a rate this node rejects. A raised floor applies on the next answer, including while the estimate table is being rebuilt.

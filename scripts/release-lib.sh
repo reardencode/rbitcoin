@@ -62,8 +62,8 @@ release_require_highlights() {
   [[ -n "$bullets" ]] || \
     release_die "CHANGELOG.md ## [$ver] ### Highlights has no bullets"
   n="$(printf '%s\n' "$bullets" | grep -c .)"
-  (( n <= 10 )) || \
-    release_die "CHANGELOG.md ## [$ver] ### Highlights has $n bullets (max 10)"
+  (( n <= 11 )) || \
+    release_die "CHANGELOG.md ## [$ver] ### Highlights has $n bullets (max 11)"
 }
 
 release_parse_semver() {

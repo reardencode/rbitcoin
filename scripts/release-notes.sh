@@ -80,7 +80,7 @@ release_thanks_sentence() {
     local login="$1"
     [[ -n "$login" ]] || return 0
     case "$login" in
-      reardencode|rearden-grok|rearden-grok\[bot\]|dependabot|dependabot\[bot\])
+      reardencode|rearden-grok|rearden-grok\[bot\]|dependabot|dependabot\[bot\]|rbitcoin-org)
         return 0
         ;;
     esac
