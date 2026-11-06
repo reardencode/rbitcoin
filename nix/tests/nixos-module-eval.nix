@@ -56,6 +56,7 @@ let
             enable = true;
             socketPath = "/run/rbitcoin/rpc.sock";
             cookieFile = "/run/rbitcoin/rpc.cookie";
+            clientVersion = 310000;
           };
           electrum = {
             enable = true;
@@ -276,6 +277,7 @@ assert defaultCfg.heavyShCreates == null;
 assert defaultCfg.storeReadBudget == null;
 assert defaultCfg.esplora.hiddenService == false;
 assert defaultCfg.esplora.maxInflight == null;
+assert defaultCfg.rpc.clientVersion == null;
 assert defaultCfg.i2p.sam == null;
 assert defaultCfg.i2p.acceptIncoming == false;
 assert defaultCfg.cjdns.reachable == false;
@@ -373,6 +375,10 @@ assert builtins.match ".*--rpc-socket /run/rbitcoin/rpc.sock.*" execStart != nul
 assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" execStart != null;
 assert builtins.match ".*--rpc-cookie-perms.*" execStart == null;
 assert builtins.match ".*--rpc-cookie-perms group.*" cookieGroupExec != null;
+assert builtins.match ".*--rpc-client-version 310000.*" execStart != null;
+assert builtins.match ".*--rpc-client-version.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
 assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" cookieGroupExec != null;
 assert builtins.elem "/run/rbitcoin" service.serviceConfig.ReadWritePaths;
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/run/rbitcoin".d.mode == "0750";

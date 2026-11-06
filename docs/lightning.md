@@ -238,10 +238,11 @@ What LND's startup check actually reads (current `chainreg/taproot_check.go`):
    `script_flags` containing `TAPROOT`; we do not emit `script_flags`, and
    the deployments key is enough for this check.
 
-`getnetworkinfo.version` is `190000`. LND's health check uses `uptime`
-when that integer is at least `150000`, which it is. Raising the integer
-toward a current Core release would advertise wallet RPC that this node
-does not have. See [`rpc.md`](./rpc.md#getnetworkinfoversion).
+`getnetworkinfo.version` defaults to `190000`. LND's health check uses
+`uptime` when that integer is at least `150000`, which it is. Raising the
+integer with `--rpc-client-version` would advertise wallet RPC that this
+node does not have, so leave the default for LND. See
+[`rpc.md`](./rpc.md#getnetworkinfoversion).
 
 LND reaches this node through btcd `rpcclient`, which string-compares
 `subversion` after trimming `/Satoshi:`. `/rbitcoin:…/` sorts below
