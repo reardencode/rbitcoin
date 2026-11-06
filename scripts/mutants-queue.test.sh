@@ -366,6 +366,148 @@ python3 "$PY" mark-cap --cursor "$tmp/cap.json" --elapsed 0 --budget 1000 --new-
 assert_ok "a consumed new cap stays consumed for the rest of the night" \
   grep -q '"new_cap_used": true' "$tmp/cap.json"
 
+cat >"$tmp/meta.json" <<'EOF'
+{
+  "packages": [
+    {
+      "name": "rbitcoin-primitives",
+      "manifest_path": "/work/crates/rbitcoin-primitives/Cargo.toml",
+      "dependencies": []
+    },
+    {
+      "name": "rbitcoin-query",
+      "manifest_path": "/work/crates/rbitcoin-query/Cargo.toml",
+      "dependencies": [
+        {"name": "rbitcoin-primitives", "kind": null}
+      ]
+    },
+    {
+      "name": "rbitcoin-mempool",
+      "manifest_path": "/work/crates/rbitcoin-mempool/Cargo.toml",
+      "dependencies": [
+        {"name": "rbitcoin-primitives", "kind": "normal"}
+      ]
+    },
+    {
+      "name": "rbitcoin-net",
+      "manifest_path": "/work/crates/rbitcoin-net/Cargo.toml",
+      "dependencies": [
+        {"name": "rbitcoin-primitives", "kind": "normal"},
+        {"name": "rbitcoin-mempool", "kind": "normal"},
+        {"name": "build-only", "kind": "build"}
+      ]
+    },
+    {
+      "name": "rbitcoin-node",
+      "manifest_path": "/work/crates/rbitcoin-node/Cargo.toml",
+      "dependencies": [
+        {"name": "rbitcoin-net", "kind": "dev"}
+      ]
+    },
+    {
+      "name": "rbitcoin-bench",
+      "manifest_path": "/work/crates/rbitcoin-bench/Cargo.toml",
+      "dependencies": [
+        {"name": "rbitcoin-net", "kind": "normal"}
+      ]
+    },
+    {
+      "name": "build-only",
+      "manifest_path": "/work/crates/build-only/Cargo.toml",
+      "dependencies": []
+    }
+  ]
+}
+EOF
+pkg="$(python3 "$PY" package-for --metadata "$tmp/meta.json" --path crates/rbitcoin-net/src/a.rs)"
+assert_ok "a source path maps to the package that owns the manifest" \
+  test "$pkg" = "rbitcoin-net"
+cone="$(python3 "$PY" dependents --metadata "$tmp/meta.json" --package rbitcoin-primitives)"
+assert_ok "the reverse cone is transitive through normal and dev deps" \
+  test "$cone" = "$(printf '%s\n' rbitcoin-mempool rbitcoin-net rbitcoin-node rbitcoin-query)"
+assert_ok "bench is not a dependent" \
+  bash -c '! printf "%s\n" "$1" | grep -q rbitcoin-bench' _ "$cone"
+assert_ok "a build-dependency does not put the depender in the cone" \
+  bash -c '! printf "%s\n" "$1" | grep -q "^build-only$" && ! printf "%s\n" "$1" | grep -q rbitcoin-net' _ \
+  "$(python3 "$PY" dependents --metadata "$tmp/meta.json" --package build-only)"
+assert_ok "a crate with no reverse deps has an empty cone" \
+  test -z "$(python3 "$PY" dependents --metadata "$tmp/meta.json" --package rbitcoin-node)"
+assert_ok "dependent timeout is five times the measured suite" \
+  test "$(python3 "$PY" dependent-timeout --seconds 16)" = 80
+assert_ok "dependent timeout floors at 60 seconds" \
+  test "$(python3 "$PY" dependent-timeout --seconds 4)" = 60
+assert_ok "dependent timeout ceilings at 1200 seconds" \
+  test "$(python3 "$PY" dependent-timeout --seconds 1000)" = 1200
+assert_fail "a non-positive measurement is not a timeout" \
+  python3 "$PY" dependent-timeout --seconds 0
+
+req='crates/rbitcoin-net/src/a.rs:1:1: replace == with != in f'
+extra='crates/rbitcoin-net/src/a.rs:9:1: delete field x in Foo'
+caught_extra='crates/rbitcoin-net/src/a.rs:8:1: delete field y in Foo'
+kept='crates/rbitcoin-net/src/a.rs:2:1: replace > with == in g'
+caught_name='crates/rbitcoin-net/src/a.rs:3:1: replace || with && in h'
+timed='crates/rbitcoin-net/src/a.rs:4:1: replace wait with () in i'
+unviable_name='crates/rbitcoin-net/src/a.rs:6:1: replace arm with () in k'
+printf '%s\n' "$req" "$kept" "$caught_name" "$timed" "$unviable_name" >"$tmp/requested.txt"
+cat >"$tmp/phase1.log" <<EOF
+MISSED   $extra in 4s build + 8s test
+MISSED   $caught_extra in 4s build + 8s test
+MISSED   $req in 6s build + 12s test
+MISSED   $kept in 6s build + 12s test
+MISSED   $caught_name in 6s build + 12s test
+MISSED   $timed in 6s build + 12s test
+MISSED   $unviable_name in 6s build + 12s test
+caught   crates/rbitcoin-net/src/a.rs:5:1: replace x with y in j in 6s build + 12s test
+TIMEOUT  crates/rbitcoin-net/src/a.rs:7:1: delete field z in Foo in 6s build + 1200s test
+EOF
+cat >"$tmp/phase2.log" <<EOF
+caught   $caught_name in 9s build + 40s test
+caught   $caught_extra in 9s build + 40s test
+TIMEOUT  $timed in 9s build + 400s test
+unviable $unviable_name in 9s build + 1s test
+MISSED   $req in 9s build + 40s test
+EOF
+python3 "$PY" reconcile-missed --phase1 "$tmp/phase1.log" --phase2 "$tmp/phase2.log" \
+  --slice "$tmp/requested.txt" >"$tmp/reconciled.txt"
+assert_ok "an unrequested struct-field miss is kept when phase 2 did not catch it" \
+  grep -q "$extra" "$tmp/reconciled.txt"
+assert_ok "a phase-2 catch of an unrequested delete is not a miss" \
+  bash -c '! grep -q "$1" "$2"' _ "$caught_extra" "$tmp/reconciled.txt"
+assert_ok "a phase-2 miss is kept" \
+  grep -q "$req" "$tmp/reconciled.txt"
+assert_ok "a requested miss that phase 2 did not run is kept" \
+  grep -q "$kept" "$tmp/reconciled.txt"
+assert_ok "a phase-2 catch is not a miss" \
+  bash -c '! grep -q "$1" "$2"' _ "$caught_name" "$tmp/reconciled.txt"
+assert_ok "a phase-2 timeout keeps the crate miss" \
+  grep -q "$timed" "$tmp/reconciled.txt"
+assert_ok "a phase-2 unviable keeps the crate miss" \
+  grep -q "$unviable_name" "$tmp/reconciled.txt"
+python3 "$PY" reconcile-missed --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
+  >"$tmp/reconciled-open.txt"
+assert_ok "with no phase-2 log every phase-1 miss is kept" \
+  test "$(grep -c . "$tmp/reconciled-open.txt")" = 7
+rerun="$(python3 "$PY" requested-misses --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt")"
+assert_ok "only requested misses are rerun, in slice order" \
+  test "$rerun" = "$(printf '%s\n' "$req" "$kept" "$caught_name" "$timed" "$unviable_name")"
+printf '%s\n' 'already-caught' >"$tmp/caught.txt"
+python3 "$PY" hide-unrequested --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
+  --caught "$tmp/caught.txt"
+assert_ok "hide keeps names already in caught.txt" \
+  grep -qx 'already-caught' "$tmp/caught.txt"
+assert_ok "hide adds the unrequested miss so iterate will skip it" \
+  grep -qx "$extra" "$tmp/caught.txt"
+assert_ok "hide adds the unrequested timeout so iterate will skip it" \
+  grep -qx 'crates/rbitcoin-net/src/a.rs:7:1: delete field z in Foo' "$tmp/caught.txt"
+assert_ok "hide does not add a requested miss" \
+  bash -c '! grep -qx "$1" "$2"' _ "$req" "$tmp/caught.txt"
+python3 "$PY" hide-unrequested --phase1 "$tmp/phase1.log" --slice "$tmp/requested.txt" \
+  --caught "$tmp/no-such-caught.txt"
+assert_ok "hide does not create a caught.txt the crate run never wrote" \
+  test ! -f "$tmp/no-such-caught.txt"
+assert_ok "outcome-count is the number of result lines" \
+  test "$(python3 "$PY" outcome-count --log "$tmp/phase2.log")" = 5
+
 NIGHTLY="$ROOT/scripts/mutants-nightly.sh"
 TOML="$ROOT/.cargo/mutants.toml"
 assert_ok "nightly list excludes rbitcoin-bench" \
@@ -406,8 +548,52 @@ assert_ok "nightly progress ignores extra outcomes" \
   grep -q 'mutants_queue.py" progress' "$NIGHTLY"
 assert_ok "same-file cursor copy is skipped" \
   grep -q -- '-ef' "$NIGHTLY"
-assert_ok "per-mutant timeout stays 20 minutes" \
-  grep -q 'MUTANTS_TIMEOUT:-1200' "$NIGHTLY"
+assert_ok "crate run and dependent run are separate cargo mutants commands" \
+  python3 -c '
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+cmds = []
+buf = []
+for line in text.splitlines():
+    if buf:
+        buf.append(line)
+        if not line.rstrip().endswith("\\"):
+            cmds.append(" ".join(part.strip().strip("\\") for part in buf))
+            buf = []
+        continue
+    if "cargo mutants" in line and "--list" not in line:
+        if line.rstrip().endswith("\\"):
+            buf = [line]
+        else:
+            cmds.append(line.strip())
+runs = [c for c in cmds if "cargo mutants" in c and "--list" not in c]
+assert len(runs) == 2, runs
+phase1, phase2 = runs
+assert "--test-package" in phase1, phase1
+assert "--baseline=skip" not in phase1, phase1
+assert "--test-workspace" not in phase1, phase1
+assert "--timeout" not in phase1, phase1
+assert "--baseline=skip" in phase2, phase2
+assert "--timeout" in phase2, phase2
+assert "--iterate" in phase2, phase2
+assert "--iterate" not in phase1, phase1
+assert "--output" in phase1 and "--output" in phase2, (phase1, phase2)
+assert "--test-workspace" not in phase2, phase2
+assert "${dep_args[@]}" in phase2, phase2
+assert "dep_args+=(--test-package" in text
+for needle in ("package-for", "dependents", "dependent-timeout", "reconcile-missed", "requested-misses", "hide-unrequested", "outcome-count"):
+    assert needle in text, needle
+no_prog = text.find("dependents made no progress")
+advance = text.find("advance-side")
+assert 0 < no_prog < advance, (no_prog, advance)
+phase2 = text.find("reconcile-missed --phase1 \"$log\" --phase2")
+assert no_prog < phase2 < advance, (no_prog, phase2, advance)
+between = text[text.find("deps_started=0"):phase2]
+assert "deps_started == 1" in between
+assert "[[ -f \"$deps_log\" ]]" not in text
+assert "--test-workspace" not in text
+assert "workspace-baseline.log" in text
+' "$NIGHTLY"
 assert_ok "one job budget is 4 hours" \
   grep -q 'MUTANTS_BUDGET_SEC:-14400' "$NIGHTLY"
 assert_ok "missed mutants do not fail the nightly script" \
