@@ -869,7 +869,7 @@ fn conf_unknown_key_is_an_error() {
 }
 
 #[test]
-fn network_names_are_recognized_and_false_is_unset() {
+fn network_names_are_recognized_and_reject_invalid() {
     for (name, expected) in [
         ("regtest", Network::Regtest),
         ("signet", Network::Signet),
@@ -883,5 +883,11 @@ fn network_names_are_recognized_and_false_is_unset() {
         let mut c = NodeConfig::default();
         assert_eq!(c.apply_kv(name, "0").unwrap(), ConfApply::Applied);
         assert_eq!(c.network, Network::Mainnet);
+
+        for bad in ["ture", "yess", "2", "-1", "maybe", "on1"] {
+            let mut c = NodeConfig::default();
+            let err = c.apply_kv(name, bad).unwrap_err().to_string();
+            assert!(err.contains(name), "name={name} bad={bad:?} err={err}");
+        }
     }
 }

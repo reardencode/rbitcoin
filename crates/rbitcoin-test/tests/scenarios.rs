@@ -49,6 +49,7 @@ fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
     for (name, body) in [
         ("minrelay-neg", "network=regtest\nmin_relay_tx_fee=-1\n"),
         ("network-nope", "network=nope\n"),
+        ("regtest-ture", "regtest=ture\n"),
     ] {
         let d = td.path().join(name);
         std::fs::create_dir_all(&d).unwrap();
