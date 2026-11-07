@@ -5516,15 +5516,17 @@ async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
         .generate_to_script(BURST, ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
     let want = na.tip_height().unwrap();
-    let mut synced = false;
-    for _ in 0..200 {
-        if nb.tip_height().unwrap_or(0) >= want {
-            synced = true;
-            break;
-        }
+    // The tip-accept lane is one per process, so the far side's connect
+    // queues behind other tests' jobs (a 10k-header reconsider holds it for
+    // over 10 s on CI).
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while nb.tip_height().unwrap_or(0) < want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "far side must sync tip before disconnect"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(synced, "far side must sync tip before disconnect");
 
     let peer_id = na
         .peers

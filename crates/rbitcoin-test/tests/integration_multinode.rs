@@ -3460,10 +3460,11 @@ async fn node_run_p2p_short() {
             let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
         });
 
-        run_p2p(cfg).await.expect("run_p2p");
-        match pin.await {
-            Ok(()) => {}
-            Err(e) => panic!("rpc pin join: {e}"),
+        // A failed pin never sends `stop`. Fail on it now, not at the wall.
+        let node = async { run_p2p(cfg).await.map_err(|e| format!("run_p2p: {e:?}")) };
+        let pin = async { pin.await.map_err(|e| format!("rpc pin join: {e}")) };
+        if let Err(e) = tokio::try_join!(node, pin) {
+            panic!("{e}");
         }
 
         let q = Query::open_or_create_tiny(node_dir.path().join("store")).unwrap();
@@ -3621,18 +3622,22 @@ async fn mocktime_generate_keeps_ponging_peer() {
             })
             .await
             .expect("join");
+            // Core's `generate` syncs before the next `setmocktime`. Here the
+            // ponging peer answers before the clock moves again. Its pong can
+            // wait seconds behind other tests' connects on the process-wide
+            // tip-accept lane; mock time must not age it past the 20 min
+            // ping timeout meanwhile.
             wait_ms_until(
-                2_000,
+                30_000,
                 || {
                     a.peers.heartbeat_laps() > laps
-                        && a.peers
-                            .snapshot()
-                            .into_iter()
-                            .any(|p| p.handshake_complete && p.subver != SILENT_AGENT)
+                        && a.peers.snapshot().into_iter().any(|p| {
+                            p.handshake_complete && p.subver != SILENT_AGENT && p.pingwait.is_none()
+                        })
                 },
                 || {
                     format!(
-                        "ponging peer dropped on mock step {i}: {:?}",
+                        "ponging peer dropped or unanswered on mock step {i}: {:?}",
                         a.peers.snapshot()
                     )
                 },

@@ -6249,6 +6249,38 @@ fn addnode_rejects_a_blank_node() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A handshaken peer keeps its row until its session returns, but
+/// getpeerinfo hides it once it is leaving. `disconnectnode` misses it too.
+#[test]
+fn disconnectnode_misses_a_peer_already_leaving() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let p = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    p.mark_handshake_complete();
+    let id = p.id;
+    ctx.peers = Some(std::sync::Arc::clone(&hub));
+
+    dispatch(&ctx, "disconnectnode", vec![Value::Null, json!(id)]).unwrap();
+    assert!(hub.get(id).is_some(), "the row waits for its session");
+    assert_eq!(dispatch(&ctx, "getpeerinfo", vec![]).unwrap(), json!([]));
+    let by_id = dispatch(&ctx, "disconnectnode", vec![Value::Null, json!(id)]).unwrap_err();
+    assert_eq!(rpc_message(&by_id), "Node not found in connected nodes");
+    let by_addr = dispatch(&ctx, "disconnectnode", vec![json!("127.0.0.1:18444")]).unwrap_err();
+    assert_eq!(rpc_message(&by_addr), "Node not found in connected nodes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn getpeerinfo_and_disconnectnode_support_onion_addr() {
     use rbitcoin_net::{PeerConnType, PeerHub};
