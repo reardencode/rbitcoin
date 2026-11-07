@@ -360,7 +360,7 @@ pub fn operator_usage() -> String {
     [--min-chain-work HEX] [--max-tip-age SECS] [--check-blocks N] [--mock-time UNIX] \\\n\
     [--block-version N] [--block-min-tx-fee BTC] [--bytes-per-sigop N] [--block-reserved-sigops N] [--alert-notify CMD] [--startup-notify CMD] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] \\\n\
-    [--no-seeds] [--no-listen] [--no-discover] [--listen-onion] [--cjdns-reachable] [--smoke] [--inhibit-suspend]\n\n\
+    [--no-seeds] [--no-listen] [--no-discover] [--discover-from-peers] [--listen-onion] [--cjdns-reachable] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|testnet4|signet|regtest.\n\
 Custom Signet: --signet-challenge HEX [--signet-block-time SECS].\n\
 Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG / RUST_LOG).\n\
@@ -390,6 +390,8 @@ Trust-peer: --trust-peer ADDR (conf trustpeer=) dials only that address, the sam
   --i2p-accept-incoming persist {{datadir}}/i2p/p2p.priv and STREAM FORWARD to the P2P bind. Needs --listen.\n\
   --listen-onion ADD_ONION the P2P port (loopback bind even with --no-listen). Needs --tor-control and --max-inbound > 0.\n\
   --cjdns-reachable treat fc00::/8 as CJDNS (dial and advertise). --only-net=cjdns requires it.\n\
+  --discover-from-peers (default off) announce the IP outbound clearnet peers report reaching us at; needs a non-loopback --listen.\n\
+  A clearnet --external-ip wins. Never sent over Tor, I2P or CJDNS. --no-discover turns it off.\n\
   --trusted / --always-relay / --relay are inbound permission knobs.\n\
   --net-permission / --net-permission-bind are CIDR or bind grants (noban, relay, …; IPv4 and IPv6).\n\
   --net-permission-bind v1,noban@127.0.0.1:PORT also takes plain v1 P2P there for a wallet indexer: own port, private address.\n\
@@ -483,6 +485,7 @@ pub fn is_bool_key(key: &str) -> bool {
             | "no_seeds"
             | "no_listen"
             | "no_discover"
+            | "discover_from_peers"
             | "listen_onion"
             | "cjdns_reachable"
             | "proxy_randomize"

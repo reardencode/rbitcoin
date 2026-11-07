@@ -245,6 +245,7 @@ let
   ++ optional (cfg.asmap != null) cfg.asmap
   ++ lib.concatMap (c: [ "--ua-comment" c ]) cfg.uaComment
   ++ optional (!cfg.p2p.discover) "--no-discover"
+  ++ optional cfg.p2p.discoverFromPeers "--discover-from-peers"
   ++ optional cfg.p2p.listenOnion "--listen-onion"
   ++ optional (cfg.coldDataDir != null) "--datadir-cold"
   ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
@@ -986,6 +987,12 @@ in
         type = types.bool;
         default = true;
         description = "Advertise local addresses to peers. Off with --no-discover.";
+      };
+
+      discoverFromPeers = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Announce the IP outbound clearnet peers report reaching us at (--discover-from-peers). Needs discover and a non-loopback p2p.address; ignored with a warning on a loopback bind.";
       };
 
       listenOnion = mkOption {

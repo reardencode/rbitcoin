@@ -445,6 +445,10 @@ pub struct LivePeer {
     pub wtxid_relay: AtomicBool,
     /// Next self-announce unix seconds (`0` = never sent).
     pub next_local_addr_send: AtomicU64,
+    /// The routable clearnet IP this outbound peer's VERSION says it reached
+    /// us at. `None` for an inbound peer: anyone can connect in and claim an
+    /// IP, and a recorded report counts as one of our own addresses.
+    pub reported_local_ip: Option<IpAddr>,
     /// VERSION timestamp (unix seconds; `0` on the connecting placeholder).
     pub version_timestamp: i64,
     /// VERSION protocol version (`0` on the connecting placeholder).
@@ -631,7 +635,7 @@ impl LivePeer {
         if self.self_announce_link(&hub) != SelfAnnounceLink::Clearnet {
             return None;
         }
-        let sock = SelfAnnounceLink::Clearnet.local_socket(&hub)?;
+        let sock = SelfAnnounceLink::Clearnet.local_socket(&hub, self.reported_local_ip)?;
         let prev = self.next_local_addr_send.load(Ordering::Relaxed);
         if prev != 0 && now < prev {
             return None;
@@ -640,7 +644,16 @@ impl LivePeer {
         self.next_local_addr_send
             .compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed)
             .ok()?;
+        self.note_if_reported(&hub, sock);
         Some(sock)
+    }
+
+    /// An announce of `sock` is going out. If it is this peer's report, it
+    /// is now one of this node's own addresses.
+    fn note_if_reported(&self, hub: &PeerHub, sock: SocketAddr) {
+        if self.reported_local_ip == Some(sock.ip()) {
+            hub.note_discovered(sock);
+        }
     }
 
     pub fn take_self_announce_msg(&self) -> Option<NetworkMessage> {
@@ -654,7 +667,7 @@ impl LivePeer {
         let link = self.self_announce_link(&hub);
         let onion = hub.p2p_onion().filter(|_| link == SelfAnnounceLink::Tor);
         let i2p = hub.p2p_i2p().filter(|_| link == SelfAnnounceLink::I2p);
-        let sock = link.local_socket(&hub);
+        let sock = link.local_socket(&hub, self.reported_local_ip);
         if onion.is_none() && i2p.is_none() && sock.is_none() {
             return None;
         }
@@ -668,6 +681,9 @@ impl LivePeer {
         self.next_local_addr_send
             .compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed)
             .ok()?;
+        if let Some(sock) = sock {
+            self.note_if_reported(&hub, sock);
+        }
         let services = crate::peer::local_service_flags(hub.is_pruned(), Some(&hub));
         let t = now as u32;
         if self.wants_addrv2() {
@@ -1821,6 +1837,13 @@ pub struct PeerHub {
     pub listen_port: AtomicU16,
     /// Core `-discover`. Off: never self-announce, even with `--external-ip`.
     pub discover: AtomicBool,
+    /// `--discover-from-peers` (default off): with no clearnet `--external-ip`,
+    /// announce the IP a clearnet peer reports reaching us at.
+    pub discover_from_peers: AtomicBool,
+    /// Peer-reported sockets this node has announced, newest last. Each
+    /// counts as its own address at that port only: a peer picks the IP it
+    /// reports, so matching by IP would let it hide another node's address.
+    discovered: Mutex<VecDeque<SocketAddr>>,
     /// Clearnet P2P bind (not onion-only loopback). Needed to gossip `--external-ip`.
     pub clearnet_listen: AtomicBool,
     pub cjdns_reachable: AtomicBool,
@@ -1911,6 +1934,10 @@ pub fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
     s
 }
 
+/// Cap on remembered peer-reported sockets (`--discover-from-peers`).
+#[doc(hidden)]
+pub const MAX_DISCOVERED_IPS: usize = 8;
+
 /// This node's own announced addresses. A peer can gossip one back into
 /// addrman or relay it in `addrv2`; neither a `getaddr` reply nor the relay
 /// fan-out passes one on, so it never crosses to a link of another network.
@@ -1918,6 +1945,7 @@ pub(crate) struct OwnAddrs {
     onions: Vec<[u8; 32]>,
     i2p: Option<crate::NetAddr>,
     ips: Vec<IpAddr>,
+    discovered: Vec<SocketAddr>,
 }
 
 impl OwnAddrs {
@@ -1927,7 +1955,10 @@ impl OwnAddrs {
             crate::NetAddr::I2p { dest, .. } => {
                 matches!(self.i2p, Some(crate::NetAddr::I2p { dest: own, .. }) if own == dest)
             }
-            crate::NetAddr::Ip(sock) => self.has_ip(sock.ip()),
+            crate::NetAddr::Ip(sock) => {
+                let canon = SocketAddr::new(sock.ip().to_canonical(), sock.port());
+                self.has_ip(sock.ip()) || self.discovered.contains(&canon)
+            }
             crate::NetAddr::Cjdns { ip, .. } => self.has_ip(IpAddr::V6(ip)),
         }
     }
@@ -1950,14 +1981,26 @@ enum SelfAnnounceLink {
 
 impl SelfAnnounceLink {
     /// The listen address this link may announce: a public IP on clearnet,
-    /// an `fc00::/8` address on CJDNS, none on an overlay.
-    fn local_socket(self, hub: &PeerHub) -> Option<SocketAddr> {
+    /// an `fc00::/8` address on CJDNS, none on an overlay. On clearnet with
+    /// no `--external-ip`, `--discover-from-peers` uses the IP the peer
+    /// reported (`reported`).
+    fn local_socket(self, hub: &PeerHub, reported: Option<IpAddr>) -> Option<SocketAddr> {
         match self {
-            Self::Clearnet => hub.advertise_local_socket_on(false),
+            Self::Clearnet => hub
+                .advertise_local_socket_on(false)
+                .or_else(|| hub.peer_reported_socket(reported?)),
             Self::Cjdns => hub.advertise_local_socket_on(true),
             Self::Tor | Self::I2p | Self::Unknown => None,
         }
     }
+}
+
+/// The address a VERSION `addr_recv` names, kept only if it is a routable
+/// clearnet IP. A CJDNS or unroutable report is never announced.
+fn reported_local_ip(receiver: &Address) -> Option<IpAddr> {
+    let ip = receiver.socket_addr().ok()?.ip().to_canonical();
+    let cjdns = matches!(ip, IpAddr::V6(v) if crate::netaddr::is_cjdns_ip(v));
+    (!cjdns && !crate::netaddr::clearnet_unroutable(ip)).then_some(ip)
 }
 
 #[doc(hidden)]
@@ -2016,6 +2059,8 @@ impl PeerHub {
             p2p_i2p: Mutex::new(None),
             listen_port: AtomicU16::new(0),
             discover: AtomicBool::new(true),
+            discover_from_peers: AtomicBool::new(false),
+            discovered: Mutex::new(VecDeque::new()),
             clearnet_listen: AtomicBool::new(true),
             cjdns_reachable: AtomicBool::new(false),
             proxies: Mutex::new(crate::socks::NetProxies::default()),
@@ -2170,6 +2215,17 @@ impl PeerHub {
         self.discover.store(on, Ordering::Relaxed);
     }
 
+    /// Off also forgets the IPs announced while it was on.
+    pub fn set_discover_from_peers(&self, on: bool) {
+        self.discover_from_peers.store(on, Ordering::Relaxed);
+        if !on {
+            self.discovered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
+    }
+
     /// `getnetworkinfo.localaddresses` rows for operator-advertised IPs.
     pub fn rpc_local_addresses(&self) -> Vec<(String, u16, i32)> {
         const LOCAL_MANUAL: i32 = 4;
@@ -2243,6 +2299,33 @@ impl PeerHub {
         Some(SocketAddr::new(ip, port))
     }
 
+    /// `ip`, as a clearnet peer reported it, at our listen port. Needs
+    /// `--discover-from-peers` and the same gates as `--external-ip`.
+    fn peer_reported_socket(&self, ip: IpAddr) -> Option<SocketAddr> {
+        if !self.discover_from_peers.load(Ordering::Relaxed)
+            || !self.discover.load(Ordering::Relaxed)
+            || !self.clearnet_listen.load(Ordering::Relaxed)
+        {
+            return None;
+        }
+        let port = self.listen_port.load(Ordering::Relaxed);
+        if port == 0 {
+            return None;
+        }
+        Some(SocketAddr::new(ip, port))
+    }
+
+    /// Remember an announced peer report as an own address.
+    fn note_discovered(&self, sock: SocketAddr) {
+        let mut seen = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains(&sock) {
+            if seen.len() == MAX_DISCOVERED_IPS {
+                seen.pop_front();
+            }
+            seen.push_back(sock);
+        }
+    }
+
     pub fn peer_timeout_secs(&self) -> u64 {
         self.peer_timeout_secs.load(Ordering::Relaxed).max(1)
     }
@@ -2307,6 +2390,13 @@ impl PeerHub {
         }
     }
 
+    /// Whether `addr` is one of this node's own addresses, which `getaddr`
+    /// and `addrv2` relay never pass on.
+    #[doc(hidden)]
+    pub fn is_own_address(&self, addr: crate::NetAddr) -> bool {
+        self.own_addrs().contains(addr)
+    }
+
     pub(crate) fn own_addrs(&self) -> OwnAddrs {
         let wallet = self
             .wallet_onions
@@ -2330,6 +2420,13 @@ impl PeerHub {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            discovered: self
+                .discovered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .copied()
+                .collect(),
         }
     }
 
@@ -3088,6 +3185,10 @@ impl PeerHub {
             wants_addrv2: AtomicBool::new(false),
             wtxid_relay: AtomicBool::new(false),
             next_local_addr_send: AtomicU64::new(0),
+            // The connecting placeholder's `receiver` is the peer's own socket.
+            reported_local_ip: (!inbound && ver.version != 0)
+                .then(|| reported_local_ip(&ver.receiver))
+                .flatten(),
             version_timestamp: ver.timestamp,
             version: ver.version,
             decode_enqueued: AtomicUsize::new(0),

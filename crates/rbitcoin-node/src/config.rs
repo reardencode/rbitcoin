@@ -113,6 +113,9 @@ pub struct ListenOpts {
     pub proxy_randomize: bool,
     /// Core `-discover` (default on). Off: no self-announce / localaddresses.
     pub discover: bool,
+    /// Announce the IP clearnet peers report reaching us at, when no
+    /// clearnet `--external-ip` is set (`--discover-from-peers`, default off).
+    pub discover_from_peers: bool,
     /// Empty = all networks. Repeatable `--only-net`.
     pub only_net: Vec<rbitcoin_net::OnlyNet>,
     /// SAM v3 TCP port (`--i2p-sam`).
@@ -149,6 +152,7 @@ impl Default for ListenOpts {
             onion: None,
             proxy_randomize: true,
             discover: true,
+            discover_from_peers: false,
             only_net: Vec::new(),
             i2p_sam: None,
             i2p_accept_incoming: false,
@@ -1360,6 +1364,10 @@ impl NodeConfig {
             }
             "no_discover" => {
                 self.listen.discover = !is_conf_true(val);
+            }
+            "discover_from_peers" => {
+                self.listen.discover_from_peers = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf discover_from_peers: {e}")))?;
             }
             "only_net" => {
                 self.listen.only_net.push(

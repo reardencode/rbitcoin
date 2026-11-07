@@ -124,6 +124,7 @@ fn operator_conf_and_argv() {
         "--proxy-randomize",
         "--no-listen",
         "--no-discover",
+        "--discover-from-peers",
         "--listen-onion",
         "--cjdns-reachable",
         "--tor-control",
