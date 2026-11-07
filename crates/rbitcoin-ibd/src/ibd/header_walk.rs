@@ -1294,6 +1294,24 @@ pub fn offer_alternate(
     Some(true)
 }
 
+/// The old match counts only while its checkpoint is still on this chain.
+/// Bytes at or below the match that remains are not the lead.
+fn recompute_witness(st: &mut IbdWorkState) {
+    let floor = st.header_walk.base_height;
+    let kept = st.header_walk.witness_height.and_then(|old| {
+        st.header_walk
+            .checkpoints
+            .iter()
+            .filter(|c| c.height <= old && c.supplied_by.is_some())
+            .map(|c| c.height)
+            .max()
+            .filter(|&h| h > floor)
+    });
+    st.header_walk.witness_height = kept;
+    let above = kept.unwrap_or(floor);
+    st.header_walk.lead_class_a.retain(|&h, _| h > above);
+}
+
 fn stamp_supplier(checkpoints: &mut [Checkpoint], peer: usize) {
     if let Some(c) = checkpoints.last_mut() {
         c.supplied_by = Some(peer);
@@ -1524,6 +1542,9 @@ pub fn extend_challenger(
         return true;
     };
     ch.checkpoints.push(checkpoint_at(&tip));
+    if let Some(peer) = peer {
+        stamp_supplier(&mut ch.checkpoints, peer);
+    }
     ch.tip = tip;
     if beat {
         promote_challenger(st, hub);
@@ -1540,6 +1561,7 @@ pub fn promote_challenger(st: &mut IbdWorkState, hub: &ChainHub) {
     st.header_walk
         .checkpoints
         .retain(|c| c.height <= ch.fork_height);
+    recompute_witness(st);
     st.header_walk.checkpoints.extend(ch.checkpoints);
     let kept = st.header_walk.tip.milestone_hash;
     let kept_prev = st.header_walk.tip.milestone_prev;
@@ -1879,6 +1901,10 @@ pub fn adopt_heavier(
     // Capture the fork's period and timestamps before the challenger is dropped.
     let mut tip = cut_back_to(st, hub, prev, fork_height);
     st.header_walk.challenger = None;
+    st.header_walk
+        .checkpoints
+        .retain(|c| c.height <= fork_height);
+    recompute_witness(st);
     let mut link = prev;
     for hdr in headers {
         if !push_header(&mut tip, hub, hdr) {

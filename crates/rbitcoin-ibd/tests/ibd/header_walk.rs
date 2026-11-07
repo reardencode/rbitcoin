@@ -6569,6 +6569,54 @@ fn a_peer_cannot_witness_checkpoints_it_supplied() {
 }
 
 #[test]
+fn a_new_header_chain_drops_the_old_match() {
+    let (_dir, hub, mut st, gen) = opened("unproven-fork-witness", true);
+    let (s2, rx2) = slot(2);
+    std::mem::forget(rx2);
+    st.slots.push(s2);
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let chain_a = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 8);
+    apply(&mut st, &hub, 0, chain_a.clone());
+    note_lane(&mut st, 2);
+    apply(&mut st, &hub, 2, chain_a);
+    let matched = st
+        .header_walk
+        .witness_height
+        .expect("a different peer matched chain A");
+    st.header_walk.lead_class_a.insert(0, 5);
+    st.header_walk.lead_class_a.insert(matched + 1, 9);
+
+    let chain_b = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 80);
+    apply(&mut st, &hub, 1, chain_b.clone());
+    assert!(
+        st.header_walk.challenger.is_some(),
+        "the same amount of work stays a challenger"
+    );
+    let more = headers_after(
+        *chain_b.last().unwrap(),
+        rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32,
+        81,
+    );
+    apply(&mut st, &hub, 1, more);
+    assert_eq!(st.header_walk.tip_height(), matched.saturating_mul(2));
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "chain B has not been matched"
+    );
+    assert_eq!(
+        unproven_confirm_limit(&st),
+        Some(UNPROVEN_LEAD_BLOCKS),
+        "the confirm cap is the confirmed tip plus the lead"
+    );
+    assert!(
+        !st.header_walk.lead_class_a.contains_key(&0),
+        "bytes at the matched height are not the lead"
+    );
+    assert_eq!(st.header_walk.lead_class_a.get(&(matched + 1)), Some(&9));
+}
+
+#[test]
 fn confirm_follows_the_matched_height_plus_the_lead() {
     use rbitcoin_ibd::ibd::body::BodyPresence;
     use rbitcoin_ibd::ibd::confirm::{offer_confirm_ready, ConfirmFeed};
