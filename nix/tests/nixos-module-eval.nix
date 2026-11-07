@@ -298,20 +298,7 @@ let
   sv2KeyNotInStore = "services.rbitcoin.sv2.tp.authoritySecretFile must not be a store path (the store is world-readable)";
   failedAssertions =
     sys: map (a: a.message) (builtins.filter (a: !a.assertion) sys.config.assertions);
-  execOf =
-    opts:
-    (nixpkgs.lib.nixosSystem {
-      inherit (pkgs.stdenv.hostPlatform) system;
-      modules = [
-        module
-        {
-          services.rbitcoin = {
-            enable = true;
-            package = fakePackage;
-          } // opts;
-        }
-      ];
-    }).config.systemd.services.rbitcoin.serviceConfig.ExecStart;
+  execOf = opts: (moduleOnly opts).config.systemd.services.rbitcoin.serviceConfig.ExecStart;
   spExec = execOf {
     silentPaymentIndex = true;
     spTweaksDust = 546;
@@ -479,18 +466,79 @@ let
       }
     ];
   };
-  badSystem = opts: nixpkgs.lib.nixosSystem {
-    inherit (pkgs.stdenv.hostPlatform) system;
-    modules = [
-      module
-      {
-        services.rbitcoin = {
-          enable = true;
-          package = fakePackage;
-        } // opts;
-      }
-    ];
-  };
+  # Options this module writes. Assertion and argv cases do not need the
+  # rest of NixOS; one nixosSystem per case re-merged the whole distribution
+  # and ran past the CI eval cap.
+  hostOptions =
+    { lib, ... }:
+    {
+      options = {
+        assertions = lib.mkOption {
+          type = lib.types.listOf lib.types.attrs;
+          default = [ ];
+        };
+        environment.systemPackages = lib.mkOption {
+          type = lib.types.listOf lib.types.package;
+          default = [ ];
+        };
+        ids.gids.tor = lib.mkOption {
+          type = lib.types.int;
+          default = 0;
+        };
+        networking.firewall.allowedTCPPorts = lib.mkOption {
+          type = lib.types.listOf lib.types.int;
+          default = [ ];
+        };
+        services.prometheus.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+        };
+        services.prometheus.scrapeConfigs = lib.mkOption {
+          type = lib.types.listOf lib.types.attrs;
+          default = [ ];
+        };
+        services.tor.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+        };
+        services.tor.settings = lib.mkOption {
+          type = lib.types.attrs;
+          default = { };
+        };
+        systemd.services = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        systemd.tmpfiles.settings = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        users.groups = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        users.users = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+      };
+    };
+  moduleOnly =
+    opts:
+    nixpkgs.lib.evalModules {
+      modules = [
+        module
+        hostOptions
+        {
+          _module.args.pkgs = pkgs;
+          services.rbitcoin = {
+            enable = true;
+            package = fakePackage;
+          } // opts;
+        }
+      ];
+    };
+  badSystem = moduleOnly;
 in
 assert defaultCfg.package == expectedPackage;
 assert defaultCfg.network == "mainnet";
