@@ -1157,9 +1157,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         .await,
     );
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), electrum_handles.first()) {
-        if let Some(hs) = shutdown
-            .or_fail(add_wallet_onion(&shutdown, &config, ctl, WalletListener::Electrum, h.local_addr).await)
-        {
+        if let Some(hs) = shutdown.or_fail(
+            add_wallet_onion(
+                &shutdown,
+                &config,
+                ctl,
+                WalletListener::Electrum,
+                h.local_addr,
+            )
+            .await,
+        ) {
             info!(
                 "electrum onion {}.onion:{}",
                 hs.service_id,
@@ -1189,9 +1196,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         .await,
     );
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
-        if let Some(hs) = shutdown
-            .or_fail(add_wallet_onion(&shutdown, &config, ctl, WalletListener::Esplora, h.local_addr).await)
-        {
+        if let Some(hs) = shutdown.or_fail(
+            add_wallet_onion(
+                &shutdown,
+                &config,
+                ctl,
+                WalletListener::Esplora,
+                h.local_addr,
+            )
+            .await,
+        ) {
             info!(
                 "esplora onion http://{}.onion:{} (/ws same port)",
                 hs.service_id,
@@ -1319,8 +1333,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     );
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         if let Some(hs) = shutdown.or_fail(
-                            add_wallet_onion(&shutdown, &config, ctl, WalletListener::Electrum, h.local_addr)
-                                .await,
+                            add_wallet_onion(
+                                &shutdown,
+                                &config,
+                                ctl,
+                                WalletListener::Electrum,
+                                h.local_addr,
+                            )
+                            .await,
                         ) {
                             info!(
                                 "electrum onion {}.onion:{}",
@@ -1375,8 +1395,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     );
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         if let Some(hs) = shutdown.or_fail(
-                            add_wallet_onion(&shutdown, &config, ctl, WalletListener::Esplora, h.local_addr)
-                                .await,
+                            add_wallet_onion(
+                                &shutdown,
+                                &config,
+                                ctl,
+                                WalletListener::Esplora,
+                                h.local_addr,
+                            )
+                            .await,
                         ) {
                             info!(
                                 "esplora onion http://{}.onion:{} (/ws same port)",
