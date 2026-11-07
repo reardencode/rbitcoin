@@ -2869,3 +2869,232 @@ fn stopped_parent_check_is_off_tip() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn accepted_wire_share_assigns_the_remainder_to_the_last_block() {
+    use rbitcoin_ibd::ibd::confirm::accepted_wire_share;
+    let shares: Vec<u64> = (0..3).map(|i| accepted_wire_share(1_000, 3, i)).collect();
+    assert_eq!(shares, vec![333, 333, 334]);
+    assert_eq!(shares.iter().sum::<u64>(), 1_000);
+    assert_eq!(accepted_wire_share(5, 1, 0), 5);
+}
+
+/// The confirm engine, not the offer list, is what spends the lead.
+struct LeadEngine {
+    dir: rbitcoin_query::testutil::TempDir,
+    hub: Arc<rbitcoin_net::chain::ChainHub>,
+    feed: Arc<ConfirmFeed>,
+    engine: std::thread::JoinHandle<()>,
+    wires: Vec<u64>,
+    rx: std::sync::mpsc::Receiver<rbitcoin_ibd::ibd::confirm::ConfirmEvent>,
+}
+
+fn engine_with_blocks(
+    label: &str,
+    n: u32,
+    bounds: impl FnOnce(&[u64]) -> (Option<u32>, u32, Option<u64>),
+) -> LeadEngine {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_ibd::ibd::confirm::spawn_confirm_engine;
+    use rbitcoin_ibd::ibd::status::LoopStats;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::mpsc;
+
+    let (dir, hub0) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
+    hub0.query.enter_direct_index_mode().unwrap();
+    let hub = Arc::new(hub0);
+    hub.ensure_genesis().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let mut prev = hub.tip_hash().unwrap();
+    let mut prev_time = time;
+    let mut wires = Vec::new();
+    for i in 1..=n {
+        let block = mine_empty_regtest(prev, prev_time + 600, i);
+        hub.ensure_header(&block.header).unwrap();
+        let wire = serialize(&block);
+        hub.query
+            .block_queue_enqueue(i, block.block_hash().to_byte_array(), 1, &wire)
+            .unwrap();
+        wires.push(wire.len() as u64);
+        prev = block.block_hash();
+        prev_time = block.header.time;
+    }
+    let feed = Arc::new(ConfirmFeed::new());
+    let bounds = bounds(&wires);
+    feed.set_unproven_bounds(bounds.0, bounds.1, bounds.2);
+    // One block per write, so a merged extra cannot hide a missing first part.
+    feed.request_single_block(u32::MAX - 1);
+    let (tx, rx) = mpsc::channel();
+    let (engine, _queues) = spawn_confirm_engine(
+        Arc::clone(&hub),
+        Arc::clone(&feed),
+        tx,
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(LoopStats::default()),
+    );
+    LeadEngine {
+        dir,
+        hub,
+        feed,
+        engine,
+        wires,
+        rx,
+    }
+}
+
+fn stop_confirm_engine(feed: &ConfirmFeed, engine: std::thread::JoinHandle<()>) {
+    feed.request_stop();
+    feed.notify();
+    let _ = engine.join();
+}
+
+fn tip_within(
+    hub: &rbitcoin_net::chain::ChainHub,
+    want: impl Fn(Option<u32>) -> bool,
+    for_: std::time::Duration,
+) -> Option<u32> {
+    let deadline = std::time::Instant::now() + for_;
+    loop {
+        let tip = hub.tip_height();
+        if want(tip) || std::time::Instant::now() >= deadline {
+            return tip;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn confirm_engine_stops_when_the_lead_is_exhausted() {
+    let LeadEngine {
+        dir,
+        hub,
+        feed,
+        engine,
+        ..
+    } = engine_with_blocks("lead-engine-height", 1, |_| (Some(0), 0, Some(u64::MAX)));
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 1),
+        std::time::Duration::from_secs(3),
+    );
+    stop_confirm_engine(&feed, engine);
+    assert_eq!(
+        tip,
+        Some(0),
+        "a zero height cap does not confirm the next block"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+#[test]
+fn confirm_engine_spends_the_byte_lead_once() {
+    let LeadEngine {
+        dir,
+        hub,
+        feed,
+        engine,
+        ..
+    } = engine_with_blocks("lead-engine-bytes", 2, |wires| {
+        (Some(10_000), 0, Some(wires[0]))
+    });
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 1),
+        std::time::Duration::from_secs(8),
+    );
+    assert_eq!(tip, Some(1), "the first block fits in the byte lead");
+    // The IBD loop refreshes from accepted bytes. Those are still the full
+    // budget here, and the match has not moved.
+    feed.set_unproven_bounds(Some(10_000), 0, Some(1024 * 1024 * 1024));
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 2),
+        std::time::Duration::from_secs(2),
+    );
+    stop_confirm_engine(&feed, engine);
+    assert_eq!(
+        tip,
+        Some(1),
+        "a refresh does not confirm the next block on the same lead"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+#[test]
+fn a_solo_confirm_counts_its_wire_toward_the_lead() {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_ibd::ibd::header_walk::{
+        note_unproven_class_a, unproven_offer_bounds, UNPROVEN_LEAD_BYTES,
+    };
+    use rbitcoin_ibd::ibd::state::IbdWorkState;
+
+    let LeadEngine {
+        dir,
+        hub,
+        feed,
+        engine,
+        wires,
+        rx,
+    } = engine_with_blocks("lead-solo-wire", 1, |_| (None, 0, None));
+    let first = next_accepted(&rx);
+    assert_eq!(
+        first.1, wires[0],
+        "a block written by itself reports its wire size"
+    );
+    let prev = hub.tip_hash().unwrap();
+    let prev_time = hub.header_of(&prev).unwrap().time;
+    let block = mine_empty_regtest(prev, prev_time + 600, 2);
+    hub.ensure_header(&block.header).unwrap();
+    let wire = serialize(&block);
+    hub.query
+        .block_queue_enqueue(2, block.block_hash().to_byte_array(), 1, &wire)
+        .unwrap();
+    feed.notify();
+    let second = next_accepted(&rx);
+    assert_eq!(
+        second.1,
+        wire.len() as u64,
+        "the next block, written by itself, reports its wire size"
+    );
+    stop_confirm_engine(&feed, engine);
+
+    let mut st = IbdWorkState::new(Vec::new(), Some(first.0), Some(0));
+    st.header_walk.origin = true;
+    note_unproven_class_a(&mut st, 1, first.1);
+    note_unproven_class_a(&mut st, 2, second.1);
+    st.header_walk.witness_height = Some(1);
+    assert_eq!(
+        unproven_offer_bounds(&st).bytes_left,
+        Some(UNPROVEN_LEAD_BYTES - second.1),
+        "a later match keeps the bytes of a block that is still above it"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+fn next_accepted(
+    rx: &std::sync::mpsc::Receiver<rbitcoin_ibd::ibd::confirm::ConfirmEvent>,
+) -> (bitcoin::BlockHash, u64) {
+    use rbitcoin_ibd::ibd::confirm::ConfirmEvent;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(ConfirmEvent::Accepted { hash, wire_bytes }) => return (hash, wire_bytes),
+            Ok(ConfirmEvent::Reject { height, err, .. }) => {
+                panic!("confirm reject @{height}: {err}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for an accepted block"
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("confirm engine exited before an accepted block")
+            }
+        }
+    }
+}

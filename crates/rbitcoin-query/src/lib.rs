@@ -2062,6 +2062,11 @@ impl Query {
         self.block_queue.lock().unwrap().has_hash(hash)
     }
 
+    /// Wire length queued at `height`. `None` when that height is not on the queue.
+    pub fn block_queue_payload_len(&self, height: u32) -> Option<u64> {
+        self.block_queue.lock().unwrap().payload_len_at(height)
+    }
+
     /// True if the in-RAM body queue holds `height`.
     pub fn block_queue_has_height(&self, height: u32) -> bool {
         self.block_queue.lock().unwrap().contains_height(height)

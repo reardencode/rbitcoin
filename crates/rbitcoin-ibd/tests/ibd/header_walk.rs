@@ -544,9 +544,10 @@ fn full_queue_checkpoints_lookahead_and_refill_stores_the_successor() {
     apply(&mut st, &hub, 0, vec![good]);
     assert_eq!(
         hub.query.store().header_count(),
-        before + 1,
-        "an accepted batch is written even when the queue is full"
+        before,
+        "a checkpoint past the confirm window is not a header row"
     );
+    assert!(!st.ordered_set.contains(&good.block_hash()));
     assert_eq!(st.ordered.len(), ORDERED_HEADERS_SOFT_CAP);
     assert_eq!(st.header_walk.checkpoints().len(), 1);
     assert_eq!(st.header_walk.tip_hash(), Some(good.block_hash()));
@@ -582,9 +583,6 @@ fn a_taller_peer_that_cannot_extend_the_candidate_leaves_the_walk() {
     let (mut tall, mut rx) = slot(0);
     tall.peer_height = 100_000;
     let mut st = IbdWorkState::new(vec![tall], Some(gen), Some(0));
-    // A full queue still asks while a peer is ahead and the next header
-    // is not indexed.
-    fill_queue(&mut st);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     let _ = rx.try_recv();
     apply(&mut st, &hub, 0, vec![good]);
@@ -683,6 +681,10 @@ fn a_false_peer_height_does_not_hold_ibd_at_the_tip() {
     let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
     hub.generate_to_script(2, op_true.clone(), vec![]).unwrap();
     let time = hub.tip_header().unwrap().time + 1;
+    // The stored tip is stamped at the test clock. The length cap is that
+    // age times six headers, so a same-second walk cannot extend it.
+    let _clock = ResetClock;
+    set_walk_unix_for_test(Some(u64::from(time) + 10_000));
     let third = rbitcoin_consensus::mine_regtest_paying(
         hub.tip_hash().unwrap(),
         time,
@@ -898,6 +900,10 @@ fn block_inv_writes_the_next_header_from_the_stored_tip() {
     let tip = hub.tip_height().unwrap();
     let tip_hash = hub.tip_hash().unwrap();
     let time = hub.tip_header().unwrap().time + 1;
+    // The stored tip is stamped at the test clock. The length cap is that
+    // age times six headers, so a same-second walk cannot extend it.
+    let _clock = ResetClock;
+    set_walk_unix_for_test(Some(u64::from(time) + 10_000));
     let next = rbitcoin_consensus::mine_regtest_paying(tip_hash, time, 3, op_true, vec![]);
     let (mut liar, mut liar_rx) = slot(0);
     liar.peer_height = 100_000;
@@ -1268,12 +1274,12 @@ fn walk_ahead_of_a_short_queue(
         rxs.push(rx);
     }
     let mut st = IbdWorkState::new(slots, Some(gen), Some(0));
-    fill_queue(&mut st);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     for rx in &mut rxs {
         let _ = rx.try_recv();
     }
     apply(&mut st, &hub, 0, vec![first]);
+    fill_to_cap(&mut st);
     shrink_queue(&mut st, keep);
     let tail = st.ordered.back().copied().unwrap();
     st.hash_height.insert(tail, 0);
@@ -1348,6 +1354,8 @@ fn caught_up_walk_reply_is_stored() {
     let (slot0, mut rx) = slot(0);
     let mut st = IbdWorkState::new(vec![slot0], Some(gen), Some(0));
     fill_queue(&mut st);
+    let dropped = st.ordered.pop_front().unwrap();
+    st.ordered_set.remove(&dropped);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     let _ = rx.try_recv();
     apply(&mut st, &hub, 0, vec![first]);
@@ -1413,11 +1421,10 @@ fn short_chain_rewinds_and_the_next_peer_is_followed() {
         }),
     };
     let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let b1 = mine(gen, 11);
-    let b2 = mine(b1.block_hash(), 12);
-    let b3 = mine(b2.block_hash(), 13);
     let (s0, _rx0) = slot(0);
     let (s1, _rx1) = slot(1);
     let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
@@ -1426,49 +1433,33 @@ fn short_chain_rewinds_and_the_next_peer_is_followed() {
 
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![a1, a2]);
-    assert_eq!(hub.query.store().header_count(), before + 2);
-    log_status(&mut st, &hub, 50_000);
+    assert_eq!(hub.query.store().header_count(), before);
     assert!(!st.header_walk.proven, "work is still below the floor");
-    assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
-    plant_on_queue(&mut st, a1.block_hash(), 1);
-    plant_on_queue(&mut st, a2.block_hash(), 2);
-
-    apply(&mut st, &hub, 0, vec![]);
-    assert_eq!(
-        st.header_walk.tip_hash(),
-        Some(a2.block_hash()),
-        "one peer's empty does not abandon the candidate"
-    );
-    apply(&mut st, &hub, 1, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
-    log_status(&mut st, &hub, 50_000);
-    assert!(!st.header_walk.announced_done);
-    assert!(!st.ordered_set.contains(&a1.block_hash()));
-    assert!(!st.ordered_set.contains(&a2.block_hash()));
-    assert!(hub
-        .query
-        .get_header_by_hash(a1.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
-    assert!(hub
-        .query
-        .get_header_by_hash(a2.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
+    assert!(st.header_walk.walk_quiet.contains(&0));
 
-    while st.ordered.len() > 10 {
-        let dropped = st.ordered.pop_front().unwrap();
-        st.ordered_set.remove(&dropped);
-    }
-    apply(&mut st, &hub, 1, vec![b1, b2, b3]);
-    assert_eq!(st.header_walk.tip_hash(), Some(b3.block_hash()));
-    assert!(st.ordered_set.contains(&b3.block_hash()));
-    assert!(hub
-        .query
-        .get_header_by_hash(a2.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
-    assert_eq!(hub.query.store().header_count(), before + 5);
+    st.header_walk.walk_quiet.clear();
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 10);
+    let tip = full.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, full);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert_eq!(hub.query.store().header_count(), before);
+
+    apply(&mut st, &hub, 1, vec![b1]);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert!(st.header_walk.challenger.is_none());
+
+    st.header_walk.tip.work = Work::from_be_bytes([0; 32]);
+    st.header_walk.walk_quiet.remove(&1);
+    let other = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 40);
+    let other_tip = other.last().unwrap().block_hash();
+    apply(&mut st, &hub, 1, other);
+    assert_eq!(st.header_walk.tip_hash(), Some(other_tip));
+    assert!(
+        hub.query.store().header_count() > before,
+        "adopting the heavier window clears the queue, so those headers are stored"
+    );
 }
 
 fn skips(hub: &ChainHub, height: u32, hash: &[u8; 32]) -> bool {
@@ -1515,14 +1506,11 @@ fn milestone_checkpoint_opens_script_skip_without_the_lookahead_headers() {
 
     assert_eq!(
         hub.query.store().header_count(),
-        after_queue + 2,
-        "an accepted batch is written"
+        after_queue,
+        "an at-cap look-ahead is a checkpoint, not a header row"
     );
-    assert!(hub
-        .query
-        .get_header_by_hash(h2.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
+    assert_eq!(st.header_walk.checkpoints().len(), 1);
+    assert_eq!(st.header_walk.tip_hash(), Some(h3.block_hash()));
     assert!(st.ordered_set.contains(&h1.block_hash()));
     assert!(
         skips(&hub, 1, h1.block_hash().as_byte_array()),
@@ -1588,11 +1576,13 @@ fn heavier_chain_replaces_checkpoints_and_a_cheap_fork_is_not_stored() {
         .get_header_by_hash(less.block_hash().as_byte_array())
         .unwrap()
         .is_none());
-    assert!(hub
-        .query
-        .get_header_by_hash(a2.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
+    assert!(
+        hub.query
+            .get_header_by_hash(a2.block_hash().as_byte_array())
+            .unwrap()
+            .is_none(),
+        "an at-cap look-ahead is a checkpoint, not a header row"
+    );
 }
 
 #[test]
@@ -1862,6 +1852,41 @@ fn a_confirmed_tip_on_another_branch_keeps_the_candidate_anchor() {
     assert_eq!(st.header_walk.tip_hash(), Some(branch_tip));
 }
 
+fn confirmed_base_keeps_adopt_across_rewind(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    kept: BlockHash,
+) {
+    assert!(restore_adopt(st, hub));
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the saved base is the confirmed tip, not the stored queue"
+    );
+    let path = hub.query.store().path().join("header.adopt");
+    assert_eq!(
+        hub.best_header_height(),
+        3,
+        "the look-ahead report still names the checkpoint tip"
+    );
+    // Restore does not mark the walk proved. The live walk was, and that is
+    // what writes the milestone drop.
+    st.header_walk.proven = true;
+    on_confirmed_rewind(st, hub, 0);
+    assert!(
+        path.exists(),
+        "a rewind to the confirmed base keeps header.adopt"
+    );
+    hub.query.clear_milestone_path_above(0);
+    assert!(!skips(hub, 1, kept.as_byte_array()));
+    st.header_walk = HeaderWalk::default();
+    assert!(restore_adopt(st, hub));
+    assert!(
+        st.header_walk.milestone_hash().is_none(),
+        "the rewind dropped the milestone, so the restored walk does not skip"
+    );
+    assert!(!skips(hub, 1, kept.as_byte_array()));
+}
+
 #[test]
 fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-6");
@@ -1886,11 +1911,13 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![h2, h3]);
     assert!(skips(&hub, 1, h1.block_hash().as_byte_array()));
-    assert!(hub
-        .query
-        .get_header_by_hash(h2.block_hash().as_byte_array())
-        .unwrap()
-        .is_some());
+    assert!(
+        hub.query
+            .get_header_by_hash(h2.block_hash().as_byte_array())
+            .unwrap()
+            .is_none(),
+        "an at-cap look-ahead is a checkpoint, not a header row"
+    );
 
     st.header_walk = HeaderWalk::default();
     hub.query.clear_milestone_path_above(0);
@@ -1918,18 +1945,7 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     assert!(!skips(&hub, 1, h1.block_hash().as_byte_array()));
 
     st.height_to_hash.remove(&base_h);
-    assert!(restore_adopt(&mut st, &hub));
-    assert!(st.header_walk.base_height > 0);
-    let path = hub.query.store().path().join("header.adopt");
-    assert_eq!(hub.best_header_height(), 3);
-    on_confirmed_rewind(&mut st, &hub, 0);
-    assert!(
-        !path.exists(),
-        "a reorg under the base deletes header.adopt"
-    );
-    hub.query.clear_milestone_path_above(0);
-    assert!(!skips(&hub, 1, h1.block_hash().as_byte_array()));
-    assert!(!restore_adopt(&mut st, &hub));
+    confirmed_base_keeps_adopt_across_rewind(&mut st, &hub, h1.block_hash());
 
     st.header_walk = HeaderWalk::default();
     hub.query.clear_milestone_path_above(0);
@@ -3122,15 +3138,20 @@ fn a_heavier_header_chain_keeps_its_context() {
             let base_height = hub.tip_height().unwrap();
             let base_hash = hub.tip_hash().unwrap();
             let base_header = hub.tip_header().unwrap();
-            floor_unreachable(&mut hub);
             let (s0, _rx0) = slot(0);
             let mut st = IbdWorkState::new(vec![s0], Some(base_hash), Some(base_height));
             fill_queue(&mut st);
             let first = mine_at(base_hash, 50, base_header.time + 1);
             let second = mine_at(first.block_hash(), 51, base_header.time + 2);
+            // The confirmed tip is stamped at the test clock, so the walk's
+            // header-rate cap is zero unless the clock moves ahead of it.
+            let _clock = ResetClock;
+            set_walk_unix_for_test(Some(u64::from(base_header.time) + 10_000));
 
+            set_min_work(&mut hub, [0; 32]);
             assert!(send_getheaders(&mut st, &hub).unwrap());
             apply(&mut st, &hub, 0, vec![first, second]);
+            set_min_work(&mut hub, [0xff; 32]);
             apply(&mut st, &hub, 0, vec![]);
             assert_eq!(st.header_walk.tip_hash(), Some(base_hash));
             assert_eq!(st.header_walk.tip_height(), base_height);
@@ -3143,6 +3164,7 @@ fn a_heavier_header_chain_keeps_its_context() {
                 "an empty rewind keeps the confirmed chain's work"
             );
 
+            set_min_work(&mut hub, [0; 32]);
             assert!(send_getheaders(&mut st, &hub).unwrap());
             apply(&mut st, &hub, 0, vec![first, second]);
             assert_eq!(st.header_walk.tip_hash(), Some(second.block_hash()));
@@ -3170,7 +3192,6 @@ fn a_heavier_header_chain_keeps_its_context() {
         {
             let gen_hash = hub.tip_hash().unwrap();
             let genesis = hub.header_of(&gen_hash).unwrap();
-            floor_unreachable(&mut hub);
             let (s0, _rx0) = slot(0);
             let mut st = IbdWorkState::new(vec![s0], Some(gen_hash), Some(0));
             fill_queue(&mut st);
@@ -3206,7 +3227,6 @@ fn a_heavier_header_chain_keeps_its_context() {
             // The gap fork replaces the candidate, so this rewind keeps its own checkpoints.
             let gen_hash = hub.tip_hash().unwrap();
             let genesis = hub.header_of(&gen_hash).unwrap();
-            floor_unreachable(&mut hub);
             let (s0, _rx0) = slot(0);
             let mut st = IbdWorkState::new(vec![s0], Some(gen_hash), Some(0));
             fill_queue(&mut st);
@@ -3228,11 +3248,12 @@ fn a_heavier_header_chain_keeps_its_context() {
             assert!(st.slots[0].alive);
             assert_eq!(st.header_walk.tip_height(), 46);
 
+            set_min_work(&mut hub, [0xff; 32]);
             apply(&mut st, &hub, 0, vec![]);
             assert_eq!(
                 st.header_walk.tip_height(),
                 36,
-                "an empty reply below the floor steps back one checkpoint"
+                "an empty reply steps back one checkpoint"
             );
             let checkpoint = st.header_walk.checkpoints.last().unwrap();
             assert_eq!(
@@ -3248,6 +3269,7 @@ fn a_heavier_header_chain_keeps_its_context() {
             );
             let next = extend_chain(&hub, &genesis, &chain[..36], 20, 3);
             let tip = next.last().unwrap().block_hash();
+            set_min_work(&mut hub, [0; 32]);
             assert!(send_getheaders(&mut st, &hub).unwrap());
             apply(&mut st, &hub, 0, next);
             assert!(
@@ -3271,7 +3293,6 @@ fn a_heavier_header_chain_keeps_its_context() {
             let genesis = hub.header_of(&gen).unwrap();
             let main = extend_chain(&hub, &genesis, &[], 22, 1);
             let side = extend_chain(&hub, &genesis, &main[..20], 21, 2);
-            floor_unreachable(&mut hub);
             hub.milestone.height = 41;
             let (first, mut first_rx) = slot(0);
             let (second, mut second_rx) = slot(1);
@@ -3300,11 +3321,14 @@ fn a_heavier_header_chain_keeps_its_context() {
             );
             assert!(send_getheaders(&mut st, &hub).unwrap());
             assert_eq!(drain_getheaders(&mut second_rx), 1);
-            apply(&mut st, &hub, 1, vec![side[0]]);
+            apply(&mut st, &hub, 1, side[..2].to_vec());
             assert_eq!(st.header_walk.tip_hash(), Some(main[21].block_hash()));
-            assert!(st.header_walk.challenger.is_some());
+            assert!(
+                st.header_walk.challenger.is_some(),
+                "a fork that misses the checkpoint is a challenger until it has more work"
+            );
 
-            apply(&mut st, &hub, 1, side[1..].to_vec());
+            apply(&mut st, &hub, 1, side[2..].to_vec());
             assert_eq!(st.header_walk.tip_height(), 41);
             assert_eq!(st.header_walk.tip_hash(), Some(side[20].block_hash()));
             assert!(st.header_walk.challenger.is_none());
@@ -3470,15 +3494,27 @@ fn push_dummy(st: &mut IbdWorkState, n: u32) {
     st.ordered_set.insert(h);
 }
 
-/// The work floor is above anything a regtest header can reach.
+/// An anchor with no work floor, so a short header batch still extends.
 fn floor_unreachable(hub: &mut ChainHub) {
     hub.milestone = rbitcoin_consensus::Milestone {
         height: 840_000,
         anchor: Some(rbitcoin_consensus::MilestoneAnchor {
             hash: BlockHash::from_byte_array([0xab; 32]),
-            min_work_be: [0xff; 32],
+            min_work_be: [0; 32],
         }),
     };
+}
+
+fn set_min_work(hub: &mut ChainHub, min_work_be: [u8; 32]) {
+    match &mut hub.milestone.anchor {
+        Some(anchor) => anchor.min_work_be = min_work_be,
+        None => {
+            hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
+                hash: BlockHash::from_byte_array([0xab; 32]),
+                min_work_be,
+            });
+        }
+    }
 }
 
 fn queue_at_cap_ending_on(st: &mut IbdWorkState, hub: &ChainHub, tail: Header) {
@@ -3491,14 +3527,14 @@ fn queue_at_cap_ending_on(st: &mut IbdWorkState, hub: &ChainHub, tail: Header) {
 }
 
 #[test]
-fn queue_refill_below_the_floor_stores_the_successor() {
+fn queue_refill_below_the_floor_does_not_store_the_successor() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-refill");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let a3 = mine(a2.block_hash(), 3);
-    floor_unreachable(&mut hub);
+    floor_above(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, a1);
@@ -3506,9 +3542,19 @@ fn queue_refill_below_the_floor_stores_the_successor() {
     let before = hub.query.store().header_count();
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![a2]);
-    assert_eq!(hub.query.store().header_count(), before + 1);
-    assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
+    assert_eq!(
+        hub.query.store().header_count(),
+        before,
+        "a short refill below the work floor is not stored"
+    );
+    assert_eq!(
+        st.header_walk.tip_hash(),
+        Some(a1.block_hash()),
+        "a short refill below the floor does not move past the queued tail"
+    );
+    assert!(st.header_walk.walk_quiet.contains(&0));
 
+    st.header_walk.walk_quiet.clear();
     let dropped = st.ordered.pop_front().unwrap();
     st.ordered_set.remove(&dropped);
     let dropped = st.ordered.pop_front().unwrap();
@@ -3516,11 +3562,11 @@ fn queue_refill_below_the_floor_stores_the_successor() {
     apply(&mut st, &hub, 0, vec![a2, a3]);
     assert_eq!(
         hub.query.store().header_count(),
-        before + 2,
-        "the queue stores the successor of its tail below the work floor"
+        before,
+        "a short refill below the work floor is not stored"
     );
-    assert!(st.ordered_set.contains(&a2.block_hash()));
-    assert!(st.ordered_set.contains(&a3.block_hash()));
+    assert!(!st.ordered_set.contains(&a2.block_hash()));
+    assert!(!st.ordered_set.contains(&a3.block_hash()));
 }
 
 #[test]
@@ -3554,7 +3600,12 @@ fn easy_bits_lookahead_does_not_capture_the_walk() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 1, vec![honest]);
     assert_eq!(st.header_walk.tip_hash(), Some(honest.block_hash()));
-    assert_eq!(hub.query.store().header_count(), before + 1);
+    assert_eq!(
+        hub.query.store().header_count(),
+        before,
+        "a look-ahead at the soft cap is a checkpoint, not a header row"
+    );
+    assert_eq!(st.header_walk.checkpoints().len(), 1);
     assert!(st.slots[1].alive);
 }
 
@@ -3587,11 +3638,10 @@ fn rewind_clears_a_milestone_hash_from_the_abandoned_chain() {
     let a2 = mine(a1.block_hash(), 2);
     let b1 = mine(gen, 11);
     let b2 = mine(b1.block_hash(), 12);
-    floor_unreachable(&mut hub);
     hub.milestone.height = 2;
     hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
         hash: b2.block_hash(),
-        min_work_be: [0xff; 32],
+        min_work_be: [0; 32],
     });
     let (s0, _rx0) = slot(0);
     let (s1, _rx1) = slot(1);
@@ -3600,6 +3650,7 @@ fn rewind_clears_a_milestone_hash_from_the_abandoned_chain() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![a1, a2]);
     assert_eq!(st.header_walk.milestone_hash(), Some(a2.block_hash()));
+    set_min_work(&mut hub, [0xff; 32]);
     let side = BlockHash::from_byte_array([0x42; 32]);
     assert!(!note_off_path(&mut st, &hub, 0, side));
     assert!(!note_off_path(&mut st, &hub, 0, side));
@@ -3607,6 +3658,7 @@ fn rewind_clears_a_milestone_hash_from_the_abandoned_chain() {
     plant_on_queue(&mut st, a1.block_hash(), 1);
     plant_on_queue(&mut st, a2.block_hash(), 2);
 
+    set_min_work(&mut hub, [0xff; 32]);
     apply(&mut st, &hub, 0, vec![]);
     apply(&mut st, &hub, 1, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
@@ -3619,6 +3671,7 @@ fn rewind_clears_a_milestone_hash_from_the_abandoned_chain() {
         "rewinding under the milestone drops the abandoned hash"
     );
 
+    set_min_work(&mut hub, [0; 32]);
     apply(&mut st, &hub, 1, vec![b1, b2]);
     assert_eq!(st.header_walk.milestone_hash(), Some(b2.block_hash()));
 }
@@ -3630,11 +3683,10 @@ fn confirmed_reorg_drops_a_milestone_hash_below_the_fork() {
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
-    floor_unreachable(&mut hub);
     hub.milestone.height = 2;
     hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
         hash: a2.block_hash(),
-        min_work_be: [0xff; 32],
+        min_work_be: [0; 32],
     });
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
@@ -3684,14 +3736,13 @@ fn confirmed_reorg_drops_a_milestone_hash_below_the_fork() {
 
 #[test]
 fn origin_stops_at_the_queue_tail() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-origin");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-origin");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let h1 = mine(gen, 1);
     let h2 = mine(h1.block_hash(), 2);
     let h3 = mine(h2.block_hash(), 3);
     let next = mine(h2.block_hash(), 4);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     apply(&mut st, &hub, 0, vec![h1, h2, h3]);
@@ -3701,7 +3752,10 @@ fn origin_stops_at_the_queue_tail() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![next]);
     assert_eq!(st.header_walk.tip_hash(), Some(next.block_hash()));
-    assert_eq!(st.header_walk.base_height, 2);
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the lead starts at the confirmed tip, not the stored queue tail"
+    );
 }
 
 fn mine_at(prev: BlockHash, n: u32, time: u32) -> Header {
@@ -3719,14 +3773,13 @@ fn mine_at(prev: BlockHash, n: u32, time: u32) -> Header {
 
 #[test]
 fn refill_matching_the_first_of_two_checkpoints_is_stored() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-two-ckpt");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-two-ckpt");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let a3 = mine(a2.block_hash(), 3);
     let a4 = mine(a3.block_hash(), 4);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, a1);
@@ -3749,10 +3802,9 @@ fn refill_matching_the_first_of_two_checkpoints_is_stored() {
     st.ordered_set.remove(&dropped);
     let before = hub.query.store().header_count();
     apply(&mut st, &hub, 0, vec![a2, a3]);
-    assert_eq!(
-        hub.query.store().header_count(),
-        before,
-        "a refill that matches a checkpoint already written is not stored again"
+    assert!(
+        hub.query.store().header_count() > before,
+        "a refill that matches the first checkpoint is stored"
     );
     assert!(hub
         .query
@@ -3764,13 +3816,14 @@ fn refill_matching_the_first_of_two_checkpoints_is_stored() {
 
 #[test]
 fn refill_that_contradicts_a_checkpoint_rewinds_and_stores() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-rewind-miss");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-rewind-miss");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
-    let honest = mine(a1.block_hash(), 9);
-    floor_unreachable(&mut hub);
+    let mid = mine(a1.block_hash(), 9);
+    let next = mine(mid.block_hash(), 10);
+    let honest = mine(next.block_hash(), 11);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, a1);
@@ -3780,8 +3833,8 @@ fn refill_that_contradicts_a_checkpoint_rewinds_and_stores() {
     let dropped = st.ordered.pop_front().unwrap();
     st.ordered_set.remove(&dropped);
     let before = hub.query.store().header_count();
-    apply(&mut st, &hub, 0, vec![honest]);
-    assert_eq!(hub.query.store().header_count(), before + 1);
+    apply(&mut st, &hub, 0, vec![mid, next, honest]);
+    assert_eq!(hub.query.store().header_count(), before + 3);
     assert_eq!(st.header_walk.tip_hash(), Some(honest.block_hash()));
     assert!(st
         .header_walk
@@ -3820,15 +3873,14 @@ fn a_second_lookahead_ask_waits_for_the_reply() {
 
 #[test]
 fn heavier_chain_below_the_floor_is_adopted_without_an_empty_reply() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-heavy-floor");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-heavy-floor");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
-    let stale = mine(gen, 1);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
     assert!(send_getheaders(&mut st, &hub).unwrap());
+    let stale = mine(gen, 1);
     apply(&mut st, &hub, 0, vec![stale]);
     assert_eq!(st.header_walk.tip_hash(), Some(stale.block_hash()));
     let mut prev = gen;
@@ -3856,7 +3908,6 @@ fn a_short_peer_does_not_block_an_empty_rewind() {
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
-    floor_unreachable(&mut hub);
     let (tall, _rx0) = slot(0);
     let (mut short, _rx1) = slot(1);
     short.peer_height = 1;
@@ -3867,6 +3918,7 @@ fn a_short_peer_does_not_block_an_empty_rewind() {
     assert_eq!(st.header_walk.tip_height(), 2);
     plant_on_queue(&mut st, a1.block_hash(), 1);
     plant_on_queue(&mut st, a2.block_hash(), 2);
+    set_min_work(&mut hub, [0xff; 32]);
     apply(&mut st, &hub, 0, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.slots.iter().any(|s| s.id == 1 && s.alive));
@@ -3899,7 +3951,6 @@ fn restored_checkpoint_times_accept_a_header_under_the_tip_time() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-mtp");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
     let mut prev = gen;
     let mut chain = Vec::new();
     for n in 1..=12 {
@@ -3927,6 +3978,7 @@ fn restored_checkpoint_times_accept_a_header_under_the_tip_time() {
     assert_eq!(st.header_walk.tip_hash(), Some(soft.block_hash()));
     assert!(st.slots[0].alive);
 
+    set_min_work(&mut hub, [0xff; 32]);
     apply(&mut st, &hub, 0, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
     let mtp = rbitcoin_primitives::median_time_past_times(
@@ -4037,12 +4089,11 @@ fn min_difficulty_walk_back_finds_a_retarget_in_the_same_batch() {
 
 #[test]
 fn a_restored_checkpoint_header_adopts_a_heavier_fork() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-restore-fork");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-restore-fork");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let fork = mine(gen, 1);
     let tip = mine(fork.block_hash(), 2);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
@@ -4153,12 +4204,11 @@ fn extend_chain(
 
 #[test]
 fn a_full_queue_next_ask_starts_at_the_walk_tip() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-ask-past-cap");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-ask-past-cap");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
-    floor_unreachable(&mut hub);
     let (mut peer, mut rx) = slot(0);
     peer.peer_height = 100_000;
     let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
@@ -4171,23 +4221,21 @@ fn a_full_queue_next_ask_starts_at_the_walk_tip() {
         "the soft cap keeps the new header off the queue"
     );
     assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
-    st.hygiene();
-    assert!(
-        st.height_to_hash
-            .values()
-            .any(|hash| *hash == a2.block_hash()),
-        "a header written past the queue stays indexed until the queue takes it"
+    assert_eq!(
+        st.header_walk.checkpoints().last().map(|c| c.hash),
+        Some(a2.block_hash()),
+        "an at-cap look-ahead is a checkpoint, not a header row"
     );
     assert!(
         send_getheaders(&mut st, &hub).unwrap(),
-        "the walk still needs the header after the one it just stored"
+        "the walk still needs the header after the checkpoint"
     );
     match rx.try_recv() {
         Ok(PeerCmd::GetHeaders { locator }) => {
             assert_eq!(
                 locator[0],
                 a2.block_hash(),
-                "the ask starts at the stored walk tip, not the queue tail"
+                "the ask starts at the walk tip, not the queue tail"
             );
         }
         Ok(_) => panic!("expected getheaders"),
@@ -4197,24 +4245,41 @@ fn a_full_queue_next_ask_starts_at_the_walk_tip() {
 
 #[test]
 fn new_lookahead_batch_does_not_skip_stored_queue_successors() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-no-queue-gap");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-no-queue-gap");
     hub.ensure_genesis().unwrap();
     let genesis = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
     let (peer, _rx) = slot(0);
     let mut st = IbdWorkState::new(vec![peer], Some(genesis), Some(0));
     let tail = mine(genesis, 1);
-    queue_at_cap_ending_on(&mut st, &hub, tail);
-    assert!(send_getheaders(&mut st, &hub).unwrap());
     let next = mine(tail.block_hash(), 2);
     let third = mine(next.block_hash(), 3);
-    apply(&mut st, &hub, 0, vec![next, third]);
+    let fourth = mine(third.block_hash(), 4);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(&mut st, &hub, 0, vec![tail, next, third]);
+    st.ordered.clear();
+    st.ordered_set.clear();
+    let mut i = 0u32;
+    while st.ordered.len() + 1 < ORDERED_HEADERS_SOFT_CAP {
+        let mut b = [0xee; 32];
+        b[28..32].copy_from_slice(&i.to_le_bytes());
+        let h = BlockHash::from_byte_array(b);
+        st.ordered.push_back(h);
+        st.ordered_set.insert(h);
+        i += 1;
+    }
+    st.ordered.push_back(tail.block_hash());
+    st.ordered_set.insert(tail.block_hash());
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(&mut st, &hub, 0, vec![fourth]);
+    assert_eq!(st.header_walk.tip_hash(), Some(fourth.block_hash()));
+    assert!(
+        !st.ordered_set.contains(&fourth.block_hash()),
+        "an at-cap look-ahead is a checkpoint, not a header row"
+    );
     for _ in 0..2 {
         let dropped = st.ordered.pop_front().unwrap();
         st.ordered_set.remove(&dropped);
     }
-    let fourth = mine(third.block_hash(), 4);
-    apply(&mut st, &hub, 0, vec![fourth]);
     rbitcoin_ibd::ibd::path::append_stored_headers(&mut st, &hub);
     let queued: Vec<_> = st.ordered.iter().rev().take(2).copied().collect();
     assert_eq!(
@@ -4222,30 +4287,26 @@ fn new_lookahead_batch_does_not_skip_stored_queue_successors() {
         vec![third.block_hash(), next.block_hash()],
         "new lookahead must leave the free queue slots for already stored successors"
     );
-    assert_eq!(st.header_walk.tip_hash(), Some(fourth.block_hash()));
 }
 
 #[test]
 fn drained_queue_refills_stored_headers_after_known_header_pruning() {
-    let (_dir, mut hub) =
-        rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-pruned-refill");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-pruned-refill");
     hub.ensure_genesis().unwrap();
     let genesis = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
     let (peer, _rx) = slot(0);
     let mut st = IbdWorkState::new(vec![peer], Some(genesis), Some(0));
     let tail = mine(genesis, 1);
-    queue_at_cap_ending_on(&mut st, &hub, tail);
-    st.known_headers.extend(st.ordered.iter().copied());
-    assert!(send_getheaders(&mut st, &hub).unwrap());
     let next = mine(tail.block_hash(), 2);
     let last = mine(next.block_hash(), 3);
-    apply(&mut st, &hub, 0, vec![next, last]);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(&mut st, &hub, 0, vec![tail, next, last]);
     assert_eq!(st.header_walk.tip_hash(), Some(last.block_hash()));
-    while st.ordered.len() > 1 {
-        let dropped = st.ordered.pop_front().unwrap();
-        st.ordered_set.remove(&dropped);
-    }
+    st.ordered.clear();
+    st.ordered_set.clear();
+    st.ordered.push_back(tail.block_hash());
+    st.ordered_set.insert(tail.block_hash());
+    st.known_headers.extend(st.ordered.iter().copied());
     assert_eq!(st.ordered.back(), Some(&tail.block_hash()));
     st.hygiene();
     st.deep_hygiene();
@@ -4258,11 +4319,11 @@ fn drained_queue_refills_stored_headers_after_known_header_pruning() {
 }
 
 #[test]
-fn a_heavier_fork_below_the_floor_is_written_when_the_queue_has_room() {
+fn a_short_heavier_fork_below_the_floor_is_not_written() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-stray-write");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
+    floor_above(&mut hub);
     let (s0, mut rx) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     let mut prev = gen;
@@ -4283,13 +4344,14 @@ fn a_heavier_fork_below_the_floor_is_written_when_the_queue_has_room() {
         prev = hdr.block_hash();
         fork.push(hdr);
     }
-    let heavy = prev;
     apply(&mut st, &hub, 0, fork);
-    assert_eq!(st.header_walk.tip_hash(), Some(heavy));
-    assert!(
-        hub.query.store().header_count() > before,
-        "a heavier fork is written when the queue can hold it"
+    assert_eq!(st.header_walk.tip_hash(), Some(gen));
+    assert_eq!(
+        hub.query.store().header_count(),
+        before,
+        "a short heavier fork below the work floor is not written"
     );
+    assert!(st.header_walk.walk_quiet.contains(&0));
 }
 
 #[test]
@@ -4369,10 +4431,9 @@ fn an_inflight_external_inv_does_not_retire_on_empty() {
 
 #[test]
 fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-two-batch");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-two-batch");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
     let (s0, mut rx) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
@@ -4392,7 +4453,7 @@ fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
 
     let mut prev = gen;
     let mut first = Vec::new();
-    for n in 20..22 {
+    for n in 20..24 {
         let hdr = mine(prev, n);
         prev = hdr.block_hash();
         first.push(hdr);
@@ -4401,10 +4462,11 @@ fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
     assert_eq!(
         st.header_walk.tip_hash(),
         candidate_tip,
-        "a short valid batch does not replace a heavier candidate"
+        "equal work stays a challenger and does not replace the candidate"
     );
     assert_eq!(hub.query.store().header_count(), before);
     assert!(st.slots[0].alive);
+    st.header_walk.walk_quiet.clear();
     let dropped = st.ordered.pop_front().unwrap();
     st.ordered_set.remove(&dropped);
     assert!(send_getheaders(&mut st, &hub).unwrap());
@@ -4420,7 +4482,7 @@ fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
     }
 
     let mut second = Vec::new();
-    for n in 22..26 {
+    for n in 24..25 {
         let hdr = mine(prev, n);
         prev = hdr.block_hash();
         second.push(hdr);
@@ -4431,7 +4493,7 @@ fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
         st.slots[0].alive,
         "feeding the heavier chain does not disconnect"
     );
-    assert_eq!(st.header_walk.tip_height(), 6);
+    assert_eq!(st.header_walk.tip_height(), 5);
     assert_eq!(st.header_walk.tip_hash(), Some(heavy));
     assert_eq!(
         hub.query.store().header_count(),
@@ -4448,7 +4510,6 @@ fn a_fork_from_the_confirmed_tip_keeps_that_height() {
     let h1 = mine(gen, 1);
     let h2 = mine(h1.block_hash(), 2);
     let h3 = mine(h2.block_hash(), 3);
-    floor_unreachable(&mut hub);
     hub.milestone.height = 2;
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
@@ -4456,7 +4517,10 @@ fn a_fork_from_the_confirmed_tip_keeps_that_height() {
     fill_to_cap(&mut st);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![h3]);
-    assert_eq!(st.header_walk.base_height, 2);
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the lead starts at the confirmed tip, not the stored queue tail"
+    );
     assert_eq!(st.header_walk.tip_height(), 3);
     assert_eq!(st.header_walk.milestone_hash(), Some(h2.block_hash()));
 
@@ -4470,7 +4534,7 @@ fn a_fork_from_the_confirmed_tip_keeps_that_height() {
     let on_milestone = fork[1].block_hash();
     hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
         hash: on_milestone,
-        min_work_be: [0xff; 32],
+        min_work_be: [0; 32],
     });
     apply(&mut st, &hub, 0, fork);
     assert!(st.slots[0].alive);
@@ -4489,17 +4553,22 @@ fn a_fork_from_the_confirmed_tip_keeps_that_height() {
 
 #[test]
 fn a_short_refill_keeps_the_lookahead() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-short-refill");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-short-refill");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let a3 = mine(a2.block_hash(), 3);
     let a4 = mine(a3.block_hash(), 4);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, a1);
+    while st.ordered.len() + 2 > ORDERED_HEADERS_SOFT_CAP {
+        let Some(dropped) = st.ordered.pop_front() else {
+            break;
+        };
+        st.ordered_set.remove(&dropped);
+    }
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![a2, a3]);
     while st.ordered.len() + 4 > ORDERED_HEADERS_SOFT_CAP {
@@ -4592,6 +4661,12 @@ fn a_header_between_checkpoints_does_not_skip_scripts() {
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, h1);
+    while st.ordered.len() + 3 > ORDERED_HEADERS_SOFT_CAP {
+        let Some(dropped) = st.ordered.pop_front() else {
+            break;
+        };
+        st.ordered_set.remove(&dropped);
+    }
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![h2, h3, h4]);
     assert!(st.header_walk.proven);
@@ -4665,6 +4740,12 @@ fn a_refill_stops_at_the_agreed_checkpoint() {
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     queue_at_cap_ending_on(&mut st, &hub, h1);
+    while st.ordered.len() + 2 > ORDERED_HEADERS_SOFT_CAP {
+        let Some(dropped) = st.ordered.pop_front() else {
+            break;
+        };
+        st.ordered_set.remove(&dropped);
+    }
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![h2, h3]);
     while st.ordered.len() + 4 > ORDERED_HEADERS_SOFT_CAP {
@@ -4873,10 +4954,9 @@ fn a_stale_announcement_asks_while_headers_are_done() {
 /// copied them yet. The tip's own window wins once it has one.
 #[test]
 fn checkpoint_times_stand_in_for_an_empty_tip() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-times");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-times");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
-    floor_unreachable(&mut hub);
     let mut prev = gen;
     let mut chain = Vec::new();
     for n in 1..=12 {
@@ -4917,7 +4997,6 @@ fn two_abandoned_candidates_both_stay_dead() {
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let b1 = mine(gen, 11);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let (s1, _rx1) = slot(1);
     let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
@@ -4927,6 +5006,7 @@ fn two_abandoned_candidates_both_stay_dead() {
     let kept = BlockHash::from_byte_array([0x44; 32]);
     st.ordered.push_back(kept);
     st.ordered_set.insert(kept);
+    set_min_work(&mut hub, [0xff; 32]);
     apply(&mut st, &hub, 0, vec![]);
     apply(&mut st, &hub, 1, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
@@ -4939,8 +5019,10 @@ fn two_abandoned_candidates_both_stay_dead() {
         "a queued hash with no height is not the dead tip"
     );
 
+    set_min_work(&mut hub, [0; 32]);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![b1]);
+    set_min_work(&mut hub, [0xff; 32]);
     apply(&mut st, &hub, 0, vec![]);
     apply(&mut st, &hub, 1, vec![]);
     assert!(st.header_walk.dead_ends.contains(&a1.block_hash()));
@@ -4954,7 +5036,7 @@ fn two_abandoned_candidates_both_stay_dead() {
 /// it and drops checkpoints above the fork.
 #[test]
 fn a_tied_challenger_stays_off_the_tip_until_it_is_heavier() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-tie");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-tie");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
@@ -4964,7 +5046,6 @@ fn a_tied_challenger_stays_off_the_tip_until_it_is_heavier() {
     let s3 = mine(s2.block_hash(), 13);
     let s4 = mine(s3.block_hash(), 14);
     let weak = mine(a1.block_hash(), 21);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let (s1, _rx1) = slot(1);
     let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
@@ -4988,8 +5069,8 @@ fn a_tied_challenger_stays_off_the_tip_until_it_is_heavier() {
     apply(&mut st, &hub, 0, vec![a1]);
     assert_eq!(
         hub.query.store().header_count(),
-        replay,
-        "a batch that ends on an earlier checkpoint is not a new chain"
+        replay + 1,
+        "replaying an unstored checkpoint writes the header without moving the tip"
     );
     assert_eq!(st.header_walk.tip_hash(), Some(a3.block_hash()));
     assert!(
@@ -5049,13 +5130,12 @@ fn a_tied_challenger_stays_off_the_tip_until_it_is_heavier() {
 /// Dropping every checkpoint above the base drops the challenger too.
 #[test]
 fn rewind_keeps_a_challenger_forked_at_a_live_checkpoint() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let side = mine(a1.block_hash(), 12);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
@@ -5103,12 +5183,11 @@ fn rewind_keeps_a_challenger_forked_at_a_live_checkpoint() {
 /// candidate even though the tip hash is not the fork.
 #[test]
 fn rewind_keeps_a_challenger_forked_at_the_base() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain-base");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain-base");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let side = mine(gen, 12);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
@@ -5135,14 +5214,13 @@ fn rewind_keeps_a_challenger_forked_at_the_base() {
 /// drops the challenger. The fork is neither the base nor the new tip.
 #[test]
 fn rewind_drops_a_challenger_when_its_fork_checkpoint_is_gone() {
-    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain-drop");
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retain-drop");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let a1 = mine(gen, 1);
     let a2 = mine(a1.block_hash(), 2);
     let a3 = mine(a2.block_hash(), 3);
     let side = mine(a2.block_hash(), 12);
-    floor_unreachable(&mut hub);
     let (s0, _rx0) = slot(0);
     let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
     fill_queue(&mut st);
@@ -5242,10 +5320,12 @@ fn stored_work_uses_the_confirmed_tip_when_the_base_does_not_link() {
     st.header_walk.checkpoints.push(Checkpoint {
         hash: BlockHash::from_byte_array([0xab; 32]),
         height: tip_h + 10,
+        height_wide: u64::from(tip_h + 10),
         work: [0u8; 32],
         header: None,
         times: Vec::new(),
         diff: DiffSnap::default(),
+        supplied_by: None,
     });
     st.record_height(next.block_hash(), tip_h + 1);
     let (work, _) = stored_path_state(&st, &hub, next.block_hash())
@@ -5263,10 +5343,12 @@ fn mark_checkpoint(hash: BlockHash, height: u32) -> Checkpoint {
     Checkpoint {
         hash,
         height,
+        height_wide: u64::from(height),
         work: [0; 32],
         header: None,
         times: Vec::new(),
         diff: DiffSnap::default(),
+        supplied_by: None,
     }
 }
 
@@ -5335,7 +5417,7 @@ fn adopt_heavier_keeps_the_milestone_at_the_fork_height() {
     let mut raw = [0u8; 32];
     raw[31] = 9;
     let passed = Work::from_be_bytes(raw);
-    adopt_heavier(&mut st, &hub, prev, &[header], passed);
+    adopt_heavier(&mut st, &hub, prev, &[header], passed, None);
     assert_eq!(st.header_walk.tip.milestone_hash, Some(marker));
     assert_eq!(st.header_walk.tip.work, passed);
 }
@@ -5687,14 +5769,14 @@ fn note_stored_candidate_ignores_a_dead_end_tip() {
     st.header_walk.tip.hash = Some(gen);
     st.header_walk.tip.height = 0;
     st.header_walk.dead_ends.insert(gen);
-    note_stored_candidate(&mut st, &hub, &[mine(gen, 30)]);
+    note_stored_candidate(&mut st, &hub, 0, &[mine(gen, 30)]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.header_walk.checkpoints.is_empty());
 
     st.header_walk.dead_ends.clear();
     let mut broken = mine(gen, 31);
     broken.bits = CompactTarget::from_consensus(0x1d00ffff);
-    note_stored_candidate(&mut st, &hub, &[broken]);
+    note_stored_candidate(&mut st, &hub, 0, &[broken]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.header_walk.checkpoints.is_empty());
 }
@@ -6192,4 +6274,751 @@ fn bip94_lookahead_rejects_a_timewarped_period_start() {
         &batch(floor),
         &DiffSnap::default()
     ));
+}
+
+fn floor_milestone(height: u32) -> rbitcoin_consensus::Milestone {
+    rbitcoin_consensus::Milestone {
+        height,
+        anchor: Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: BlockHash::from_byte_array([0xab; 32]),
+            min_work_be: [0xff; 32],
+        }),
+    }
+}
+
+fn headers_after(parent: Header, n: u32, salt: u32) -> Vec<Header> {
+    let mut prev = parent;
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 1..=n {
+        let hdr = Header {
+            version: bitcoin::block::Version::from_consensus(4),
+            prev_blockhash: prev.block_hash(),
+            merkle_root: TxMerkleNode::from_byte_array([(salt + i) as u8; 32]),
+            time: parent.time.saturating_add(i).saturating_add(salt),
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: salt + i,
+        };
+        let mut hdr = hdr;
+        rbitcoin_consensus::grind_regtest_pow(&mut hdr);
+        out.push(hdr);
+        prev = hdr;
+    }
+    out
+}
+
+struct ResetClock;
+impl Drop for ResetClock {
+    fn drop(&mut self) {
+        set_walk_unix_for_test(None);
+    }
+}
+
+fn opened(
+    label: &str,
+    floor: bool,
+) -> (
+    rbitcoin_query::testutil::TempDir,
+    ChainHub,
+    IbdWorkState,
+    Header,
+) {
+    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
+    hub.ensure_genesis().unwrap();
+    if floor {
+        hub.milestone = floor_milestone(1_000_000);
+    }
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    let (s0, rx0) = slot(0);
+    let (s1, rx1) = slot(1);
+    // Getheaders is a send on the slot channel. The receiver has to stay open.
+    std::mem::forget(rx0);
+    std::mem::forget(rx1);
+    let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
+    ensure_origin(&mut st, &hub);
+    (_dir, hub, st, gen_hdr)
+}
+
+/// Confirmed tip 0 and 2,000 stored headers, with no witness. A fresh state
+/// reseeded from the store may resume the walk at those headers. The lead
+/// is still measured from the confirmed tip.
+#[test]
+fn a_restart_measures_the_lead_from_the_confirmed_tip() {
+    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-restart-lead");
+    hub.ensure_genesis().unwrap();
+    hub.milestone = floor_milestone(1_000_000);
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    let full = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 3);
+    hub.ensure_headers_batch(&full).unwrap();
+    let (s0, rx0) = slot(0);
+    std::mem::forget(rx0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    rbitcoin_ibd::ibd::path::seed_work_path_from_store(&mut st, &hub);
+    assert!(
+        st.max_ordered_height >= rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32,
+        "the stored headers are back on the work path"
+    );
+    ensure_origin(&mut st, &hub);
+    assert_eq!(st.header_walk.tip_height(), 2_000);
+    assert_eq!(st.header_walk.base_height, 0);
+    assert!(st.header_walk.witness_height.is_none());
+    assert!(!st.header_walk.proven);
+    assert_eq!(
+        unproven_confirm_limit(&st),
+        Some(UNPROVEN_LEAD_BLOCKS),
+        "unwitnessed stored headers are not a match"
+    );
+}
+
+/// The floor sits on the next header. That one requested header extends the
+/// walk and proves it. A one-header reply that is still under the floor
+/// after it is added still adds nothing and drops the reservation.
+#[test]
+fn a_short_batch_that_reaches_the_floor_is_kept() {
+    let (_dir, mut hub, mut st, gen) = opened("unproven-cross-floor", false);
+    let mut min_work_be = st.header_walk.tip_work();
+    for byte in min_work_be.iter_mut().rev() {
+        let (next, wrapped) = byte.overflowing_add(1);
+        *byte = next;
+        if !wrapped {
+            break;
+        }
+    }
+    hub.milestone = rbitcoin_consensus::Milestone {
+        height: 1_000_000,
+        anchor: Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: BlockHash::from_byte_array([0xcd; 32]),
+            min_work_be,
+        }),
+    };
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let one = headers_after(gen, 1, 1);
+    let tip = one[0].block_hash();
+    apply(&mut st, &hub, 0, one);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert!(st.header_walk.proven);
+    assert!(!st.header_walk.walk_quiet.contains(&0));
+
+    let (_dir, hub, mut st, gen) = opened("unproven-still-under", true);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let before = hub.query.store().header_count();
+    apply(&mut st, &hub, 0, headers_after(gen, 1, 2));
+    assert!(st.header_walk.checkpoints.is_empty());
+    assert_eq!(hub.query.store().header_count(), before);
+    assert_ne!(st.header_walk.reserved, Some(0));
+    assert!(!st.header_walk.proven);
+}
+
+/// Below the floor a one-header reply adds no checkpoint and drops the
+/// reservation. A full window that passes context extends, including a
+/// lighter challenger. Above the floor a short reply that does not extend
+/// still retires the peer.
+#[test]
+fn short_batch_below_the_floor_does_not_extend_or_keep_the_peer() {
+    let (_dir, hub, mut st, gen) = opened("unproven-short", true);
+    assert!(st.header_walk.origin);
+    assert!(!st.header_walk.proven);
+    let before = hub.query.store().header_count();
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(st.header_walk.reserved, Some(0));
+    let one = headers_after(gen, 1, 1);
+    apply(&mut st, &hub, 0, one);
+    assert!(st.header_walk.checkpoints.is_empty());
+    assert_eq!(hub.query.store().header_count(), before);
+    assert_ne!(st.header_walk.reserved, Some(0));
+    assert!(st.header_walk.walk_quiet.contains(&0));
+
+    // At the soft cap the full window is a checkpoint, so the later challenger
+    // is not checked against thousands of stored header rows.
+    st.header_walk.walk_quiet.clear();
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 10);
+    let tip = full.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, full);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert_eq!(st.header_walk.checkpoints.len(), 1);
+    assert_eq!(hub.query.store().header_count(), before);
+    assert!(!st.header_walk.proven);
+    assert!(!st.header_walk.walk_quiet.contains(&0));
+
+    // A short fork must not become a challenger. A full window of less work does.
+    st.header_walk.tip.work = Work::from_be_bytes([0x0f; 32]);
+    let short_fork = headers_after(gen, 2, 80);
+    apply(&mut st, &hub, 1, short_fork);
+    assert!(st.header_walk.challenger.is_none());
+    assert!(st.header_walk.walk_quiet.contains(&1));
+    st.header_walk.walk_quiet.remove(&1);
+    let light = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 90);
+    let light_tip = light.last().unwrap().block_hash();
+    apply(&mut st, &hub, 1, light);
+    assert_eq!(
+        st.header_walk
+            .challenger
+            .as_ref()
+            .and_then(|ch| ch.tip.hash),
+        Some(light_tip)
+    );
+}
+
+#[test]
+fn a_short_batch_above_the_floor_still_retires_the_peer() {
+    let (_dir, hub, mut st, _gen) = opened("unproven-above-short", false);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let stray = mine(BlockHash::from_byte_array([0x11; 32]), 7);
+    apply(&mut st, &hub, 0, vec![stray]);
+    assert!(st.header_walk.walk_quiet.contains(&0));
+    assert_ne!(st.header_walk.reserved, Some(0));
+}
+
+#[test]
+fn lookahead_at_the_soft_cap_is_a_checkpoint_and_a_refill_is_stored() {
+    let (_dir, hub, mut st, gen) = opened("unproven-cap", false);
+    let before = hub.query.store().header_count();
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 3);
+    let tip = full.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, full);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert_eq!(
+        hub.query.store().header_count(),
+        before,
+        "a checkpoint past the confirm window is not a header row"
+    );
+    assert!(!st.ordered_set.contains(&tip));
+
+    let (_dir, hub, mut st, gen) = opened("unproven-refill", false);
+    let before = hub.query.store().header_count();
+    assert!(st.ordered.len() < ORDERED_HEADERS_SOFT_CAP);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 4);
+    let tip = full.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, full);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert!(hub.query.store().header_count() > before);
+    assert!(st.ordered_set.contains(&tip));
+}
+
+#[test]
+fn a_walk_longer_than_six_headers_per_second_does_not_extend() {
+    let _clock = ResetClock;
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-len");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    set_walk_unix_for_test(Some(u64::from(gen_hdr.time) + 10));
+    let (s0, _rx) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    ensure_origin(&mut st, &hub);
+    assert_eq!(st.header_walk.max_headers, Some(10 * HEADER_RATE_PER_SEC));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 5);
+    apply(&mut st, &hub, 0, full);
+    assert!(st.header_walk.checkpoints.is_empty());
+    assert_eq!(st.header_walk.tip_hash(), Some(gen));
+    assert!(st.header_walk.length_exceeded || st.header_walk.walk_quiet.contains(&0));
+    assert_ne!(st.header_walk.reserved, Some(0));
+    let _ = dir;
+}
+
+/// Two accepted headers, then a requested 2,000-header continuation past a
+/// cap of 60. The continuation is not stored, and that peer leaves.
+#[test]
+fn an_overlong_stored_continuation_is_not_written() {
+    let (_dir, hub, mut st, gen) = opened("unproven-store-len", false);
+    st.header_walk.max_headers = Some(60);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let two = headers_after(gen, 2, 1);
+    let tip = *two.last().unwrap();
+    apply(&mut st, &hub, 0, two);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
+    assert!(!st.header_walk.length_exceeded);
+    let before = hub.query.store().header_count();
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(
+        &mut st,
+        &hub,
+        0,
+        headers_after(tip, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 2),
+    );
+    assert_eq!(hub.query.store().header_count(), before);
+    assert!(st.header_walk.length_exceeded);
+    assert_ne!(st.header_walk.reserved, Some(0));
+    assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
+}
+
+/// A heavier batch whose end is past the header-rate cap does not replace the tip.
+#[test]
+fn a_heavier_fork_past_the_header_rate_does_not_replace_the_tip() {
+    let _clock = ResetClock;
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-len-fork");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    set_walk_unix_for_test(Some(u64::from(gen_hdr.time) + 10));
+    let (s0, _rx0) = slot(0);
+    let (s1, _rx1) = slot(1);
+    let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
+    ensure_origin(&mut st, &hub);
+    assert_eq!(st.header_walk.max_headers, Some(10 * HEADER_RATE_PER_SEC));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let short = headers_after(gen_hdr, 2, 1);
+    let short_tip = short.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, short);
+    assert_eq!(st.header_walk.tip_hash(), Some(short_tip));
+    let heavy = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 2);
+    apply(&mut st, &hub, 1, heavy);
+    assert_eq!(
+        st.header_walk.tip_hash(),
+        Some(short_tip),
+        "a heavier fork past the header rate does not become the candidate"
+    );
+    assert!(st.header_walk.length_exceeded);
+    assert!(st.header_walk.walk_quiet.contains(&1));
+    let _ = dir;
+}
+
+/// A confirmed tip stamped at the test clock is only a few headers old.
+/// The rate cap is still the chain's age since genesis, so the next header extends.
+#[test]
+fn a_recent_tip_still_extends_inside_the_genesis_header_rate() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-recent-tip");
+    hub.ensure_genesis().unwrap();
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(2, op_true.clone(), vec![]).unwrap();
+    let tip = hub.tip_height().unwrap();
+    let tip_hash = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time + 1;
+    let next = rbitcoin_consensus::mine_regtest_paying(tip_hash, time, tip + 1, op_true, vec![]);
+    let (peer, _rx) = slot(0);
+    std::mem::forget(_rx);
+    let mut st = IbdWorkState::new(vec![peer], Some(tip_hash), Some(tip));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let cap = st
+        .header_walk
+        .max_headers
+        .expect("the walk armed a length cap");
+    assert!(
+        cap > u64::from(tip) + 1,
+        "the cap counts from genesis, not from a tip minted this second"
+    );
+    apply(&mut st, &hub, 0, vec![next.header]);
+    assert_eq!(st.header_walk.tip_height(), tip + 1);
+    assert!(!st.header_walk.length_exceeded);
+}
+
+#[test]
+fn a_clock_behind_the_starting_median_does_not_start_the_walk() {
+    let _clock = ResetClock;
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-clock");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    set_walk_unix_for_test(Some(
+        u64::from(gen_hdr.time).saturating_sub(WALK_CLOCK_SKEW + 1),
+    ));
+    let (s0, _rx) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    ensure_origin(&mut st, &hub);
+    assert!(!st.header_walk.origin);
+    assert!(st.header_walk.clock_refused);
+    let _ = dir;
+}
+
+/// The walk does not start, a short batch is not stored, and the refusal is
+/// logged once.
+#[test]
+fn a_refused_clock_does_not_store_headers() {
+    let _clock = ResetClock;
+    let (dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-clock-store");
+    hub.ensure_genesis().unwrap();
+    hub.milestone = floor_milestone(1_000_000);
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    set_walk_unix_for_test(Some(
+        u64::from(gen_hdr.time).saturating_sub(WALK_CLOCK_SKEW + 1),
+    ));
+    let (s0, rx0) = slot(0);
+    std::mem::forget(rx0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    rbitcoin_log::capture_logs(true);
+    ensure_origin(&mut st, &hub);
+    ensure_origin(&mut st, &hub);
+    let logs = rbitcoin_log::take_logs();
+    rbitcoin_log::capture_logs(false);
+    assert!(!st.header_walk.origin);
+    assert!(st.header_walk.clock_refused);
+    let before = hub.query.store().header_count();
+    apply(&mut st, &hub, 0, headers_after(gen_hdr, 5, 1));
+    assert_eq!(hub.query.store().header_count(), before);
+    assert!(st.header_walk.clock_refused);
+    assert_eq!(
+        logs.iter()
+            .filter(|(_, line)| line.contains("ibd: header walk refused"))
+            .count(),
+        1,
+        "the refusal is logged once"
+    );
+    let _ = dir;
+}
+
+#[test]
+fn an_unproven_height_past_u32_keeps_its_own_checkpoint() {
+    let (_dir, hub, mut st, gen) = opened("unproven-wide", false);
+    let parent = headers_after(gen, 1, 6).pop().unwrap();
+    st.header_walk.tip.hash = Some(parent.block_hash());
+    st.header_walk.tip.height = u32::MAX;
+    st.header_walk.tip.height_wide = u64::from(u32::MAX);
+    st.header_walk.max_headers = Some(u64::MAX);
+    let next = headers_after(parent, 1, 7).pop().unwrap();
+    assert!(extend_tip(&mut st, &hub, &[next], None));
+    let ckpt = st.header_walk.checkpoints.last().unwrap();
+    assert_eq!(ckpt.height_wide, u64::from(u32::MAX) + 1);
+    assert_eq!(ckpt.height, u32::MAX);
+    assert!(!st.hash_height.contains_key(&next.block_hash()));
+    let wide = st.header_walk.tip.height_wide;
+    let at = st.header_walk.tip.height;
+    rewind_to(&mut st, &hub, at, None);
+    assert_eq!(
+        st.header_walk.tip.height_wide, wide,
+        "a rewind keeps the wide height on the checkpoint"
+    );
+    st.header_walk.max_headers = Some(wide);
+    let extra = headers_after(next, 1, 8).pop().unwrap();
+    assert!(
+        !extend_tip(&mut st, &hub, &[extra], None),
+        "the length cap still sees the wide height after a rewind"
+    );
+    assert!(st.header_walk.length_exceeded);
+    assert_eq!(st.header_walk.tip.height_wide, wide);
+}
+
+#[test]
+fn a_peer_cannot_witness_checkpoints_it_supplied() {
+    let (_dir, hub, mut st, gen) = opened("unproven-self-witness", true);
+    let (s2, rx2) = slot(2);
+    std::mem::forget(rx2);
+    st.slots.push(s2);
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 8);
+    let end = *full.last().unwrap();
+    apply(&mut st, &hub, 0, full.clone());
+    assert_eq!(st.header_walk.reserved, Some(0));
+    assert!(st.header_walk.witness_height.is_none());
+    apply(&mut st, &hub, 0, headers_after(end, 1, 9));
+    assert_ne!(st.header_walk.reserved, Some(0));
+    note_lane(&mut st, 0);
+    apply(&mut st, &hub, 0, full.clone());
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "the peer who supplied the checkpoints cannot match them"
+    );
+    apply(&mut st, &hub, 1, full.clone());
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "a batch nobody asked for is not a match"
+    );
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(st.header_walk.walk.peer, Some(2));
+    apply(&mut st, &hub, 2, full);
+    let matched = st.header_walk.checkpoints.last().unwrap().height;
+    assert_eq!(st.header_walk.witness_height, Some(matched));
+}
+
+#[test]
+fn a_new_header_chain_drops_the_old_match() {
+    let (_dir, hub, mut st, gen) = opened("unproven-fork-witness", true);
+    let (s2, rx2) = slot(2);
+    std::mem::forget(rx2);
+    st.slots.push(s2);
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let chain_a = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 8);
+    apply(&mut st, &hub, 0, chain_a.clone());
+    note_lane(&mut st, 2);
+    apply(&mut st, &hub, 2, chain_a);
+    let matched = st
+        .header_walk
+        .witness_height
+        .expect("a different peer matched chain A");
+    st.header_walk.lead_class_a.insert(0, 5);
+    st.header_walk.lead_class_a.insert(matched + 1, 9);
+
+    let chain_b = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 80);
+    apply(&mut st, &hub, 1, chain_b.clone());
+    assert!(
+        st.header_walk.challenger.is_some(),
+        "the same amount of work stays a challenger"
+    );
+    let more = headers_after(
+        *chain_b.last().unwrap(),
+        rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32,
+        81,
+    );
+    apply(&mut st, &hub, 1, more);
+    assert_eq!(st.header_walk.tip_height(), matched.saturating_mul(2));
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "chain B has not been matched"
+    );
+    assert_eq!(
+        unproven_confirm_limit(&st),
+        Some(UNPROVEN_LEAD_BLOCKS),
+        "the confirm cap is the confirmed tip plus the lead"
+    );
+    assert!(
+        !st.header_walk.lead_class_a.contains_key(&0),
+        "bytes at the matched height are not the lead"
+    );
+    assert_eq!(st.header_walk.lead_class_a.get(&(matched + 1)), Some(&9));
+}
+
+#[test]
+fn confirm_follows_the_matched_height_plus_the_lead() {
+    use rbitcoin_ibd::ibd::body::BodyPresence;
+    use rbitcoin_ibd::ibd::confirm::{offer_confirm_ready, ConfirmFeed};
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
+
+    let (_dir, hub, mut st, gen) = opened("unproven-lead", true);
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 8);
+    let tip = full.last().unwrap().block_hash();
+    apply(&mut st, &hub, 0, full.clone());
+    assert!(!st.header_walk.proven);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert_eq!(
+        unproven_confirm_limit(&st),
+        Some(UNPROVEN_LEAD_BLOCKS),
+        "with no witness the lead is the whole unproven tip from the adoption height"
+    );
+    assert!(st.header_walk.witness_height.is_none());
+
+    let mut body = BodyPresence::new();
+    let child = mine(hub.tip_hash().unwrap(), 9);
+    hub.ensure_header(&child).unwrap();
+    let mut h2h = HashMap::new();
+    h2h.insert(1u32, child.block_hash());
+    let mut prev = HashMap::new();
+    prev.insert(child.block_hash(), hub.tip_hash().unwrap());
+    hub.query.set_lookup_taken_hi(Some(1));
+    let mut max_ready = 0u32;
+    let shared = AtomicU32::new(0);
+    let moving = ConfirmFeed::new();
+    moving.set_unproven_bounds(unproven_confirm_limit(&st), 0, None);
+    let noted = offer_confirm_ready(
+        &moving,
+        &h2h,
+        &prev,
+        &mut body,
+        &hub,
+        &mut max_ready,
+        &shared,
+    );
+    assert_eq!(
+        noted, 1,
+        "the tip still moves while work is below the floor"
+    );
+
+    // No second peer has matched yet. A full gibibyte above the adoption
+    // height fills the byte lead. The height cap stays the lead.
+    note_unproven_class_a(&mut st, 1, UNPROVEN_LEAD_BYTES);
+    let exhausted = unproven_offer_bounds(&st);
+    assert_eq!(exhausted.bytes_left, Some(0));
+    assert_eq!(
+        exhausted.height_limit,
+        Some(
+            st.header_walk
+                .base_height
+                .saturating_add(UNPROVEN_LEAD_BLOCKS)
+        ),
+        "a full gibibyte does not freeze confirm at the confirmed tip"
+    );
+    let feed = ConfirmFeed::new();
+    feed.set_unproven_bounds(
+        exhausted.height_limit,
+        exhausted.lead_from,
+        exhausted.bytes_left,
+    );
+
+    note_lane(&mut st, 1);
+    apply(&mut st, &hub, 1, full);
+    let matched = st.header_walk.witness_height.unwrap();
+    assert!(matched > hub.tip_height().unwrap_or(0));
+    let restored = unproven_offer_bounds(&st);
+    assert_eq!(
+        restored.height_limit,
+        Some(matched + UNPROVEN_LEAD_BLOCKS),
+        "a later match through M still opens M plus the lead"
+    );
+    assert_eq!(
+        restored.bytes_left,
+        Some(UNPROVEN_LEAD_BYTES),
+        "class A at or below the new match is not the lead"
+    );
+    feed.set_unproven_bounds(
+        restored.height_limit,
+        restored.lead_from,
+        restored.bytes_left,
+    );
+    assert_eq!(
+        feed.inner.lock().unwrap().lead_bytes_left,
+        Some(UNPROVEN_LEAD_BYTES),
+        "a higher match restores the byte remainder"
+    );
+    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
+    assert_eq!(
+        noted, 1,
+        "height 1 is on the matched chain and is still offered"
+    );
+
+    st.header_walk.proven = true;
+    assert_eq!(unproven_confirm_limit(&st), None);
+    let feed = ConfirmFeed::new();
+    feed.set_unproven_bounds(unproven_confirm_limit(&st), 0, None);
+    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
+    assert_eq!(noted, 1, "the lead lifts once the walk is proved");
+    assert_eq!(rbitcoin_ibd::ibd::reorg::REWIND_MAX_DEPTH, 1_024);
+    assert_eq!(UNPROVEN_LEAD_BLOCKS, 65_536);
+    assert_eq!(UNPROVEN_LEAD_BYTES, 1024 * 1024 * 1024);
+}
+
+#[test]
+fn class_a_lead_counts_the_block_height_not_the_tip() {
+    use rbitcoin_ibd::ibd::confirm::ConfirmEvent;
+    use rbitcoin_ibd::ibd::events::take_confirm_events;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+
+    let (_dir, hub, mut st, _gen) = opened("unproven-byte-height", true);
+    assert!(!st.header_walk.proven);
+    st.header_walk.witness_height = Some(10);
+    let above = mine(hub.tip_hash().unwrap(), 4);
+    let at_match = mine(hub.tip_hash().unwrap(), 5);
+    st.record_height(at_match.block_hash(), 10);
+    st.record_height(above.block_hash(), 11);
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(ConfirmEvent::Accepted {
+        hash: at_match.block_hash(),
+        wire_bytes: 40,
+    })
+    .unwrap();
+    tx.send(ConfirmEvent::Accepted {
+        hash: above.block_hash(),
+        wire_bytes: 60,
+    })
+    .unwrap();
+    drop(tx);
+    let write_next = AtomicU32::new(0);
+    let max_ready = AtomicU32::new(0);
+    let mut progress = Instant::now();
+    let _ = take_confirm_events(
+        &mut st,
+        &hub,
+        &rx,
+        &write_next,
+        &max_ready,
+        &mut progress,
+        None,
+    );
+    assert_eq!(
+        unproven_offer_bounds(&st).bytes_left,
+        Some(UNPROVEN_LEAD_BYTES - 60),
+        "only the block above the matched height spends the lead, even when the tip has not moved"
+    );
+}
+
+#[test]
+fn a_second_lookup_does_not_spend_the_lead_twice() {
+    use rbitcoin_ibd::ibd::confirm::{take_unproven_lead, ConfirmFeed};
+
+    let (_dir, hub, st, gen) = opened("unproven-byte-offer", true);
+    let h1 = headers_after(gen, 1, 31).pop().unwrap().block_hash();
+    let h2 = headers_after(gen, 1, 32).pop().unwrap().block_hash();
+    hub.query
+        .block_queue_enqueue(1, h1.to_byte_array(), 0, &[1u8; 100])
+        .unwrap();
+    hub.query
+        .block_queue_enqueue(2, h2.to_byte_array(), 0, &[2u8; 100])
+        .unwrap();
+    let feed = ConfirmFeed::new();
+    let bounds = unproven_offer_bounds(&st);
+    feed.set_unproven_bounds(Some(10_000), bounds.lead_from, Some(100));
+    let len = |h| hub.query.block_queue_payload_len(h);
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2]);
+    assert_eq!(
+        claimed,
+        vec![1],
+        "the first body fits in the remaining lead"
+    );
+    // The IBD loop refreshes from confirmed bytes, which are still zero here.
+    // The feed must keep the bytes lookup already reserved.
+    feed.set_unproven_bounds(bounds.height_limit, bounds.lead_from, bounds.bytes_left);
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2]);
+    assert_eq!(
+        claimed,
+        vec![1],
+        "a refresh must not claim the next body with the same gibibyte"
+    );
+    assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(0));
+}
+
+#[test]
+fn a_higher_match_restores_the_lead_and_keeps_bytes_still_above_it() {
+    use rbitcoin_ibd::ibd::confirm::{take_unproven_lead, ConfirmFeed};
+
+    let (_dir, hub, _st, gen) = opened("unproven-byte-restore", true);
+    let h1 = headers_after(gen, 1, 41).pop().unwrap().block_hash();
+    let h2 = headers_after(gen, 1, 42).pop().unwrap().block_hash();
+    let h3 = headers_after(gen, 1, 43).pop().unwrap().block_hash();
+    hub.query
+        .block_queue_enqueue(1, h1.to_byte_array(), 0, &[1u8; 100])
+        .unwrap();
+    hub.query
+        .block_queue_enqueue(2, h2.to_byte_array(), 0, &[2u8; 100])
+        .unwrap();
+    hub.query
+        .block_queue_enqueue(3, h3.to_byte_array(), 0, &[3u8; 100])
+        .unwrap();
+    let feed = ConfirmFeed::new();
+    feed.set_unproven_bounds(Some(10_000), 0, Some(200));
+    let len = |h| hub.query.block_queue_payload_len(h);
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2, 3]);
+    assert_eq!(
+        claimed,
+        vec![1, 2],
+        "both bodies fit in the lead above the old match"
+    );
+    // The walk now matches through height 1 and reports a fresh gibibyte.
+    // Height 2 is still above that match and is already reserved.
+    feed.set_unproven_bounds(Some(10_000), 1, Some(1_000));
+    assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(900));
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2, 3]);
+    assert_eq!(
+        claimed,
+        vec![1, 2, 3],
+        "the restored remainder still pays for height 3"
+    );
+    assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(800));
+}
+
+#[test]
+fn header_adopt_is_rewritten_only_after_the_walk_is_proved() {
+    let (dir, hub, mut st, gen) = opened("unproven-adopt", true);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 12);
+    apply(&mut st, &hub, 0, full);
+    assert!(!st.header_walk.proven);
+    assert!(!adopt_path(&hub).exists());
+    st.header_walk.proven = true;
+    save_adopt(&st, &hub);
+    assert!(adopt_path(&hub).exists());
+    let mut restarted = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
+    assert!(restore_adopt(&mut restarted, &hub));
+    assert_eq!(restarted.header_walk.checkpoints.len(), 1);
+    let _ = std::fs::remove_dir_all(dir.path());
 }

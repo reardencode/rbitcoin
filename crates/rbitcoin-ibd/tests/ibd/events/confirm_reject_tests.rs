@@ -1691,7 +1691,13 @@ fn ibd_bad_prev_fork() {
             None,
         );
     };
-    drain(&mut st, ConfirmEvent::Accepted { hash: a1 });
+    drain(
+        &mut st,
+        ConfirmEvent::Accepted {
+            hash: a1,
+            wire_bytes: 0,
+        },
+    );
     assert!(!st.ordered_set.contains(&a1) && st.body.is_known_archived(&a1));
     drain(
         &mut st,

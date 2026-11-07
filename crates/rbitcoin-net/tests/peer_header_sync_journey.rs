@@ -1161,6 +1161,9 @@ fn a_fork_retarget_uses_the_challenger_period() {
         period.bits,
         9,
     );
+    // Look-ahead past the soft cap is a checkpoint, so the parent row is not
+    // there until this test writes the chain the decoy hangs off.
+    hub.ensure_headers_batch(&main_a).unwrap();
     hub.ensure_headers_batch(&[decoy]).unwrap();
     st.record_height(decoy.block_hash(), 20);
     let fork_a = extend_chain(&hub, &genesis, &main_a, 10, 2);

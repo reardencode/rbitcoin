@@ -344,6 +344,12 @@ impl BlockQueue {
         self.height_to_id.contains_key(&height)
     }
 
+    /// Wire length at `height`, without cloning the payload.
+    pub fn payload_len_at(&self, height: u32) -> Option<u64> {
+        let id = self.height_to_id.get(&height).copied()?;
+        self.index.get(&id).map(|e| e.body.charge())
+    }
+
     /// Heights currently on the queue (ascending).
     pub fn heights(&self) -> Vec<u32> {
         self.height_to_id.keys().copied().collect()
