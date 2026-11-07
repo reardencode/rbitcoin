@@ -598,10 +598,10 @@ async fn satisfy_one_http_wait(
             WaitKind::Block(want.to_string())
         }
         "waitforblockheight" => {
-            let Ok(h) = params.req_u64(0, "height") else {
+            let Ok(h) = params.req_core_int(0, "height") else {
                 return HttpWaitPrep::skip();
             };
-            WaitKind::Height(h as u32)
+            WaitKind::Height(h)
         }
         "waitfornewblock" => {
             let ctx_b = Arc::clone(ctx);
@@ -630,7 +630,7 @@ async fn satisfy_one_http_wait(
                 };
                 match kind {
                     WaitKind::Block(want) => hash == want,
-                    WaitKind::Height(want) => height >= want,
+                    WaitKind::Height(want) => crate::methods::chain::height_reached(height, want),
                     WaitKind::New(start) => hash != start,
                 }
             })
@@ -647,7 +647,7 @@ async fn satisfy_one_http_wait(
 #[doc(hidden)]
 pub enum WaitKind {
     Block(String),
-    Height(u32),
+    Height(i32),
     New(String),
 }
 

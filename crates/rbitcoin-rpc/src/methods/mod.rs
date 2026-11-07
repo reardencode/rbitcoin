@@ -596,7 +596,7 @@ impl RpcParams {
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, format!("{name} must be an integer")))
     }
 
-    pub fn req_core_int(&self, index: usize, name: &str) -> Result<i32, Value> {
+    pub fn req_core_int<T: TryFrom<i64>>(&self, index: usize, name: &str) -> Result<T, Value> {
         core_json_int(self.req(index, name)?)
     }
 
