@@ -179,6 +179,9 @@ pub struct HeaderWalk {
     pub max_headers: Option<u64>,
     /// The clock was behind the starting median time, so the walk did not start.
     pub clock_refused: bool,
+    /// The refusal has already been logged. Survives the reset in
+    /// `install_origin`, so a later ask does not log it again.
+    clock_logged: bool,
     /// A batch would have passed [`Self::max_headers`].
     pub length_exceeded: bool,
     /// Highest checkpoint height a non-reserved peer's full batch matched.
@@ -483,9 +486,16 @@ pub fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoade
     }
     if !arm_walk_bounds(st, hub) {
         let epoch = st.header_walk.report_epoch;
+        let logged = st.header_walk.clock_logged;
         st.header_walk = HeaderWalk::default();
         st.header_walk.report_epoch = epoch;
         st.header_walk.clock_refused = true;
+        st.header_walk.clock_logged = true;
+        if !logged {
+            rbitcoin_log::warn!(
+                "ibd: header walk refused: clock is more than two hours behind the starting median time"
+            );
+        }
         return;
     }
     st.header_walk.origin = true;
@@ -3986,6 +3996,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         adopt_retired: false,
         max_headers: None,
         clock_refused: false,
+        clock_logged: false,
         length_exceeded: false,
         witness_height: None,
         lead_class_a: BTreeMap::new(),

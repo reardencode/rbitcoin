@@ -691,6 +691,9 @@ pub fn plan_header_reply(
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) -> HeaderPlan {
+    if st.header_walk.clock_refused {
+        return HeaderPlan::Done;
+    }
     // A batch that crossed this peer's open probe leaves that ask in flight.
     let ask = if st.header_walk.probe_open == Some(peer) {
         super::header_walk::HeaderAsk::Unsolicited

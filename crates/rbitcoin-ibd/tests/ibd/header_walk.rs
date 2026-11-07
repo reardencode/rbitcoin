@@ -6627,6 +6627,43 @@ fn a_clock_behind_the_starting_median_does_not_start_the_walk() {
     let _ = dir;
 }
 
+/// The walk does not start, a short batch is not stored, and the refusal is
+/// logged once.
+#[test]
+fn a_refused_clock_does_not_store_headers() {
+    let _clock = ResetClock;
+    let (dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-clock-store");
+    hub.ensure_genesis().unwrap();
+    hub.milestone = floor_milestone(1_000_000);
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    set_walk_unix_for_test(Some(
+        u64::from(gen_hdr.time).saturating_sub(WALK_CLOCK_SKEW + 1),
+    ));
+    let (s0, rx0) = slot(0);
+    std::mem::forget(rx0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    rbitcoin_log::capture_logs(true);
+    ensure_origin(&mut st, &hub);
+    ensure_origin(&mut st, &hub);
+    let logs = rbitcoin_log::take_logs();
+    rbitcoin_log::capture_logs(false);
+    assert!(!st.header_walk.origin);
+    assert!(st.header_walk.clock_refused);
+    let before = hub.query.store().header_count();
+    apply(&mut st, &hub, 0, headers_after(gen_hdr, 5, 1));
+    assert_eq!(hub.query.store().header_count(), before);
+    assert!(st.header_walk.clock_refused);
+    assert_eq!(
+        logs.iter()
+            .filter(|(_, line)| line.contains("ibd: header walk refused"))
+            .count(),
+        1,
+        "the refusal is logged once"
+    );
+    let _ = dir;
+}
+
 #[test]
 fn an_unproven_height_past_u32_keeps_its_own_checkpoint() {
     let (_dir, hub, mut st, gen) = opened("unproven-wide", false);
