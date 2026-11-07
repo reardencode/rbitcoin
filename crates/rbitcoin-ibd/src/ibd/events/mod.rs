@@ -709,6 +709,10 @@ pub fn plan_header_reply(
             HeaderPlan::Done
         };
     }
+    if super::header_walk::short_below_floor(st, hub, &headers) {
+        return HeaderPlan::Done;
+    }
+    super::header_walk::note_header_witness(st, hub, peer, &headers);
     if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
         return HeaderPlan::Done;
     }
@@ -717,9 +721,11 @@ pub fn plan_header_reply(
     let keep = match class {
         super::header_walk::HeaderClass::WalkAbsorb => {
             let before = super::header_walk::candidate_tip(st);
-            if super::header_walk::absorb_lookahead(st, hub, peer, ask, &headers)
-                && super::header_walk::candidate_tip(st) == before
-            {
+            let absorbed = super::header_walk::absorb_lookahead(st, hub, peer, ask, &headers);
+            let extended = super::header_walk::candidate_tip(st) != before;
+            // At the soft cap the checkpoint is the record. Under it, the
+            // confirm window still stores the headers.
+            if absorbed && (!extended || st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP) {
                 return HeaderPlan::Done;
             }
             headers.len()
@@ -992,6 +998,7 @@ fn answer_probe(
     if !headers.is_empty() {
         note_announcement(st, peer);
         note_peer_headers(st, hub, peer, headers);
+        super::header_walk::note_header_witness(st, hub, peer, headers);
         // A header this node has not seen: the peer's chain leaves this one
         // or runs past the path. The walk asks it, as after a block inv.
         let last = headers[headers.len() - 1].block_hash();
@@ -1199,12 +1206,17 @@ pub fn take_confirm_events(
     let mut deferred = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         match ev {
-            super::confirm::ConfirmEvent::Accepted { hash } => {
+            super::confirm::ConfirmEvent::Accepted { hash, wire_bytes } => {
                 *last_progress = Instant::now();
                 st.confirm_stuck_since = None;
                 remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
                 st.body.mark_archived(hash);
                 let tip = hub.tip_height().unwrap_or(0);
+                // The write thread moves the tip to the end of the batch before
+                // these events arrive. Charging `tip` would bill the matched
+                // prefix against the lead. The block's own height is the lead.
+                let height = st.hash_height.get(&hash).copied().unwrap_or(0);
+                super::header_walk::note_unproven_class_a(st, height, wire_bytes);
                 archive_write_next.store(tip.saturating_add(1), Ordering::Relaxed);
                 st.max_ready_height = st.max_ready_height.max(tip);
                 max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);

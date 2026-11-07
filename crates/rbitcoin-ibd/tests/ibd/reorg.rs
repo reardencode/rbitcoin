@@ -7,6 +7,113 @@ use rbitcoin_primitives::Height;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// An unproved walk may rewind through its lead, which is deeper than 1,024.
+/// A proved walk still stops at [`REWIND_MAX_DEPTH`].
+#[test]
+fn unproved_lead_rewinds_past_1024_and_a_proved_walk_does_not() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let mut prev = gen;
+    let mut time = 1_500_080_000u32;
+    for height in 1..=1_025u32 {
+        time = time.saturating_add(600);
+        let block = mine(prev, time, height);
+        hub.accept_block(block.clone()).unwrap();
+        prev = block.block_hash();
+    }
+    assert_eq!(hub.tip_height(), Some(1_025));
+    let side = distinct_sib(mine(gen, 1_500_080_100, 1), prev);
+    hub.ensure_header(&side.header).unwrap();
+    let path = [side.block_hash()];
+    assert!(
+        prepare_header_rewind(&hub, &path, REWIND_MAX_DEPTH)
+            .unwrap()
+            .is_none(),
+        "1,025 blocks is past the proved cap, and this call must not move the tip"
+    );
+    assert_eq!(hub.tip_height(), Some(1_025));
+    assert!(
+        prepare_header_rewind(
+            &hub,
+            &path,
+            rbitcoin_ibd::ibd::header_walk::UNPROVEN_LEAD_BLOCKS
+        )
+        .unwrap()
+        .is_some(),
+        "1,025 is inside the unproved lead and not past it"
+    );
+    // That prepare disconnected. The proved-walk case needs its own chain.
+    let (dir_proved, hub_proved) = tmp_hub();
+    hub_proved.ensure_genesis().unwrap();
+    let gen_b = hub_proved.tip_hash().unwrap();
+    let mut prev_b = gen_b;
+    let mut time_b = 1_500_090_000u32;
+    for height in 1..=1_025u32 {
+        time_b = time_b.saturating_add(600);
+        let block = mine(prev_b, time_b, height);
+        hub_proved.accept_block(block.clone()).unwrap();
+        prev_b = block.block_hash();
+    }
+    let side_b = distinct_sib(mine(gen_b, 1_500_090_100, 1), prev_b);
+    hub_proved.ensure_header(&side_b.header).unwrap();
+    let mut proved = rbitcoin_ibd::ibd::state::IbdWorkState::new(
+        Vec::new(),
+        hub_proved.tip_hash(),
+        hub_proved.tip_height(),
+    );
+    proved.header_walk.origin = true;
+    proved.header_walk.proven = true;
+    assert_eq!(
+        rbitcoin_ibd::ibd::header_walk::rewind_depth_cap(&proved),
+        REWIND_MAX_DEPTH
+    );
+    assert!(!apply_header_rewind(&mut proved, &hub_proved, &[side_b.block_hash()]).unwrap());
+    assert_eq!(hub_proved.tip_height(), Some(1_025));
+    let mut unproved =
+        rbitcoin_ibd::ibd::state::IbdWorkState::new(Vec::new(), Some(prev), Some(1_025));
+    unproved.header_walk.origin = true;
+    unproved.header_walk.proven = false;
+    assert_eq!(
+        rbitcoin_ibd::ibd::header_walk::rewind_depth_cap(&unproved),
+        rbitcoin_ibd::ibd::header_walk::UNPROVEN_LEAD_BLOCKS
+    );
+    // The first prepare already disconnected `hub`. Rebuild is the proved hub's
+    // twin: a fresh chain checked through `apply_header_rewind`.
+    let (dir_lead, hub_lead) = tmp_hub();
+    hub_lead.ensure_genesis().unwrap();
+    let gen_c = hub_lead.tip_hash().unwrap();
+    let mut prev_c = gen_c;
+    let mut time_c = 1_500_100_000u32;
+    for height in 1..=1_025u32 {
+        time_c = time_c.saturating_add(600);
+        let block = mine(prev_c, time_c, height);
+        hub_lead.accept_block(block.clone()).unwrap();
+        prev_c = block.block_hash();
+    }
+    let side_c = distinct_sib(mine(gen_c, 1_500_100_100, 1), prev_c);
+    hub_lead.ensure_header(&side_c.header).unwrap();
+    let kept = prev_c;
+    let mut lead = rbitcoin_ibd::ibd::state::IbdWorkState::new(
+        Vec::new(),
+        hub_lead.tip_hash(),
+        hub_lead.tip_height(),
+    );
+    lead.header_walk.origin = true;
+    lead.header_walk.proven = false;
+    assert!(apply_header_rewind(&mut lead, &hub_lead, &[side_c.block_hash()]).unwrap());
+    assert_eq!(hub_lead.tip_height(), Some(0));
+    assert!(
+        hub_lead
+            .query
+            .get_header_by_hash(kept.as_byte_array())
+            .unwrap()
+            .is_some(),
+        "the abandoned header row stays"
+    );
+    let _ = (dir, dir_proved, dir_lead);
+}
+
 fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("ibd-reorg")
 }
@@ -307,7 +414,7 @@ fn commit_deeper_fork_after_prepare() {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .expect("side hash armed");
-    let prep = prepare_header_rewind(&hub, &[g1])
+    let prep = prepare_header_rewind(&hub, &[g1], REWIND_MAX_DEPTH)
         .unwrap()
         .expect("deeper fork disconnects to genesis");
     let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());

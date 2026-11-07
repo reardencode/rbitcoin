@@ -2869,3 +2869,12 @@ fn stopped_parent_check_is_off_tip() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn accepted_wire_share_assigns_the_remainder_to_the_last_block() {
+    use rbitcoin_ibd::ibd::confirm::accepted_wire_share;
+    let shares: Vec<u64> = (0..3).map(|i| accepted_wire_share(1_000, 3, i)).collect();
+    assert_eq!(shares, vec![333, 333, 334]);
+    assert_eq!(shares.iter().sum::<u64>(), 1_000);
+    assert_eq!(accepted_wire_share(5, 1, 0), 5);
+}

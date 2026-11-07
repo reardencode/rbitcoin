@@ -214,6 +214,13 @@ pub struct ConfirmFeedInner {
     pub inflight: std::collections::HashSet<u32>,
     /// Height → lookup epoch when load claimed it (survives `Self::clear`).
     pub claimed_epoch: HashMap<u32, u64>,
+    /// Highest height [`offer_confirm_ready`] may note. `None` is no lead cap.
+    pub height_limit: Option<u32>,
+    /// Heights at or below this are the matched chain. They do not spend the lead.
+    pub lead_from: u32,
+    /// Class A bytes still allowed above `lead_from`. `None` is no byte cap.
+    /// Offer lowers this as it notes bodies. A refresh keeps the tighter value.
+    pub lead_bytes_left: Option<u64>,
 }
 
 impl Default for ConfirmFeed {
@@ -229,6 +236,9 @@ impl ConfirmFeed {
                 ready: std::collections::BTreeMap::new(),
                 inflight: std::collections::HashSet::new(),
                 claimed_epoch: HashMap::new(),
+                height_limit: None,
+                lead_from: 0,
+                lead_bytes_left: None,
             }),
             cv: std::sync::Condvar::new(),
             stop: AtomicBool::new(false),
@@ -253,6 +263,38 @@ impl ConfirmFeed {
     /// The IBD thread has applied the verdict.
     pub fn release_dropped_body(&self, hash: &BlockHash) {
         self.dropped_bodies.lock().unwrap().remove(hash);
+    }
+
+    /// Highest height the next [`offer_confirm_ready`] may note.
+    /// `None` lifts the unproven lead.
+    pub fn set_height_limit(&self, limit: Option<u32>) {
+        self.inner.lock().unwrap().height_limit = limit;
+    }
+
+    /// Install the unproven lead. A later call keeps the smaller byte remainder
+    /// so blocks already noted are not offered again under a fresh budget.
+    /// `bytes_left == None` lifts the byte cap (the walk proved work).
+    pub fn set_unproven_bounds(
+        &self,
+        height_limit: Option<u32>,
+        lead_from: u32,
+        bytes_left: Option<u64>,
+    ) {
+        let mut g = self.inner.lock().unwrap();
+        g.height_limit = height_limit;
+        g.lead_from = lead_from;
+        g.lead_bytes_left = match (g.lead_bytes_left, bytes_left) {
+            (_, None) => None,
+            (None, Some(n)) => Some(n),
+            (Some(cur), Some(n)) => Some(cur.min(n)),
+        };
+    }
+
+    /// This height is already noted or claimed. A second offer must not spend
+    /// the lead budget on it again.
+    pub fn height_pending(&self, height: u32) -> bool {
+        let g = self.inner.lock().unwrap();
+        g.inflight.contains(&height) || g.ready.contains_key(&height)
     }
 
     /// Lookup waits `for_` before it selects a body again.
@@ -925,9 +967,22 @@ impl RejectParent {
     }
 }
 
+/// One block's share of a confirmed batch. The last block keeps the remainder
+/// so the shares add up to `total`.
+#[doc(hidden)]
+pub fn accepted_wire_share(total: u64, blocks: usize, index: usize) -> u64 {
+    let n = u64::try_from(blocks).unwrap_or(1).max(1);
+    let base = total / n;
+    if blocks > 0 && index + 1 == blocks {
+        base + (total % n)
+    } else {
+        base
+    }
+}
+
 pub enum ConfirmEvent {
     /// Tip advanced; hash is the confirmed block.
-    Accepted { hash: BlockHash },
+    Accepted { hash: BlockHash, wire_bytes: u64 },
     /// Height is the attempted confirm height (for operator logs).
     Reject {
         height: u32,
@@ -2134,6 +2189,7 @@ pub fn spawn_confirm_engine(
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     },
                 };
+                let batch_wire = std::cell::Cell::new(0u64);
                 let (batch, parts, next_left, clear) = drain_script_ok_write_queue(
                     first,
                     &write_rx,
@@ -2142,6 +2198,7 @@ pub fn spawn_confirm_engine(
                         let n = b.len();
                         let wire = b.approx_wire_bytes();
                         let parents = b.parent_count();
+                        batch_wire.set(batch_wire.get().saturating_add(wire as u64));
                         q_wb.note_write_recv(n, wire, parents);
                     },
                 );
@@ -2187,7 +2244,7 @@ pub fn spawn_confirm_engine(
                             warn!("ibd: confirm write note tip: {e}");
                         }
                         let t_deq = Instant::now();
-                        for (height, raw) in &heights_hashes {
+                        for (index, (height, raw)) in heights_hashes.iter().enumerate() {
                             let hash = BlockHash::from_byte_array(*raw);
                             if let Err(e) = hub_wb.query.block_queue_dequeue_height(*height) {
                                 rbitcoin_log::debug!(
@@ -2198,8 +2255,12 @@ pub fn spawn_confirm_engine(
                                 .confirm_blocks
                                 .fetch_add(1, Ordering::Relaxed);
                             accepted_wb.fetch_add(1, Ordering::SeqCst);
+                            let share = accepted_wire_share(batch_wire.get(), heights_hashes.len(), index);
                             if event_tx_wb
-                                .send(ConfirmEvent::Accepted { hash })
+                                .send(ConfirmEvent::Accepted {
+                                    hash,
+                                    wire_bytes: share,
+                                })
                                 .is_err()
                             {
                                 feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
@@ -2263,7 +2324,7 @@ pub fn spawn_confirm_engine(
                                         ) {
                                             warn!("ibd: confirm write note tip: {e}");
                                         }
-                                        for (h, raw) in &heights_hashes {
+                                        for (index, (h, raw)) in heights_hashes.iter().enumerate() {
                                             let ha = BlockHash::from_byte_array(*raw);
                                             if let Err(e) =
                                                 hub_wb.query.block_queue_dequeue_height(*h)
@@ -2276,8 +2337,16 @@ pub fn spawn_confirm_engine(
                                                 .confirm_blocks
                                                 .fetch_add(1, Ordering::Relaxed);
                                             accepted_wb.fetch_add(1, Ordering::SeqCst);
+                                            let share = accepted_wire_share(
+                                                batch_wire.get(),
+                                                heights_hashes.len(),
+                                                index,
+                                            );
                                             if event_tx_wb
-                                                .send(ConfirmEvent::Accepted { hash: ha })
+                                                .send(ConfirmEvent::Accepted {
+                                                    hash: ha,
+                                                    wire_bytes: share,
+                                                })
                                                 .is_err()
                                             {
                                                 feed_wb.finish(
@@ -2332,14 +2401,21 @@ pub fn spawn_confirm_engine(
                             debug!(
                                 "ibd: confirm write skip already-committed @{height} ({msg})"
                             );
-                            for (_, raw) in &heights_hashes {
+                            for (index, (_, raw)) in heights_hashes.iter().enumerate() {
                                 let h = BlockHash::from_byte_array(*raw);
                                 if hub_wb.has_block(&h) {
                                     loop_stats_wb
                                         .confirm_blocks
                                         .fetch_add(1, Ordering::Relaxed);
                                     accepted_wb.fetch_add(1, Ordering::SeqCst);
-                                    let _ = event_tx_wb.send(ConfirmEvent::Accepted { hash: h });
+                                    let _ = event_tx_wb.send(ConfirmEvent::Accepted {
+                                        hash: h,
+                                        wire_bytes: accepted_wire_share(
+                                            batch_wire.get(),
+                                            heights_hashes.len(),
+                                            index,
+                                        ),
+                                    });
                                 }
                             }
                             feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
@@ -3229,6 +3305,10 @@ pub fn offer_confirm_ready(
     max_ready_height: &mut u32,
     max_ready_shared: &AtomicU32,
 ) -> u32 {
+    let (height_limit, lead_from, mut bytes_left) = {
+        let g = feed.inner.lock().unwrap();
+        (g.height_limit, g.lead_from, g.lead_bytes_left)
+    };
     let expect = match hub.tip_height() {
         None => 0u32,
         Some(t) => t.saturating_add(1),
@@ -3236,6 +3316,9 @@ pub fn offer_confirm_ready(
     let limit = expect.saturating_add(OFFER_AHEAD);
     let mut noted = 0u32;
     for ht in expect..=limit {
+        if height_limit.is_some_and(|cap| ht > cap) {
+            break;
+        }
         let Some(hash) = height_to_hash.occupant(ht) else {
             break;
         };
@@ -3266,10 +3349,25 @@ pub fn offer_confirm_ready(
         if !super::progress::claim_ready(hub, body, ht, &hash) {
             break;
         }
+        let fresh = !feed.height_pending(ht);
+        if fresh && ht > lead_from {
+            if let (Some(left), Some(wire)) = (bytes_left, hub.query.block_queue_payload_len(ht)) {
+                if wire > left {
+                    break;
+                }
+                bytes_left = Some(left - wire);
+            }
+        }
         *max_ready_height = (*max_ready_height).max(ht);
         max_ready_shared.store(*max_ready_height, Ordering::Relaxed);
         feed.note(ht, hash);
         noted += 1;
+    }
+    {
+        let mut g = feed.inner.lock().unwrap();
+        if g.lead_bytes_left.is_some() {
+            g.lead_bytes_left = bytes_left;
+        }
     }
     noted
 }
