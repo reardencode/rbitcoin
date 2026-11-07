@@ -92,6 +92,7 @@ let
             noSeeds = true;
             externalIp = [ "203.0.113.5" ];
             peerTimeout = 60;
+            discoverFromPeers = true;
           };
           rpc = {
             enable = true;
@@ -513,6 +514,7 @@ assert defaultCfg.esplora.blockTemplate == false;
 assert defaultCfg.esplora.socketPath == null;
 assert defaultCfg.sv2.tp.idleTimeout == 0;
 assert defaultCfg.p2p.discover == true;
+assert defaultCfg.p2p.discoverFromPeers == false;
 assert defaultCfg.p2p.listenOnion == false;
 assert defaultCfg.rpc.port == 8332;
 assert defaultCfg.rpc.socketPath == null;
@@ -768,6 +770,10 @@ assert cookieDataDirMode == "0700";
 assert builtins.match ".*--listen .*" listenOffExec == null;
 assert builtins.match ".*--max-inbound 0.*" listenOffExec != null;
 assert builtins.match ".*--no-discover.*" listenOffExec != null;
+assert builtins.match ".*--discover-from-peers.*" execStart != null;
+assert builtins.match ".*--discover-from-peers.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
 assert builtins.match ".*--sv2-tp.*" listenOffExec == null;
 assert listenOffSystem.config.networking.firewall.allowedTCPPorts == [ ];
 assert builtins.match ".*--sp-tweaks .*" spExec != null;
