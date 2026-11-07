@@ -301,10 +301,10 @@ let
   ++ optional needI2pSam cfg.i2p.sam
   ++ optional cfg.i2p.acceptIncoming "--i2p-accept-incoming"
   ++ optional cfg.cjdns.reachable "--cjdns-reachable"
-  ++ optional cfg.electrum.hiddenService "--electrum-onion"
-  ++ optional cfg.esplora.hiddenService "--esplora-onion"
-  ++ optional cfg.electrum.i2p "--electrum-i2p"
-  ++ optional cfg.esplora.i2p "--esplora-i2p"
+  ++ optional (cfg.electrum.enable && cfg.electrum.hiddenService) "--electrum-onion"
+  ++ optional (cfg.esplora.enable && cfg.esplora.hiddenService) "--esplora-onion"
+  ++ optional (cfg.electrum.enable && cfg.electrum.i2p) "--electrum-i2p"
+  ++ optional (cfg.esplora.enable && cfg.esplora.i2p) "--esplora-i2p"
   ++ optional cfg.pruneSeqSigWit "--prune-seqsigwit"
   ++ optional (cfg.pruneSeqSigwitRamThresholdBytes != null) "--prune-seqsigwit-ram-threshold-bytes"
   ++ optional (cfg.pruneSeqSigwitRamThresholdBytes != null) (
