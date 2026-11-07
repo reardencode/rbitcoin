@@ -371,6 +371,7 @@ let
   esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
   electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
   listenOnionNeedsInboundMsg = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
+  cookieOutsideMsg = "services.rbitcoin.tor.controlCookie must be a file in /run/tor or /var/lib/tor when the module configures tor";
   apiLogRootMsg = "services.rbitcoin.apiLog must not live in /";
   tokenRootMsg = "services.rbitcoin.rpc.tokenFile must not live in /";
   rpcSockRootMsg = "services.rbitcoin.rpc.socketPath must not live in /";
@@ -870,6 +871,29 @@ assert ! system.config.services.tor.enable;
 assert onionGroupSystem.config.services.tor.settings.CookieAuthentication == true;
 assert onionGroupSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/control.authcookie";
 assert onionGroupSystem.config.services.tor.settings.CookieAuthFileGroupReadable == true;
+assert builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/var/lib/rbitcoin/control.authcookie";
+}));
+assert builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  p2p.listenOnion = true;
+  tor.controlCookie = "/run/tor/../rbitcoin/cookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/run/tor/control.authcookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/var/lib/tor/control.authcookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  tor.control = "127.0.0.1:9051";
+  tor.controlCookie = "/var/lib/rbitcoin/control.authcookie";
+}));
 assert hasControlPort onionGroupSystem.config "127.0.0.1" 9051;
 assert hasControlPort listenOnionGroupSystem.config "127.0.0.1" 9051;
 assert torKeepPortSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/other.cookie";

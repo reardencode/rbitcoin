@@ -705,6 +705,8 @@ in
           /run/tor/control.authcookie. The unit joins group tor in either case, and creates
           that group when it is missing, with the NixOS tor gid.
           An implied control port also sets this path as CookieAuthFile.
+          That path must be a file directly in `/run/tor` or `/var/lib/tor`, the only
+          directories the NixOS tor unit can write. A `..` segment is refused.
         '';
       };
     };
@@ -1282,6 +1284,20 @@ in
       {
         assertion = cfg.rpc.tokenFile == null || rpcListening;
         message = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
+      }
+      {
+        assertion =
+          !impliedTorControl
+          || cfg.tor.controlCookie == null
+          || (
+            lib.hasPrefix "/" cfg.tor.controlCookie
+            && !lib.hasInfix ".." cfg.tor.controlCookie
+            && (
+              dirOf cfg.tor.controlCookie == "/run/tor"
+              || dirOf cfg.tor.controlCookie == "/var/lib/tor"
+            )
+          );
+        message = "services.rbitcoin.tor.controlCookie must be a file in /run/tor or /var/lib/tor when the module configures tor";
       }
       {
         assertion = cfg.apiLog == null || dirOf cfg.apiLog != "/";
