@@ -5299,6 +5299,7 @@ fn stored_work_uses_the_confirmed_tip_when_the_base_does_not_link() {
         header: None,
         times: Vec::new(),
         diff: DiffSnap::default(),
+        supplied_by: None,
     });
     st.record_height(next.block_hash(), tip_h + 1);
     let (work, _) = stored_path_state(&st, &hub, next.block_hash())
@@ -5321,6 +5322,7 @@ fn mark_checkpoint(hash: BlockHash, height: u32) -> Checkpoint {
         header: None,
         times: Vec::new(),
         diff: DiffSnap::default(),
+        supplied_by: None,
     }
 }
 
@@ -5389,7 +5391,7 @@ fn adopt_heavier_keeps_the_milestone_at_the_fork_height() {
     let mut raw = [0u8; 32];
     raw[31] = 9;
     let passed = Work::from_be_bytes(raw);
-    adopt_heavier(&mut st, &hub, prev, &[header], passed);
+    adopt_heavier(&mut st, &hub, prev, &[header], passed, None);
     assert_eq!(st.header_walk.tip.milestone_hash, Some(marker));
     assert_eq!(st.header_walk.tip.work, passed);
 }
@@ -5741,14 +5743,14 @@ fn note_stored_candidate_ignores_a_dead_end_tip() {
     st.header_walk.tip.hash = Some(gen);
     st.header_walk.tip.height = 0;
     st.header_walk.dead_ends.insert(gen);
-    note_stored_candidate(&mut st, &hub, &[mine(gen, 30)]);
+    note_stored_candidate(&mut st, &hub, 0, &[mine(gen, 30)]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.header_walk.checkpoints.is_empty());
 
     st.header_walk.dead_ends.clear();
     let mut broken = mine(gen, 31);
     broken.bits = CompactTarget::from_consensus(0x1d00ffff);
-    note_stored_candidate(&mut st, &hub, &[broken]);
+    note_stored_candidate(&mut st, &hub, 0, &[broken]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.header_walk.checkpoints.is_empty());
 }
@@ -6511,7 +6513,7 @@ fn an_unproven_height_past_u32_keeps_its_own_checkpoint() {
     st.header_walk.tip.height_wide = u64::from(u32::MAX);
     st.header_walk.max_headers = Some(u64::MAX);
     let next = headers_after(parent, 1, 7).pop().unwrap();
-    assert!(extend_tip(&mut st, &hub, &[next]));
+    assert!(extend_tip(&mut st, &hub, &[next], None));
     let ckpt = st.header_walk.checkpoints.last().unwrap();
     assert_eq!(ckpt.height_wide, u64::from(u32::MAX) + 1);
     assert_eq!(ckpt.height, u32::MAX);
@@ -6526,11 +6528,44 @@ fn an_unproven_height_past_u32_keeps_its_own_checkpoint() {
     st.header_walk.max_headers = Some(wide);
     let extra = headers_after(next, 1, 8).pop().unwrap();
     assert!(
-        !extend_tip(&mut st, &hub, &[extra]),
+        !extend_tip(&mut st, &hub, &[extra], None),
         "the length cap still sees the wide height after a rewind"
     );
     assert!(st.header_walk.length_exceeded);
     assert_eq!(st.header_walk.tip.height_wide, wide);
+}
+
+#[test]
+fn a_peer_cannot_witness_checkpoints_it_supplied() {
+    let (_dir, hub, mut st, gen) = opened("unproven-self-witness", true);
+    let (s2, rx2) = slot(2);
+    std::mem::forget(rx2);
+    st.slots.push(s2);
+    fill_to_cap(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let full = headers_after(gen, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 8);
+    let end = *full.last().unwrap();
+    apply(&mut st, &hub, 0, full.clone());
+    assert_eq!(st.header_walk.reserved, Some(0));
+    assert!(st.header_walk.witness_height.is_none());
+    apply(&mut st, &hub, 0, headers_after(end, 1, 9));
+    assert_ne!(st.header_walk.reserved, Some(0));
+    note_lane(&mut st, 0);
+    apply(&mut st, &hub, 0, full.clone());
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "the peer who supplied the checkpoints cannot match them"
+    );
+    apply(&mut st, &hub, 1, full.clone());
+    assert!(
+        st.header_walk.witness_height.is_none(),
+        "a batch nobody asked for is not a match"
+    );
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(st.header_walk.walk.peer, Some(2));
+    apply(&mut st, &hub, 2, full);
+    let matched = st.header_walk.checkpoints.last().unwrap().height;
+    assert_eq!(st.header_walk.witness_height, Some(matched));
 }
 
 #[test]
@@ -6602,6 +6637,7 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
         exhausted.bytes_left,
     );
 
+    note_lane(&mut st, 1);
     apply(&mut st, &hub, 1, full);
     let matched = st.header_walk.witness_height.unwrap();
     assert!(matched > hub.tip_height().unwrap_or(0));

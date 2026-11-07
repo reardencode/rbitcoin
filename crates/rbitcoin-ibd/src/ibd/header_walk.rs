@@ -97,6 +97,8 @@ pub struct Checkpoint {
     /// Difficulty after this reply. A later fork from this hash retargets
     /// from here, not from the walk tip.
     pub diff: DiffSnap,
+    /// Peer who supplied this reply. Not written to `header.adopt`.
+    pub supplied_by: Option<usize>,
 }
 
 /// Fork point, the chain built from it, and one checkpoint per reply.
@@ -1285,11 +1287,17 @@ pub fn offer_alternate(
     }
     let work = chain_work_after(parent, headers);
     if work > Work::from_be_bytes(st.header_walk.tip_work()) {
-        adopt_heavier(st, hub, prev, headers, work);
+        adopt_heavier(st, hub, prev, headers, work, peer);
         return Some(st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP);
     }
-    note_challenger(st, hub, prev, fork_height, parent, headers);
+    note_challenger(st, hub, prev, fork_height, parent, headers, peer);
     Some(true)
+}
+
+fn stamp_supplier(checkpoints: &mut [Checkpoint], peer: usize) {
+    if let Some(c) = checkpoints.last_mut() {
+        c.supplied_by = Some(peer);
+    }
 }
 
 #[doc(hidden)]
@@ -1415,6 +1423,7 @@ pub fn checkpoint_at(tip: &WalkTip) -> Checkpoint {
         header: tip.header,
         times: tip.times.clone(),
         diff: tip.diff,
+        supplied_by: None,
     }
 }
 
@@ -1448,6 +1457,7 @@ pub fn note_challenger(
     fork_height: u32,
     parent_work: Work,
     headers: &[Header],
+    peer: Option<usize>,
 ) {
     let end = chain_work_after(parent_work, headers);
     if st
@@ -1467,10 +1477,14 @@ pub fn note_challenger(
         ..WalkTip::default()
     };
     advance_tip(&mut tip, hub, headers);
+    let mut checkpoints = vec![checkpoint_at(&tip)];
+    if let Some(peer) = peer {
+        stamp_supplier(&mut checkpoints, peer);
+    }
     st.header_walk.challenger = Some(Challenger {
         fork_hash,
         fork_height,
-        checkpoints: vec![checkpoint_at(&tip)],
+        checkpoints,
         tip,
     });
 }
@@ -1857,6 +1871,7 @@ pub fn adopt_heavier(
     prev: BlockHash,
     headers: &[Header],
     work: Work,
+    peer: Option<usize>,
 ) {
     let Some(fork_height) = height_of(st, hub, prev) else {
         return;
@@ -1881,6 +1896,9 @@ pub fn adopt_heavier(
     st.header_walk
         .checkpoints
         .push(checkpoint_at(&st.header_walk.tip));
+    if let Some(peer) = peer {
+        stamp_supplier(&mut st.header_walk.checkpoints, peer);
+    }
     publish_work(st, hub);
     st.header_walk.emptied.clear();
     st.header_walk.dead_ends.clear();
@@ -2038,7 +2056,7 @@ pub fn absorb_lookahead(
         clear_peer_ask(st, peer);
         return true;
     }
-    let extended = extend_tip(st, hub, headers);
+    let extended = extend_tip(st, hub, headers, Some(peer));
     if st.header_walk.length_exceeded {
         clear_peer_ask(st, peer);
         return true;
@@ -2414,7 +2432,12 @@ pub fn note_empty(st: &mut IbdWorkState, hub: &ChainHub, peer: usize) -> bool {
 /// Context was already checked by [`ChainHub::ensure_headers_batch`]. A batch
 /// the walk absorbed is written on that same path; this only records the
 /// checkpoint when the tip has not already moved.
-pub fn note_stored_candidate(st: &mut IbdWorkState, hub: &ChainHub, headers: &[Header]) {
+pub fn note_stored_candidate(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: &[Header],
+) {
     if !st.header_walk.origin || headers.is_empty() || !pow_linked(headers) {
         return;
     }
@@ -2424,7 +2447,7 @@ pub fn note_stored_candidate(st: &mut IbdWorkState, hub: &ChainHub, headers: &[H
     if headers[0].prev_blockhash != tip || st.header_walk.dead_ends.contains(&tip) {
         return;
     }
-    let _ = extend_tip(st, hub, headers);
+    let _ = extend_tip(st, hub, headers, Some(peer));
 }
 
 /// A batch shorter than a full window, while the walk is still under the
@@ -2453,7 +2476,12 @@ fn over_length(st: &IbdWorkState, extra: usize) -> bool {
     over_length_at(st, wide.saturating_add(extra as u64))
 }
 
-pub fn extend_tip(st: &mut IbdWorkState, hub: &ChainHub, headers: &[Header]) -> bool {
+pub fn extend_tip(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    headers: &[Header],
+    peer: Option<usize>,
+) -> bool {
     if short_below_floor(st, hub, headers) {
         return false;
     }
@@ -2478,6 +2506,9 @@ pub fn extend_tip(st: &mut IbdWorkState, hub: &ChainHub, headers: &[Header]) -> 
     st.header_walk
         .checkpoints
         .push(checkpoint_at(&st.header_walk.tip));
+    if let Some(peer) = peer {
+        stamp_supplier(&mut st.header_walk.checkpoints, peer);
+    }
     st.header_walk.emptied.clear();
     publish_work(st, hub);
     save_adopt(st, hub);
@@ -3813,6 +3844,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
             header,
             times,
             diff,
+            supplied_by: None,
         });
     }
     let mut milestone = [0u8; 32];
@@ -3971,12 +4003,18 @@ pub fn note_unproven_class_a(st: &mut IbdWorkState, height: u32, wire_bytes: u64
     }
 }
 
-/// A full batch from a peer who is not the reserved walker, checked against
-/// the walk's checkpoints. A match moves the height confirm may follow.
+/// A full batch we asked for, checked against checkpoints another peer supplied.
+/// A match moves the height confirm may follow.
 #[doc(hidden)]
-pub fn note_header_witness(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, headers: &[Header]) {
+pub fn note_header_witness(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    ask: HeaderAsk,
+    headers: &[Header],
+) {
     if !st.header_walk.origin
-        || st.header_walk.reserved == Some(peer)
+        || !matches!(ask, HeaderAsk::InWindow | HeaderAsk::Late)
         || headers.len() < rbitcoin_net::codec::MAX_HEADERS_RESULTS
         || !pow_linked(headers)
     {
@@ -3989,6 +4027,16 @@ pub fn note_header_witness(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, h
     let PathAgree::Checkpoint(height) = path_agree(st, start, headers, true) else {
         return;
     };
+    let other = st
+        .header_walk
+        .checkpoints
+        .iter()
+        .rev()
+        .find(|c| c.height == height)
+        .is_some_and(|c| c.supplied_by.is_some_and(|supplier| supplier != peer));
+    if !other {
+        return;
+    }
     let next = st.header_walk.witness_height.unwrap_or(0).max(height);
     st.header_walk.witness_height = Some(next);
     st.header_walk.lead_class_a.retain(|&h, _| h > next);

@@ -358,7 +358,7 @@ pub fn on_headers_batch(
         }
         stored.push(hdr);
     }
-    super::header_walk::note_stored_candidate(st, hub, &stored);
+    super::header_walk::note_stored_candidate(st, hub, peer, &stored);
     added
 }
 
@@ -712,7 +712,7 @@ pub fn plan_header_reply(
     if super::header_walk::short_below_floor(st, hub, &headers) {
         return HeaderPlan::Done;
     }
-    super::header_walk::note_header_witness(st, hub, peer, &headers);
+    super::header_walk::note_header_witness(st, hub, peer, ask, &headers);
     if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
         return HeaderPlan::Done;
     }
@@ -998,7 +998,13 @@ fn answer_probe(
     if !headers.is_empty() {
         note_announcement(st, peer);
         note_peer_headers(st, hub, peer, headers);
-        super::header_walk::note_header_witness(st, hub, peer, headers);
+        super::header_walk::note_header_witness(
+            st,
+            hub,
+            peer,
+            super::header_walk::HeaderAsk::InWindow,
+            headers,
+        );
         // A header this node has not seen: the peer's chain leaves this one
         // or runs past the path. The walk asks it, as after a block inv.
         let last = headers[headers.len() - 1].block_hash();
