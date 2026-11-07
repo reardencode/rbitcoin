@@ -2205,7 +2205,7 @@ pub fn spawn_confirm_engine(
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     },
                 };
-                let batch_wire = std::cell::Cell::new(0u64);
+                let batch_wire = std::cell::Cell::new(first.approx_wire_bytes() as u64);
                 let (batch, parts, next_left, clear) = drain_script_ok_write_queue(
                     first,
                     &write_rx,
