@@ -1258,12 +1258,10 @@ impl Query {
                 if let Some(v) = appended.remove(&id) {
                     v
                 } else {
-                    let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
-                    ins
+                    self.inputs_for_confirmed_window(fk)?
                 }
             } else {
-                let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
-                ins
+                self.inputs_for_confirmed_window(fk)?
             };
             let bytes = ins.iter().map(|i| i.encoded_len() as u64).sum();
             staged.push((fk, ins, bytes));
@@ -1310,6 +1308,20 @@ impl Query {
             }
         }
         Ok(())
+    }
+
+    /// Witness for a confirmed height already in the window, or the archive stem
+    /// when prune mode is off. A prune-mode miss fails the confirm.
+    fn inputs_for_confirmed_window(&self, fk: Fk) -> Result<Vec<InputRecord>, QueryError> {
+        let tx = self.get_tx(fk)?;
+        if let Some(ins) = self.seqsigwit_spill_inputs_with_count(fk, tx.input_count)? {
+            return Ok(ins);
+        }
+        if self.store.prune_seqsigwit_mode() {
+            return Err(StoreError::Corrupt("seqsigwit window miss"));
+        }
+        let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
+        Ok(ins)
     }
 
     #[doc(hidden)]

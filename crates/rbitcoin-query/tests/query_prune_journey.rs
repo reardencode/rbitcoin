@@ -8,9 +8,23 @@ fn connect_range(
 ) -> Fk {
     let start = hashes.len() as u32;
     for h in start..start + n {
-        let (header, mut ta) = coinbase_block(h, prev, parent_hash);
+        let (mut header, mut ta) = coinbase_block(h, prev, parent_hash);
         if !witness.is_empty() {
             ta.inputs[0].witness = vec![witness.to_vec()];
+        }
+        // One coinbase: the merkle root is that txid. The fixture's stand-in
+        // root fails tip revalidate and drops the height the spill is keyed by.
+        if h > 0 {
+            header.merkle_root = ta.tx.txid;
+            let ph = parent_hash.expect("parent hash");
+            header.hash = rbitcoin_store::block_header_hash(
+                header.version,
+                &ph,
+                &header.merkle_root,
+                header.timestamp,
+                header.bits,
+                header.nonce,
+            );
         }
         parent_hash = Some(header.hash);
         hashes.push(header.hash);

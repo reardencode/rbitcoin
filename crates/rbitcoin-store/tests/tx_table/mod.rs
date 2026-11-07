@@ -420,6 +420,77 @@ fn input_n_in_scans_both_prevouts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn coinbase_batch(n: u8) -> Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)> {
+    (1..=n)
+        .map(|i| {
+            let mut txid = [0u8; 32];
+            txid[0] = i;
+            (
+                TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_count: 1,
+                    output_count: 1,
+                },
+                vec![InputRecord::coinbase(u32::MAX, vec![i], vec![])],
+                vec![OutputRecord::unspent(u64::from(i), vec![0x51])],
+            )
+        })
+        .collect()
+}
+
+fn cut_file_to_header(path: &std::path::Path) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_len(rbitcoin_store::file::FILE_HEADER_LEN as u64)
+        .unwrap();
+}
+
+fn write_prune_sidecar(dir: &std::path::Path) {
+    std::fs::write(dir.join("seqsigwit.prune"), u32::MAX.to_le_bytes()).unwrap();
+}
+
+/// Prune open keeps creates when the witness stem is only a header.
+#[test]
+fn pruned_open_keeps_creates_when_seqsigwit_stem_is_header() {
+    let dir = tempfile_dir("prune-open-header");
+    let t = create_tiny(&dir);
+    t.put_full_batch_indexed(&coinbase_batch(2), true).unwrap();
+    t.flush().unwrap();
+    let n = t.count();
+    assert_eq!(n, 2);
+    assert_eq!(t.input.count(), n);
+    drop(t);
+    cut_file_to_header(&dir.join("seqsigwit.body"));
+    cut_file_to_header(&dir.join("seqsigwit.loc"));
+    write_prune_sidecar(&dir);
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.count(), n, "pruned open must keep creates");
+    assert_eq!(t.input.count(), n);
+    assert!(t.prune_seqsigwit_mode());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A short input under prune, with no witness loc covering the creates, is the unpublished tail.
+#[test]
+fn pruned_open_truncates_to_short_input_when_seqsigwit_uncovered() {
+    let dir = tempfile_dir("prune-open-short-input");
+    let t = create_tiny(&dir);
+    t.put_full_batch_indexed(&coinbase_batch(2), true).unwrap();
+    t.flush().unwrap();
+    t.input.truncate_to_count(1).unwrap();
+    t.flush().unwrap();
+    drop(t);
+    cut_file_to_header(&dir.join("seqsigwit.body"));
+    cut_file_to_header(&dir.join("seqsigwit.loc"));
+    write_prune_sidecar(&dir);
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.count(), 1, "unpublished create past input must drop");
+    assert_eq!(t.input.count(), 1);
+    assert_eq!(t.txids.count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One Class A append roundtrips the output it stored.
 #[test]
 fn put_full_batch_roundtrips_one_output() {
