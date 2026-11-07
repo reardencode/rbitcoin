@@ -22,12 +22,44 @@ let
           network = "regtest";
           logLevel = "debug";
           scripthashIndex = true;
-          silentPaymentIndex = true;
           environment.RBITCOIN_IO = "uring";
           extraArgs = [
-            "--max-outbound"
-            "8"
+            "--max-run-secs"
+            "1"
           ];
+          asmap = "/srv/rbitcoin/ip_asn.dat";
+          uaComment = [ "nixos" ];
+          blockFilterIndex = true;
+          pruneSeqSigwitRamThresholdBytes = 0;
+          maxShCreates = 0;
+          mempool = {
+            sizeMb = 100;
+            expiry = 72;
+            minRelayTxFee = "0.00001000";
+            blocksOnly = true;
+            persist = false;
+            prefillCompact = false;
+            limitClusterCount = 10;
+            limitClusterSize = 100;
+            bytesPerSigop = 0;
+            blockReservedSigops = 400;
+          };
+          trusted = true;
+          alwaysRelay = true;
+          relay = true;
+          netPermission = [ "noban@192.0.2.0/24" ];
+          netPermissionBind = [ "noban@127.0.0.1:18444" ];
+          netPermissionRelay = false;
+          netPermissionForceRelay = true;
+          blockVersion = 2;
+          blockMinTxFee = "0.00001000";
+          apiLog = "/srv/rbitcoin/api.jsonl";
+          minChainWork = "01";
+          maxTipAge = 0;
+          checkBlocks = 0;
+          alertNotify = "/run/rbitcoin/alert";
+          startupNotify = "/run/rbitcoin/ready";
+          inhibitSuspend = true;
           proxy = "127.0.0.1:9050";
           onionProxy = "127.0.0.1:9050";
           proxyRandomize = true;
@@ -51,12 +83,23 @@ let
             address = "127.0.0.1";
             openFirewall = true;
             listenOnion = true;
+            maxOutbound = 8;
+            connect = [
+              "192.0.2.10:8333"
+              "peer.example:8333"
+            ];
+            seedNodes = [ "seed.example" ];
+            noSeeds = true;
+            externalIp = [ "203.0.113.5" ];
+            peerTimeout = 60;
           };
           rpc = {
             enable = true;
             socketPath = "/run/rbitcoin/rpc.sock";
             cookieFile = "/run/rbitcoin/rpc.cookie";
             clientVersion = 310000;
+            tokenFile = "/run/rbitcoin/rpc.token";
+            workQueue = 32;
           };
           electrum = {
             enable = true;
@@ -69,6 +112,7 @@ let
             openFirewall = true;
             hiddenService = true;
             maxInflight = 1024;
+            blockTemplate = true;
           };
           health.enable = true;
           metrics = true;
@@ -82,6 +126,7 @@ let
             staleGrace = 0;
             feeDelta = 0;
             templateInterval = 30;
+            idleTimeout = 30;
             openFirewall = true;
           };
         };
@@ -253,12 +298,220 @@ let
   sv2KeyNotInStore = "services.rbitcoin.sv2.tp.authoritySecretFile must not be a store path (the store is world-readable)";
   failedAssertions =
     sys: map (a: a.message) (builtins.filter (a: !a.assertion) sys.config.assertions);
+  execOf =
+    opts:
+    (nixpkgs.lib.nixosSystem {
+      inherit (pkgs.stdenv.hostPlatform) system;
+      modules = [
+        module
+        {
+          services.rbitcoin = {
+            enable = true;
+            package = fakePackage;
+          } // opts;
+        }
+      ];
+    }).config.systemd.services.rbitcoin.serviceConfig.ExecStart;
+  spExec = execOf {
+    silentPaymentIndex = true;
+    spTweaksDust = 546;
+  };
+  inboundExec = execOf {
+    p2p.maxInbound = 125;
+  };
+  unixExec = execOf {
+    rpc.unixSocket = true;
+    esplora = {
+      enable = true;
+      socketPath = "/run/rbitcoin/esplora.sock";
+      openFirewall = true;
+    };
+  };
+  unixSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          rpc.unixSocket = true;
+          esplora = {
+            enable = true;
+            socketPath = "/run/rbitcoin/esplora.sock";
+            openFirewall = true;
+          };
+        };
+      }
+    ];
+  };
+  onionOffExec = execOf {
+    tor.control = "127.0.0.1:9051";
+    esplora = {
+      enable = true;
+      hiddenService = false;
+    };
+  };
+  signetExec = execOf {
+    network = "signet";
+    signet = {
+      challenge = "51";
+      blockTime = 120;
+    };
+  };
+  spAndPruneMsg = "services.rbitcoin.silentPaymentIndex cannot be combined with pruneSeqSigWit";
+  signetChallengeMsg = "services.rbitcoin.signet.challenge requires network = \"signet\"";
+  signetTimeMsg = "services.rbitcoin.signet.blockTime requires signet.challenge";
+  trustSeedMsg = "services.rbitcoin.trustPeer cannot be combined with p2p.seedNodes";
+  bindNeedsListenMsg = "services.rbitcoin.netPermissionBind requires p2p.listen";
+  bindTrustMsg = "services.rbitcoin.netPermissionBind cannot be combined with trustPeer";
+  esploraSockNeedsEnableMsg = "services.rbitcoin.esplora.socketPath requires esplora.enable";
+  tokenNeedsRpcMsg = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
+  workQueueNeedsRpcMsg = "services.rbitcoin.rpc.workQueue requires an RPC listener";
+  esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
+  electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
+  listenOnionNeedsInboundMsg = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
+  cookieOutsideMsg = "services.rbitcoin.tor.controlCookie must be a file in /run/tor or /var/lib/tor when the module configures tor";
+  dataDirSysMsg = "services.rbitcoin.dataDir must not be a system directory";
+  coldSysMsg = "services.rbitcoin.coldDataDir must not be a system directory";
+  apiLogSysMsg = "services.rbitcoin.apiLog must not live in a system directory";
+  tokenSysMsg = "services.rbitcoin.rpc.tokenFile must not live in a system directory";
+  rpcSockSysMsg = "services.rbitcoin.rpc.socketPath must not live in a system directory";
+  esploraSockSysMsg = "services.rbitcoin.esplora.socketPath must not live in a system directory";
+  connectCjdnsMsg = "services.rbitcoin.p2p.connect to a CJDNS address requires cjdns.reachable";
+  trustCjdnsMsg = "services.rbitcoin.trustPeer to a CJDNS address requires cjdns.reachable";
+  onlyNetOnionMsg = "services.rbitcoin.onlyNet onion requires proxy or onionProxy";
+  onlyNetI2pMsg = "services.rbitcoin.onlyNet i2p requires i2p.sam";
+  onionGroupSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          esplora = {
+            enable = true;
+            hiddenService = true;
+          };
+        };
+      }
+    ];
+  };
+  listenOnionGroupSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          p2p.listenOnion = true;
+        };
+      }
+    ];
+  };
+  # A port the operator set must stay. The implied 9051 must not be appended.
+  hasControlPort = cfg: addr: port:
+    builtins.any (
+      p:
+      p == port
+      || (
+        builtins.isAttrs p
+        && (p.port or null) == port
+        && (p.addr or addr) == addr
+      )
+    ) cfg.services.tor.settings.ControlPort;
+  torKeepPortSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          p2p.listenOnion = true;
+        };
+        services.tor = {
+          enable = true;
+          settings = {
+            ControlPort = [ 9052 ];
+            CookieAuthentication = true;
+            CookieAuthFile = "/run/tor/other.cookie";
+            CookieAuthFileGroupReadable = true;
+          };
+        };
+      }
+    ];
+  };
+  bindFwSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          network = "regtest";
+          p2p.openFirewall = true;
+          netPermissionBind = [
+            "noban@0.0.0.0:8334"
+            "noban@[::1]:9444"
+          ];
+        };
+      }
+    ];
+  };
+  blockTemplateOffExec = execOf {
+    esplora.blockTemplate = true;
+  };
+  apiLogSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          dataDir = "/srv/rbitcoin";
+          apiLog = "/var/log/rbitcoin/api.jsonl";
+        };
+      }
+    ];
+  };
+  badSystem = opts: nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+        } // opts;
+      }
+    ];
+  };
 in
 assert defaultCfg.package == expectedPackage;
 assert defaultCfg.network == "mainnet";
 assert defaultCfg.p2p.port == 8333;
 assert defaultCfg.p2p.listen == true;
-assert defaultCfg.p2p.maxInbound == 125;
+assert defaultCfg.p2p.maxInbound == 200;
+assert defaultCfg.p2p.maxOutbound == null;
+assert defaultCfg.p2p.connect == [ ];
+assert defaultCfg.p2p.seedNodes == [ ];
+assert defaultCfg.p2p.noSeeds == false;
+assert defaultCfg.blockFilterIndex == false;
+assert defaultCfg.mempool.persist == true;
+assert defaultCfg.mempool.prefillCompact == true;
+assert defaultCfg.mempool.sizeMb == null;
+assert defaultCfg.netPermissionRelay == true;
+assert defaultCfg.netPermissionForceRelay == false;
+assert defaultCfg.rpc.unixSocket == false;
+assert defaultCfg.inhibitSuspend == false;
+assert defaultCfg.esplora.blockTemplate == false;
+assert defaultCfg.esplora.socketPath == null;
+assert defaultCfg.sv2.tp.idleTimeout == 0;
 assert defaultCfg.p2p.discover == true;
 assert defaultCfg.p2p.listenOnion == false;
 assert defaultCfg.rpc.port == 8332;
@@ -399,11 +652,55 @@ assert builtins.match ".*--esplora-onion.*" execStart != null;
 assert builtins.match ".*--esplora-max-inflight 1024.*" execStart != null;
 assert builtins.match ".*--esplora-max-inflight.*" listenOffExec == null;
 assert builtins.match ".*--sh-index.*" execStart != null;
-assert builtins.match ".*--sp-tweaks.*" execStart != null;
+assert builtins.match ".*--sp-tweaks.*" execStart == null;
 assert builtins.match ".*--shindex.*" execStart == null;
 assert builtins.match ".*--sptweaks.*" execStart == null;
 assert builtins.match ".*--log-level debug.*" execStart != null;
 assert builtins.match ".*--max-outbound 8.*" execStart != null;
+assert builtins.match ".*--connect 192.0.2.10:8333.*" execStart != null;
+assert builtins.match ".*--connect peer.example:8333.*" execStart != null;
+assert builtins.match ".*--seed-node seed.example.*" execStart != null;
+assert builtins.match ".*--no-seeds.*" execStart != null;
+assert builtins.match ".*--external-ip 203.0.113.5.*" execStart != null;
+assert builtins.match ".*--peer-timeout 60.*" execStart != null;
+assert builtins.match ".*--asmap /srv/rbitcoin/ip_asn.dat.*" execStart != null;
+assert builtins.match ".*--ua-comment nixos.*" execStart != null;
+assert builtins.match ".*--block-filter-index.*" execStart != null;
+assert builtins.match ".*--prune-seqsigwit-ram-threshold-bytes 0.*" execStart != null;
+assert builtins.match ".*--max-sh-creates 0.*" execStart != null;
+assert builtins.match ".*--esplora-block-template.*" execStart != null;
+assert builtins.match ".*--blocks-only.*" execStart != null;
+assert builtins.match ".*--persist-mempool=0.*" execStart != null;
+assert builtins.match ".*--prefill-compact=0.*" execStart != null;
+assert builtins.match ".*--mempool-size-mb 100.*" execStart != null;
+assert builtins.match ".*--mempool-expiry 72.*" execStart != null;
+assert builtins.match ".*--min-relay-tx-fee 0.00001000.*" execStart != null;
+assert builtins.match ".*--limit-cluster-count 10.*" execStart != null;
+assert builtins.match ".*--limit-cluster-size 100.*" execStart != null;
+assert builtins.match ".*--bytes-per-sigop 0.*" execStart != null;
+assert builtins.match ".*--block-reserved-sigops 400.*" execStart != null;
+assert builtins.match ".*--trusted.*" execStart != null;
+assert builtins.match ".*--always-relay.*" execStart != null;
+assert builtins.match ".*--relay .*" execStart != null;
+assert builtins.match ".*--net-permission noban@192.0.2.0/24.*" execStart != null;
+assert builtins.match ".*--net-permission-bind noban@127.0.0.1:18444.*" execStart != null;
+assert builtins.match ".*--net-permission-relay=0.*" execStart != null;
+assert builtins.match ".*--net-permission-force-relay.*" execStart != null;
+assert builtins.match ".*--block-version 2.*" execStart != null;
+assert builtins.match ".*--block-min-tx-fee 0.00001000.*" execStart != null;
+assert builtins.match ".*--rpc-token-file /run/rbitcoin/rpc.token.*" execStart != null;
+assert builtins.match ".*--rpc-work-queue 32.*" execStart != null;
+assert builtins.match ".*--api-log /srv/rbitcoin/api.jsonl.*" execStart != null;
+assert builtins.match ".*--min-chain-work 01.*" execStart != null;
+assert builtins.match ".*--max-tip-age 0.*" execStart != null;
+assert builtins.match ".*--check-blocks 0.*" execStart != null;
+assert builtins.match ".*--alert-notify /run/rbitcoin/alert.*" execStart != null;
+assert builtins.match ".*--startup-notify /run/rbitcoin/ready.*" execStart != null;
+# systemd eats %s on ExecStart. The unit must contain %% so the node still sees %s.
+assert builtins.match ".*--alert-notify 'logger %%s'.*" (execOf { alertNotify = "logger %s"; }) != null;
+assert builtins.match ".*--startup-notify 'touch %%s'.*" (execOf { startupNotify = "touch %s"; }) != null;
+assert builtins.match ".*'echo %%s'.*" (execOf { extraArgs = [ "echo %s" ]; }) != null;
+assert builtins.match ".*--inhibit-suspend.*" execStart != null;
 assert builtins.match ".*--proxy 127.0.0.1:9050.*" execStart != null;
 assert builtins.match ".*--onion 127.0.0.1:9050.*" execStart != null;
 assert builtins.match ".*--only-net onion.*" execStart != null;
@@ -435,7 +732,20 @@ assert builtins.match ".*--sv2-tp-cert-validity 600.*" execStart != null;
 assert builtins.match ".*--sv2-tp-stale-grace 0.*" execStart != null;
 assert builtins.match ".*--sv2-tp-fee-delta 0.*" execStart != null;
 assert builtins.match ".*--sv2-tp-template-interval 30.*" execStart != null;
-assert builtins.match ".*--max-outbound 8$" execStart != null;
+assert builtins.match ".*--sv2-tp-idle-timeout 30.*" execStart != null;
+assert builtins.match ".*--max-run-secs 1$" execStart != null;
+assert builtins.match ".*--max-inbound.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
+assert builtins.match ".*--block-filter-index.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
+assert builtins.match ".*--inhibit-suspend.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
+assert builtins.match ".*--connect.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
 assert builtins.elem "tor.service" service.after;
 assert builtins.elem "tor.service" service.wants;
 assert builtins.elem "i2pd.service" service.after;
@@ -460,4 +770,253 @@ assert builtins.match ".*--max-inbound 0.*" listenOffExec != null;
 assert builtins.match ".*--no-discover.*" listenOffExec != null;
 assert builtins.match ".*--sv2-tp.*" listenOffExec == null;
 assert listenOffSystem.config.networking.firewall.allowedTCPPorts == [ ];
+assert builtins.match ".*--sp-tweaks .*" spExec != null;
+assert builtins.match ".*--sp-tweaks-dust 546.*" spExec != null;
+assert builtins.match ".*--max-inbound 125.*" inboundExec != null;
+assert builtins.match ".*--rpc .*" unixExec != null;
+assert builtins.match ".*--rpc-listen.*" unixExec == null;
+assert builtins.match ".*--esplora-listen /run/rbitcoin/esplora.sock.*" unixExec != null;
+assert builtins.match ".*--esplora-listen 127.0.0.1:3000.*" unixExec == null;
+assert unixSystem.config.networking.firewall.allowedTCPPorts == [ ];
+assert unixSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/run/rbitcoin".d.mode == "0750";
+assert builtins.elem "/run/rbitcoin" unixSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
+assert builtins.match ".*--esplora-onion=0.*" onionOffExec != null;
+assert builtins.match ".*--network signet.*" signetExec != null;
+assert builtins.match ".*--signet-challenge 51.*" signetExec != null;
+assert builtins.match ".*--signet-block-time 120.*" signetExec != null;
+assert builtins.elem spAndPruneMsg (failedAssertions (badSystem {
+  silentPaymentIndex = true;
+  pruneSeqSigWit = true;
+}));
+assert builtins.elem signetChallengeMsg (failedAssertions (badSystem {
+  signet.challenge = "51";
+}));
+assert builtins.elem signetTimeMsg (failedAssertions (badSystem {
+  network = "signet";
+  signet.blockTime = 120;
+}));
+assert builtins.elem trustSeedMsg (failedAssertions (badSystem {
+  trustPeer = "192.0.2.1:8333";
+  p2p.seedNodes = [ "seed.example" ];
+}));
+assert builtins.elem bindNeedsListenMsg (failedAssertions (badSystem {
+  p2p.listen = false;
+  netPermissionBind = [ "noban@127.0.0.1:18444" ];
+}));
+assert builtins.elem bindTrustMsg (failedAssertions (badSystem {
+  trustPeer = "192.0.2.1:8333";
+  netPermissionBind = [ "noban@127.0.0.1:8333" ];
+}));
+assert builtins.elem esploraSockNeedsEnableMsg (failedAssertions (badSystem {
+  esplora.socketPath = "/run/rbitcoin/esplora.sock";
+}));
+assert builtins.match ".*--esplora-block-template.*" blockTemplateOffExec == null;
+assert builtins.elem "/var/log/rbitcoin" apiLogSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
+assert apiLogSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/log/rbitcoin".d.mode == "0750";
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/../api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/rbitcoin/api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/rbitcoin/api.jsonl"; }));
+assert builtins.elem tokenSysMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/rpc.token";
+}));
+assert builtins.elem tokenSysMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rpc.token";
+}));
+assert !builtins.elem tokenSysMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+}));
+assert builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/rpc.sock"; }));
+assert builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/tmp/rpc.sock"; }));
+assert !builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/run/rbitcoin/rpc.sock"; }));
+assert builtins.elem esploraSockSysMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.socketPath = "/esplora.sock";
+}));
+assert builtins.elem esploraSockSysMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.socketPath = "/var/log/esplora.sock";
+}));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/srv"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/tor"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/tor/root"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/tor"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/tor/onion"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/i2pd"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/nix/store/foo"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/systemd/rbitcoin"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/private"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/etc/nixos/rbitcoin"; }));
+assert !builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/rbitcoin"; }));
+assert !builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/home/rbitcoin"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/tor/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/tor/onion/x"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/i2pd/api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/home/rbitcoin/api.jsonl"; }));
+assert builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/var"; }));
+assert !builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/srv/rbitcoin-cold"; }));
+assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
+assert builtins.match ".*--check-blocks 4294967296.*" (execOf { checkBlocks = 4294967296; }) != null;
+assert builtins.elem 18444 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem 8334 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem 9444 bindFwSystem.config.networking.firewall.allowedTCPPorts;
+assert builtins.elem tokenNeedsRpcMsg (failedAssertions (badSystem {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}));
+assert builtins.match ".*--rpc-token-file.*" (execOf {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}) == null;
+assert !builtins.hasAttr "/var/log/rbitcoin-token" (badSystem {
+  rpc.tokenFile = "/var/log/rbitcoin-token/rpc.token";
+}).config.systemd.tmpfiles.settings."10-rbitcoin";
+assert builtins.elem workQueueNeedsRpcMsg (failedAssertions (badSystem {
+  rpc.workQueue = 32;
+}));
+assert builtins.match ".*--rpc-work-queue.*" (execOf { rpc.workQueue = 32; }) == null;
+assert builtins.match ".*--rpc-token-file /run/rbitcoin/rpc.token.*" (execOf {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+  rpc.workQueue = 8;
+}) != null;
+assert builtins.match ".*--rpc-work-queue 8.*" (execOf {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+  rpc.workQueue = 8;
+}) != null;
+assert builtins.elem esploraHsNeedsEnableMsg (failedAssertions (badSystem {
+  esplora.hiddenService = true;
+}));
+assert builtins.match ".*--tor-control.*" (execOf {
+  esplora.hiddenService = true;
+}) == null;
+assert builtins.match ".*--esplora-onion.*" (execOf {
+  esplora.hiddenService = true;
+}) == null;
+assert !builtins.elem "tor.service" (badSystem {
+  esplora.hiddenService = true;
+}).config.systemd.services.rbitcoin.wants;
+assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
+assert onionGroupSystem.config.users.groups ? tor;
+assert listenOnionGroupSystem.config.users.groups ? tor;
+assert onionGroupSystem.config.users.groups.tor.gid == onionGroupSystem.config.ids.gids.tor;
+assert listenOnionGroupSystem.config.users.groups.tor.gid == listenOnionGroupSystem.config.ids.gids.tor;
+assert system.config.users.groups.tor.gid == system.config.ids.gids.tor;
+assert ! (defaultSystem.config.users.groups ? tor);
+assert onionGroupSystem.config.services.tor.enable;
+assert listenOnionGroupSystem.config.services.tor.enable;
+assert ! system.config.services.tor.enable;
+assert onionGroupSystem.config.services.tor.settings.CookieAuthentication == true;
+assert onionGroupSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/control.authcookie";
+assert onionGroupSystem.config.services.tor.settings.CookieAuthFileGroupReadable == true;
+assert builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/var/lib/rbitcoin/control.authcookie";
+}));
+assert builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  p2p.listenOnion = true;
+  tor.controlCookie = "/run/tor/../rbitcoin/cookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/run/tor/control.authcookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.hiddenService = true;
+  tor.controlCookie = "/var/lib/tor/control.authcookie";
+}));
+assert !builtins.elem cookieOutsideMsg (failedAssertions (badSystem {
+  tor.control = "127.0.0.1:9051";
+  tor.controlCookie = "/var/lib/rbitcoin/control.authcookie";
+}));
+assert hasControlPort onionGroupSystem.config "127.0.0.1" 9051;
+assert hasControlPort listenOnionGroupSystem.config "127.0.0.1" 9051;
+assert torKeepPortSystem.config.services.tor.settings.CookieAuthFile == "/run/tor/other.cookie";
+assert hasControlPort torKeepPortSystem.config "127.0.0.1" 9052;
+assert ! hasControlPort torKeepPortSystem.config "127.0.0.1" 9051;
+assert builtins.elem listenOnionNeedsInboundMsg (failedAssertions (badSystem {
+  p2p.listenOnion = true;
+  p2p.maxInbound = 0;
+}));
+assert builtins.match ".*--tor-control 127.0.0.1:9051.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
+assert builtins.match ".*--esplora-onion($|[= ].*)" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart != null;
+assert builtins.match ".*--tor-control-cookie.*" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart == null;
+assert builtins.elem "tor" listenOnionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
+assert builtins.elem electrumHsNeedsEnableMsg (failedAssertions (badSystem {
+  electrum.hiddenService = true;
+}));
+assert builtins.match ".*--tor-control.*" (execOf {
+  electrum.hiddenService = true;
+}) == null;
+assert !builtins.elem "tor.service" (badSystem {
+  electrum.hiddenService = true;
+}).config.systemd.services.rbitcoin.wants;
+assert !builtins.elem spAndPruneMsg (failedAssertions system);
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc00::1]:8333" ];
+}));
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[FCAB::1]:8333" ];
+}));
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "192.0.2.1:8333" "[fc00::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  cjdns.reachable = true;
+  p2p.connect = [ "[fc00::1]:8333" ];
+}));
+assert builtins.match ".*--connect '[[]fc00::1[]]:8333'.*" (execOf {
+  cjdns.reachable = true;
+  p2p.connect = [ "[fc00::1]:8333" ];
+}) != null;
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fd00::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc0::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "192.0.2.1:8333" ];
+}));
+assert builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  trustPeer = "[fc00::1]:8333";
+}));
+assert !builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  cjdns.reachable = true;
+  trustPeer = "[fc00::1]:8333";
+}));
+assert !builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  trustPeer = "[fd00::1]:8333";
+}));
+assert builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+}));
+assert !builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+  proxy = "127.0.0.1:9050";
+}));
+assert !builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+  onionProxy = "127.0.0.1:9050";
+}));
+assert builtins.elem onlyNetI2pMsg (failedAssertions (badSystem {
+  onlyNet = [ "i2p" ];
+}));
+assert !builtins.elem onlyNetI2pMsg (failedAssertions (badSystem {
+  onlyNet = [ "i2p" ];
+  i2p.sam = "127.0.0.1:7656";
+}));
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"

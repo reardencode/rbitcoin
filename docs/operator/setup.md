@@ -149,8 +149,24 @@ proxies the Electrum TCP protocol.
 
 Use `coldDataDir` to place the append-only store (`seqsigwit`, `txstat`, `input`, and the block-filter and tweak indexes) on another volume. The
 service creates the directory but does not mount or size the volume. Set `datadirHdd` when the main datadir is spinning rust. Use
-`environment` for documented advanced `RBITCOIN_*` settings and `extraArgs`
-for daemon flags not represented by module options.
+`environment` for documented advanced `RBITCOIN_*` settings.
+
+The module options cover the operator flags in
+[`operations.md`](operations.md). A null number omits the flag and leaves
+the node default. A bool that defaults on passes `=0` when set false
+(`proxyRandomize`, `mempool.persist`, `mempool.prefillCompact`,
+`netPermissionRelay`). `p2p.maxInbound` defaults to 200 and omits
+`--max-inbound` at that value. `esplora.hiddenService = false` passes
+`--esplora-onion=0` when Tor control is on. An onion flag with `tor.control`
+unset enables `services.tor`, opens `127.0.0.1:9051`, and writes a
+group-readable `/run/tor/control.authcookie`. An explicit `tor.control` is
+left to the operator's daemon. `rpc.unixSocket` passes `--rpc`
+for `{dataDir}/rpc.sock` without TCP. `extraArgs` remains for `--conf`,
+test knobs (`--smoke`, `--mock-time`, `--max-run-secs`,
+`--test-activation-height`, `--regtest-pow-bits`), and the two secrets that
+stay off the unit (`--tor-control-password`, `--sv2-tp-authority-sec`; use
+`tor.controlCookie` and `sv2.tp.authoritySecretFile`). `extraArgs` is
+appended last.
 
 **GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl
 (x86_64 and aarch64) + Windows CRT-static PE + Darwin aarch64 binaries +
