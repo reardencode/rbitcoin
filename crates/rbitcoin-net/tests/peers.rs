@@ -147,6 +147,29 @@ fn disconnect_id_shuts_down_tcp_so_far_side_sees_eof() {
     let _ = local.write(&[1]);
 }
 
+/// A handshaken row stays until its session returns, but getpeerinfo
+/// already hides it. A second `disconnectnode` must not find it either.
+#[test]
+fn disconnect_id_misses_a_peer_already_leaving() {
+    let hub = PeerHub::new();
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let p = hub.register(
+        a,
+        b,
+        &ver("/rbitcoin:0.1.0(testnode0)/"),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    p.mark_handshake_complete();
+
+    assert!(hub.disconnect_id(p.id));
+    assert!(hub.get(p.id).is_some(), "the row waits for the session");
+    assert!(hub.snapshot().is_empty(), "getpeerinfo hides it");
+    assert!(!hub.disconnect_id(p.id), "already leaving");
+    assert!(!hub.disconnect_addr(a), "already leaving");
+}
+
 #[test]
 fn connecting_peer_v2_timeout_log_before_transport() {
     rbitcoin_log::capture_logs(true);
