@@ -1852,6 +1852,41 @@ fn a_confirmed_tip_on_another_branch_keeps_the_candidate_anchor() {
     assert_eq!(st.header_walk.tip_hash(), Some(branch_tip));
 }
 
+fn confirmed_base_keeps_adopt_across_rewind(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    kept: BlockHash,
+) {
+    assert!(restore_adopt(st, hub));
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the saved base is the confirmed tip, not the stored queue"
+    );
+    let path = hub.query.store().path().join("header.adopt");
+    assert_eq!(
+        hub.best_header_height(),
+        3,
+        "the look-ahead report still names the checkpoint tip"
+    );
+    // Restore does not mark the walk proved. The live walk was, and that is
+    // what writes the milestone drop.
+    st.header_walk.proven = true;
+    on_confirmed_rewind(st, hub, 0);
+    assert!(
+        path.exists(),
+        "a rewind to the confirmed base keeps header.adopt"
+    );
+    hub.query.clear_milestone_path_above(0);
+    assert!(!skips(hub, 1, kept.as_byte_array()));
+    st.header_walk = HeaderWalk::default();
+    assert!(restore_adopt(st, hub));
+    assert!(
+        st.header_walk.milestone_hash().is_none(),
+        "the rewind dropped the milestone, so the restored walk does not skip"
+    );
+    assert!(!skips(hub, 1, kept.as_byte_array()));
+}
+
 #[test]
 fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-6");
@@ -1910,22 +1945,7 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     assert!(!skips(&hub, 1, h1.block_hash().as_byte_array()));
 
     st.height_to_hash.remove(&base_h);
-    assert!(restore_adopt(&mut st, &hub));
-    assert!(st.header_walk.base_height > 0);
-    let path = hub.query.store().path().join("header.adopt");
-    assert_eq!(
-        hub.best_header_height(),
-        3,
-        "the look-ahead report still names the checkpoint tip"
-    );
-    on_confirmed_rewind(&mut st, &hub, 0);
-    assert!(
-        !path.exists(),
-        "a reorg under the base deletes header.adopt"
-    );
-    hub.query.clear_milestone_path_above(0);
-    assert!(!skips(&hub, 1, h1.block_hash().as_byte_array()));
-    assert!(!restore_adopt(&mut st, &hub));
+    confirmed_base_keeps_adopt_across_rewind(&mut st, &hub, h1.block_hash());
 
     st.header_walk = HeaderWalk::default();
     hub.query.clear_milestone_path_above(0);
@@ -3732,7 +3752,10 @@ fn origin_stops_at_the_queue_tail() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![next]);
     assert_eq!(st.header_walk.tip_hash(), Some(next.block_hash()));
-    assert_eq!(st.header_walk.base_height, 2);
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the lead starts at the confirmed tip, not the stored queue tail"
+    );
 }
 
 fn mine_at(prev: BlockHash, n: u32, time: u32) -> Header {
@@ -4494,7 +4517,10 @@ fn a_fork_from_the_confirmed_tip_keeps_that_height() {
     fill_to_cap(&mut st);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     apply(&mut st, &hub, 0, vec![h3]);
-    assert_eq!(st.header_walk.base_height, 2);
+    assert_eq!(
+        st.header_walk.base_height, 0,
+        "the lead starts at the confirmed tip, not the stored queue tail"
+    );
     assert_eq!(st.header_walk.tip_height(), 3);
     assert_eq!(st.header_walk.milestone_hash(), Some(h2.block_hash()));
 
@@ -6311,6 +6337,38 @@ fn opened(
     let mut st = IbdWorkState::new(vec![s0, s1], Some(gen), Some(0));
     ensure_origin(&mut st, &hub);
     (_dir, hub, st, gen_hdr)
+}
+
+/// Confirmed tip 0 and 2,000 stored headers, with no witness. A fresh state
+/// reseeded from the store may resume the walk at those headers. The lead
+/// is still measured from the confirmed tip.
+#[test]
+fn a_restart_measures_the_lead_from_the_confirmed_tip() {
+    let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("unproven-restart-lead");
+    hub.ensure_genesis().unwrap();
+    hub.milestone = floor_milestone(1_000_000);
+    let gen = hub.tip_hash().unwrap();
+    let gen_hdr = hub.header_of(&gen).unwrap();
+    let full = headers_after(gen_hdr, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 3);
+    hub.ensure_headers_batch(&full).unwrap();
+    let (s0, rx0) = slot(0);
+    std::mem::forget(rx0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    rbitcoin_ibd::ibd::path::seed_work_path_from_store(&mut st, &hub);
+    assert!(
+        st.max_ordered_height >= rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32,
+        "the stored headers are back on the work path"
+    );
+    ensure_origin(&mut st, &hub);
+    assert_eq!(st.header_walk.tip_height(), 2_000);
+    assert_eq!(st.header_walk.base_height, 0);
+    assert!(st.header_walk.witness_height.is_none());
+    assert!(!st.header_walk.proven);
+    assert_eq!(
+        unproven_confirm_limit(&st),
+        Some(UNPROVEN_LEAD_BLOCKS),
+        "unwitnessed stored headers are not a match"
+    );
 }
 
 /// The floor sits on the next header. That one requested header extends the

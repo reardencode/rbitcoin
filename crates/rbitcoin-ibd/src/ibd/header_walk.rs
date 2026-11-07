@@ -329,9 +329,15 @@ pub struct OriginInput {
 
 pub struct OriginLoaded {
     pub report_epoch: Option<rbitcoin_net::chain::IbdHeaderEpoch>,
+    /// Walk tip. This may be the stored header queue, past the confirmed tip.
     pub height: u32,
     pub hash: Option<BlockHash>,
     pub work: Work,
+    /// Confirmed tip. The unproved lead is measured from here, not from the
+    /// queue tail.
+    pub base_height: u32,
+    pub base_hash: Option<BlockHash>,
+    pub base_work: Work,
     pub milestone_hash: Option<BlockHash>,
     pub milestone_prev: BlockHash,
     pub milestone_header: Option<Header>,
@@ -376,11 +382,14 @@ pub fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
     if input.hash.is_some_and(|hash| invalid.contains(&hash)) {
         report_epoch = None;
     }
-    let mut height = input.height;
-    let mut hash = input.hash;
-    let mut work = hub
+    let base_height = input.height;
+    let base_hash = input.hash;
+    let base_work = hub
         .chain_work()
         .unwrap_or_else(|_| Work::from_be_bytes([0u8; 32]));
+    let mut height = base_height;
+    let mut hash = base_hash;
+    let mut work = base_work;
     let mut milestone_hash = input.milestone_hash;
     let mut milestone_prev = input.milestone_prev;
     let mut milestone_header = input.milestone_header;
@@ -420,6 +429,9 @@ pub fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
         height,
         hash,
         work,
+        base_height,
+        base_hash,
+        base_work,
         milestone_hash,
         milestone_prev,
         milestone_header,
@@ -436,6 +448,9 @@ pub fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoade
         height,
         hash,
         work,
+        base_height,
+        base_hash,
+        base_work,
         milestone_hash,
         milestone_prev,
         milestone_header,
@@ -451,16 +466,21 @@ pub fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoade
         milestone_header,
         ..WalkTip::default()
     };
-    st.header_walk.base_hash = hash;
-    st.header_walk.base_height = height;
-    st.header_walk.base_work = work.to_be_bytes();
+    st.header_walk.base_hash = base_hash;
+    st.header_walk.base_height = base_height;
+    st.header_walk.base_work = base_work.to_be_bytes();
     st.header_walk.report_epoch = report_epoch;
     if let Some(h) = tip_header {
         seed_tip_times(st, hub, h);
         note_period_snap(&mut st.header_walk.tip.diff, hub, h, height);
         note_full_diff_snap(&mut st.header_walk.tip.diff, hub, &h, height);
     }
-    st.header_walk.base_diff = st.header_walk.tip.diff;
+    if let Some(base_hash) = base_hash {
+        if let Some(hdr) = hub.header_of(&base_hash) {
+            note_period_snap(&mut st.header_walk.base_diff, hub, hdr, base_height);
+            note_full_diff_snap(&mut st.header_walk.base_diff, hub, &hdr, base_height);
+        }
+    }
     if !arm_walk_bounds(st, hub) {
         let epoch = st.header_walk.report_epoch;
         st.header_walk = HeaderWalk::default();
