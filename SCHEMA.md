@@ -224,9 +224,9 @@ itself changed.
     header.adopt                     # IBD checkpoint list + milestone hash (not a header-chain copy)
     block.invalid                    # blocks that failed connect, kept across restart
     txout.body / create.loc / create.off / create.loc.ovf   # Class A outs (hot loc)
-    seqsigwit.body / seqsigwit.loc / seqsigwit.off / seqsigwit.loc.ovf       # Class A inputs+witness (cold loc)
-    seqsigwit.prune                  # optional: u32 LE pruneheight sidecar (`--prune-seqsigwit`; missing = off)
-    seqsigwit.window/                # optional prune window: one {height}.bin per kept height
+    seqsigwit.body / seqsigwit.loc / seqsigwit.off / seqsigwit.loc.ovf       # Class A inputs+witness when unpruned (cold loc). With seqsigwit.prune these four stay at the file header
+    seqsigwit.prune                  # optional: u32 LE pruneheight sidecar (`--prune-seqsigwit`; missing = off). Presence is prune mode
+    seqsigwit.window/                # prune window: one {height}.bin per kept height. The only witness payload while seqsigwit.prune exists
     seqsigwit.reloc                  # optional: append-only files live under --datadir-cold/store
     spent.body                                              # sole-spender 8 B × n_out; leftover spent.off unlinked
     tx.body / tx.idx.*                              # schema ≤14 packed (refused if non-empty)
@@ -270,9 +270,10 @@ itself changed.
 files the IBD pin path does not read under `PATH/store/` and writes
 `seqsigwit.reloc` in the hot store: `seqsigwit.*`, `txstat.*`, `input.*`,
 and, once those indexes exist, `blockfilter.*` and `sp_tweaks.*`. Pin / SH /
-spend-annotate stay on the hot volume. `--prune-seqsigwit` is separate: it
-drops historical `seqsigwit` below tip−288 and keeps that window on the hot
-store. `txstat`, `input`, block filters, and tweaks are not pruned.
+spend-annotate stay on the hot volume. `--prune-seqsigwit` is separate: witness
+for the last 288 heights is only `seqsigwit.window/{height}.bin` on the hot
+store, and the stem stays a header (an archive enable copies that window out
+and cuts it). `txout`, `txstat`, `input`, block filters, and tweaks are not pruned.
 
 **Height → txs:** `confirmed[h]` → `header_fk` → contiguous Class A range  
 `[header_txs_first[h−1], header_txs_first[h−1] + header_txs_count[h−1])`.
