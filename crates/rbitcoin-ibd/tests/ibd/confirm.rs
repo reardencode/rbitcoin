@@ -2878,3 +2878,124 @@ fn accepted_wire_share_assigns_the_remainder_to_the_last_block() {
     assert_eq!(shares.iter().sum::<u64>(), 1_000);
     assert_eq!(accepted_wire_share(5, 1, 0), 5);
 }
+
+/// The confirm engine, not the offer list, is what spends the lead.
+fn engine_with_blocks(
+    label: &str,
+    n: u32,
+    bounds: impl FnOnce(&[u64]) -> (Option<u32>, u32, Option<u64>),
+) -> (
+    rbitcoin_query::testutil::TempDir,
+    Arc<rbitcoin_net::chain::ChainHub>,
+    Arc<ConfirmFeed>,
+    std::thread::JoinHandle<()>,
+    Vec<u64>,
+) {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_ibd::ibd::confirm::spawn_confirm_engine;
+    use rbitcoin_ibd::ibd::status::LoopStats;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::mpsc;
+
+    let (dir, hub0) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
+    hub0.query.enter_direct_index_mode().unwrap();
+    let hub = Arc::new(hub0);
+    hub.ensure_genesis().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let mut prev = hub.tip_hash().unwrap();
+    let mut prev_time = time;
+    let mut wires = Vec::new();
+    for i in 1..=n {
+        let block = mine_empty_regtest(prev, prev_time + 600, i);
+        hub.ensure_header(&block.header).unwrap();
+        let wire = serialize(&block);
+        hub.query
+            .block_queue_enqueue(i, block.block_hash().to_byte_array(), 1, &wire)
+            .unwrap();
+        wires.push(wire.len() as u64);
+        prev = block.block_hash();
+        prev_time = block.header.time;
+    }
+    let feed = Arc::new(ConfirmFeed::new());
+    let bounds = bounds(&wires);
+    feed.set_unproven_bounds(bounds.0, bounds.1, bounds.2);
+    let (tx, _rx) = mpsc::channel();
+    let (engine, _queues) = spawn_confirm_engine(
+        Arc::clone(&hub),
+        Arc::clone(&feed),
+        tx,
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(LoopStats::default()),
+    );
+    (dir, hub, feed, engine, wires)
+}
+
+fn stop_confirm_engine(feed: &ConfirmFeed, engine: std::thread::JoinHandle<()>) {
+    feed.request_stop();
+    feed.notify();
+    let _ = engine.join();
+}
+
+fn tip_within(
+    hub: &rbitcoin_net::chain::ChainHub,
+    want: impl Fn(Option<u32>) -> bool,
+    for_: std::time::Duration,
+) -> Option<u32> {
+    let deadline = std::time::Instant::now() + for_;
+    loop {
+        let tip = hub.tip_height();
+        if want(tip) || std::time::Instant::now() >= deadline {
+            return tip;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn confirm_engine_stops_when_the_lead_is_exhausted() {
+    let (dir, hub, feed, engine, _wires) =
+        engine_with_blocks("lead-engine-height", 1, |_| (Some(0), 0, Some(u64::MAX)));
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 1),
+        std::time::Duration::from_secs(3),
+    );
+    stop_confirm_engine(&feed, engine);
+    assert_eq!(
+        tip,
+        Some(0),
+        "a zero height cap does not confirm the next block"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+#[test]
+fn confirm_engine_spends_the_byte_lead_once() {
+    let (dir, hub, feed, engine, _wires) = engine_with_blocks("lead-engine-bytes", 2, |wires| {
+        (Some(10_000), 0, Some(wires[0]))
+    });
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 1),
+        std::time::Duration::from_secs(8),
+    );
+    assert_eq!(tip, Some(1), "the first block fits in the byte lead");
+    // The IBD loop refreshes from accepted bytes. Those are still the full
+    // budget here, and the match has not moved.
+    feed.set_unproven_bounds(Some(10_000), 0, Some(1024 * 1024 * 1024));
+    let tip = tip_within(
+        &hub,
+        |t| t.is_some_and(|h| h >= 2),
+        std::time::Duration::from_secs(2),
+    );
+    stop_confirm_engine(&feed, engine);
+    assert_eq!(
+        tip,
+        Some(1),
+        "a refresh does not confirm the next block on the same lead"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}

@@ -219,11 +219,11 @@ pub struct ConfirmFeedInner {
     /// Heights at or below this are the matched chain. They do not spend the lead.
     pub lead_from: u32,
     /// Class A bytes still allowed above `lead_from`. `None` is no byte cap.
-    /// Offer lowers this as it notes bodies. The same match keeps the tighter
-    /// value. A higher match installs the new remainder, minus wire still
-    /// reserved above that match.
+    /// Lookup selection lowers this as it claims bodies. The same match keeps
+    /// the tighter value. A higher match installs the new remainder, minus
+    /// wire still reserved above that match.
     pub lead_bytes_left: Option<u64>,
-    /// Wire `offer_confirm_ready` has reserved above the match, by height.
+    /// Wire lookup has reserved above the match, by height.
     /// Cleared when that height is accepted or the match moves to or past it.
     pub lead_reserved: std::collections::BTreeMap<u32, u64>,
 }
@@ -271,16 +271,10 @@ impl ConfirmFeed {
         self.dropped_bodies.lock().unwrap().remove(hash);
     }
 
-    /// Highest height the next [`offer_confirm_ready`] may note.
-    /// `None` lifts the unproven lead.
-    pub fn set_height_limit(&self, limit: Option<u32>) {
-        self.inner.lock().unwrap().height_limit = limit;
-    }
-
     /// Install the unproven lead. The same `lead_from` keeps the smaller byte
-    /// remainder, so blocks already noted are not offered again under a fresh
-    /// budget. A higher `lead_from` installs `bytes_left`, minus wire still
-    /// reserved above that height. `bytes_left == None` lifts the byte cap.
+    /// remainder, so bodies lookup already reserved are not claimed again under
+    /// a fresh budget. A higher `lead_from` installs `bytes_left`, minus wire
+    /// still reserved above that height. `bytes_left == None` lifts the byte cap.
     pub fn set_unproven_bounds(
         &self,
         height_limit: Option<u32>,
@@ -317,13 +311,6 @@ impl ConfirmFeed {
     /// subtracted again when a later match refreshes the remainder.
     pub fn release_lead_reserve(&self, height: u32) {
         self.inner.lock().unwrap().lead_reserved.remove(&height);
-    }
-
-    /// This height is already noted or claimed. A second offer must not spend
-    /// the lead budget on it again.
-    pub fn height_pending(&self, height: u32) -> bool {
-        let g = self.inner.lock().unwrap();
-        g.inflight.contains(&height) || g.ready.contains_key(&height)
     }
 
     /// Lookup waits `for_` before it selects a body again.
@@ -3134,6 +3121,11 @@ pub fn spawn_confirm_engine(
                 let wave_h = hub
                     .query
                     .block_queue_unresolved_heights(path_lo, &skip, max_blocks);
+                let wave_h = take_unproven_lead(
+                    &feed,
+                    |h| hub.query.block_queue_payload_len(h),
+                    wave_h,
+                );
                 confirm_thr_stats::add_lookup_other(&stats, t_sel.elapsed());
                 if hub.query.lookup_taken_gen() != taken_gen {
                     continue;
@@ -3334,9 +3326,9 @@ pub fn offer_confirm_ready(
     max_ready_height: &mut u32,
     max_ready_shared: &AtomicU32,
 ) -> u32 {
-    let (height_limit, lead_from, mut bytes_left) = {
+    let height_limit = {
         let g = feed.inner.lock().unwrap();
-        (g.height_limit, g.lead_from, g.lead_bytes_left)
+        g.height_limit
     };
     let expect = match hub.tip_height() {
         None => 0u32,
@@ -3344,7 +3336,6 @@ pub fn offer_confirm_ready(
     };
     let limit = expect.saturating_add(OFFER_AHEAD);
     let mut noted = 0u32;
-    let mut reserved: Vec<(u32, u64)> = Vec::new();
     for ht in expect..=limit {
         if height_limit.is_some_and(|cap| ht > cap) {
             break;
@@ -3379,31 +3370,53 @@ pub fn offer_confirm_ready(
         if !super::progress::claim_ready(hub, body, ht, &hash) {
             break;
         }
-        let fresh = !feed.height_pending(ht);
-        if fresh && ht > lead_from {
-            if let (Some(left), Some(wire)) = (bytes_left, hub.query.block_queue_payload_len(ht)) {
-                if wire > left {
-                    break;
-                }
-                bytes_left = Some(left - wire);
-                reserved.push((ht, wire));
-            }
-        }
         *max_ready_height = (*max_ready_height).max(ht);
         max_ready_shared.store(*max_ready_height, Ordering::Relaxed);
         feed.note(ht, hash);
         noted += 1;
     }
-    {
-        let mut g = feed.inner.lock().unwrap();
-        if g.lead_bytes_left.is_some() {
-            g.lead_bytes_left = bytes_left;
-            for (ht, wire) in reserved {
-                g.lead_reserved.insert(ht, wire);
+    noted
+}
+
+/// Heights lookup may claim. Above the matched height, a body spends
+/// `lead_bytes_left` once. A height already reserved is claimed again without
+/// a second charge. A height whose payload length is unknown stops the run
+/// while a byte cap is set, so an unsized body cannot pass the budget.
+#[doc(hidden)]
+pub fn take_unproven_lead(
+    feed: &ConfirmFeed,
+    mut payload_len: impl FnMut(u32) -> Option<u64>,
+    heights: Vec<u32>,
+) -> Vec<u32> {
+    let mut g = feed.inner.lock().unwrap();
+    let mut out = Vec::with_capacity(heights.len());
+    let mut bytes_left = g.lead_bytes_left;
+    let mut reserved = Vec::new();
+    for ht in heights {
+        if g.height_limit.is_some_and(|cap| ht > cap) {
+            break;
+        }
+        if let Some(left) =
+            bytes_left.filter(|_| ht > g.lead_from && !g.lead_reserved.contains_key(&ht))
+        {
+            let Some(wire) = payload_len(ht) else {
+                break;
+            };
+            if wire > left {
+                break;
             }
+            bytes_left = Some(left - wire);
+            reserved.push((ht, wire));
+        }
+        out.push(ht);
+    }
+    if g.lead_bytes_left.is_some() {
+        g.lead_bytes_left = bytes_left;
+        for (ht, wire) in reserved {
+            g.lead_reserved.insert(ht, wire);
         }
     }
-    noted
+    out
 }
 
 #[cfg(debug_assertions)]

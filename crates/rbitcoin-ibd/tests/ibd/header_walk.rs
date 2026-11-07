@@ -6549,7 +6549,7 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
     assert!(!st.header_walk.proven);
     assert_eq!(st.header_walk.tip_hash(), Some(tip));
     assert_eq!(
-        unproven_confirm_limit(&st, 0),
+        unproven_confirm_limit(&st),
         Some(UNPROVEN_LEAD_BLOCKS),
         "with no witness the lead is the whole unproven tip from the adoption height"
     );
@@ -6566,7 +6566,7 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
     let mut max_ready = 0u32;
     let shared = AtomicU32::new(0);
     let moving = ConfirmFeed::new();
-    moving.set_height_limit(unproven_confirm_limit(&st, hub.tip_height().unwrap_or(0)));
+    moving.set_unproven_bounds(unproven_confirm_limit(&st), 0, None);
     let noted = offer_confirm_ready(
         &moving,
         &h2h,
@@ -6584,7 +6584,7 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
     // No second peer has matched yet. A full gibibyte above the adoption
     // height fills the byte lead. The height cap stays the lead.
     note_unproven_class_a(&mut st, 1, UNPROVEN_LEAD_BYTES);
-    let exhausted = unproven_offer_bounds(&st, hub.tip_height().unwrap_or(0));
+    let exhausted = unproven_offer_bounds(&st);
     assert_eq!(exhausted.bytes_left, Some(0));
     assert_eq!(
         exhausted.height_limit,
@@ -6605,7 +6605,7 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
     apply(&mut st, &hub, 1, full);
     let matched = st.header_walk.witness_height.unwrap();
     assert!(matched > hub.tip_height().unwrap_or(0));
-    let restored = unproven_offer_bounds(&st, hub.tip_height().unwrap_or(0));
+    let restored = unproven_offer_bounds(&st);
     assert_eq!(
         restored.height_limit,
         Some(matched + UNPROVEN_LEAD_BLOCKS),
@@ -6633,9 +6633,9 @@ fn confirm_follows_the_matched_height_plus_the_lead() {
     );
 
     st.header_walk.proven = true;
-    assert_eq!(unproven_confirm_limit(&st, 0), None);
+    assert_eq!(unproven_confirm_limit(&st), None);
     let feed = ConfirmFeed::new();
-    feed.set_height_limit(unproven_confirm_limit(&st, hub.tip_height().unwrap_or(0)));
+    feed.set_unproven_bounds(unproven_confirm_limit(&st), 0, None);
     let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
     assert_eq!(noted, 1, "the lead lifts once the walk is proved");
     assert_eq!(rbitcoin_ibd::ibd::reorg::REWIND_MAX_DEPTH, 1_024);
@@ -6682,27 +6682,19 @@ fn class_a_lead_counts_the_block_height_not_the_tip() {
         None,
     );
     assert_eq!(
-        unproven_offer_bounds(&st, 0).bytes_left,
+        unproven_offer_bounds(&st).bytes_left,
         Some(UNPROVEN_LEAD_BYTES - 60),
         "only the block above the matched height spends the lead, even when the tip has not moved"
     );
 }
 
 #[test]
-fn a_second_offer_does_not_spend_the_lead_twice() {
-    use rbitcoin_ibd::ibd::body::BodyPresence;
-    use rbitcoin_ibd::ibd::confirm::{offer_confirm_ready, ConfirmFeed};
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU32;
+fn a_second_lookup_does_not_spend_the_lead_twice() {
+    use rbitcoin_ibd::ibd::confirm::{take_unproven_lead, ConfirmFeed};
 
     let (_dir, hub, st, gen) = opened("unproven-byte-offer", true);
     let h1 = headers_after(gen, 1, 31).pop().unwrap().block_hash();
     let h2 = headers_after(gen, 1, 32).pop().unwrap().block_hash();
-    let mut h2h = HashMap::new();
-    h2h.insert(1u32, h1);
-    h2h.insert(2u32, h2);
-    let mut prev = HashMap::new();
-    prev.insert(h1, hub.tip_hash().unwrap());
     hub.query
         .block_queue_enqueue(1, h1.to_byte_array(), 0, &[1u8; 100])
         .unwrap();
@@ -6710,44 +6702,35 @@ fn a_second_offer_does_not_spend_the_lead_twice() {
         .block_queue_enqueue(2, h2.to_byte_array(), 0, &[2u8; 100])
         .unwrap();
     let feed = ConfirmFeed::new();
-    let bounds = unproven_offer_bounds(&st, 0);
+    let bounds = unproven_offer_bounds(&st);
     feed.set_unproven_bounds(Some(10_000), bounds.lead_from, Some(100));
-    let mut body = BodyPresence::new();
-    let mut max_ready = 0u32;
-    let shared = AtomicU32::new(0);
-    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
-    assert_eq!(noted, 1, "the first body fits in the remaining lead");
-    assert!(feed.inner.lock().unwrap().ready.contains_key(&1));
-    assert!(!feed.inner.lock().unwrap().ready.contains_key(&2));
+    let len = |h| hub.query.block_queue_payload_len(h);
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2]);
+    assert_eq!(
+        claimed,
+        vec![1],
+        "the first body fits in the remaining lead"
+    );
     // The IBD loop refreshes from confirmed bytes, which are still zero here.
-    // The feed must keep the bytes it already noted.
+    // The feed must keep the bytes lookup already reserved.
     feed.set_unproven_bounds(bounds.height_limit, bounds.lead_from, bounds.bytes_left);
-    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
-    assert_eq!(noted, 1, "height 1 is already noted and is not a new body");
-    assert!(
-        !feed.inner.lock().unwrap().ready.contains_key(&2),
-        "a refresh must not offer the next body with the same gibibyte"
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2]);
+    assert_eq!(
+        claimed,
+        vec![1],
+        "a refresh must not claim the next body with the same gibibyte"
     );
     assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(0));
 }
 
 #[test]
 fn a_higher_match_restores_the_lead_and_keeps_bytes_still_above_it() {
-    use rbitcoin_ibd::ibd::body::BodyPresence;
-    use rbitcoin_ibd::ibd::confirm::{offer_confirm_ready, ConfirmFeed};
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU32;
+    use rbitcoin_ibd::ibd::confirm::{take_unproven_lead, ConfirmFeed};
 
     let (_dir, hub, _st, gen) = opened("unproven-byte-restore", true);
     let h1 = headers_after(gen, 1, 41).pop().unwrap().block_hash();
     let h2 = headers_after(gen, 1, 42).pop().unwrap().block_hash();
     let h3 = headers_after(gen, 1, 43).pop().unwrap().block_hash();
-    let mut h2h = HashMap::new();
-    h2h.insert(1u32, h1);
-    h2h.insert(2u32, h2);
-    h2h.insert(3u32, h3);
-    let mut prev = HashMap::new();
-    prev.insert(h1, hub.tip_hash().unwrap());
     hub.query
         .block_queue_enqueue(1, h1.to_byte_array(), 0, &[1u8; 100])
         .unwrap();
@@ -6759,20 +6742,24 @@ fn a_higher_match_restores_the_lead_and_keeps_bytes_still_above_it() {
         .unwrap();
     let feed = ConfirmFeed::new();
     feed.set_unproven_bounds(Some(10_000), 0, Some(200));
-    let mut body = BodyPresence::new();
-    let mut max_ready = 0u32;
-    let shared = AtomicU32::new(0);
-    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
-    assert_eq!(noted, 2, "both bodies fit in the lead above the old match");
+    let len = |h| hub.query.block_queue_payload_len(h);
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2, 3]);
+    assert_eq!(
+        claimed,
+        vec![1, 2],
+        "both bodies fit in the lead above the old match"
+    );
     // The walk now matches through height 1 and reports a fresh gibibyte.
     // Height 2 is still above that match and is already reserved.
     feed.set_unproven_bounds(Some(10_000), 1, Some(1_000));
     assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(900));
-    assert!(!feed.inner.lock().unwrap().ready.contains_key(&3));
-    let noted = offer_confirm_ready(&feed, &h2h, &prev, &mut body, &hub, &mut max_ready, &shared);
-    assert_eq!(noted, 3, "the restored remainder still pays for height 3");
+    let claimed = take_unproven_lead(&feed, len, vec![1, 2, 3]);
+    assert_eq!(
+        claimed,
+        vec![1, 2, 3],
+        "the restored remainder still pays for height 3"
+    );
     assert_eq!(feed.inner.lock().unwrap().lead_bytes_left, Some(800));
-    assert!(feed.inner.lock().unwrap().ready.contains_key(&3));
 }
 
 #[test]

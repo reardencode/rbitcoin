@@ -2427,9 +2427,9 @@ pub fn note_stored_candidate(st: &mut IbdWorkState, hub: &ChainHub, headers: &[H
     let _ = extend_tip(st, hub, headers);
 }
 
-#[doc(hidden)]
 /// A batch shorter than a full window, while the walk is still under the
 /// work floor. That chain ended light.
+#[doc(hidden)]
 pub fn short_below_floor(st: &IbdWorkState, hub: &ChainHub, headers: &[Header]) -> bool {
     st.header_walk.origin
         && !headers.is_empty()
@@ -3913,7 +3913,7 @@ fn class_a_above_match(walk: &HeaderWalk) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct UnprovenOfferBounds {
-    /// Highest height `offer_confirm_ready` may note. `None` once work is proved.
+    /// Highest height confirm may claim. `None` once work is proved.
     pub height_limit: Option<u32>,
     /// Class A at or below this height is the matched chain, not the lead.
     pub lead_from: u32,
@@ -3928,7 +3928,7 @@ pub struct UnprovenOfferBounds {
 /// the tighter remainder while the match stays put, and takes this new
 /// remainder when the match moves up.
 #[doc(hidden)]
-pub fn unproven_offer_bounds(st: &IbdWorkState, _confirmed_tip: u32) -> UnprovenOfferBounds {
+pub fn unproven_offer_bounds(st: &IbdWorkState) -> UnprovenOfferBounds {
     if !st.header_walk.origin || st.header_walk.proven {
         return UnprovenOfferBounds {
             height_limit: None,
@@ -3951,8 +3951,8 @@ pub fn unproven_offer_bounds(st: &IbdWorkState, _confirmed_tip: u32) -> Unproven
 /// Highest height confirm may offer while the walk is unproved.
 /// `None` once the walk has proved work: the lead has lifted.
 #[doc(hidden)]
-pub fn unproven_confirm_limit(st: &IbdWorkState, confirmed_tip: u32) -> Option<u32> {
-    unproven_offer_bounds(st, confirmed_tip).height_limit
+pub fn unproven_confirm_limit(st: &IbdWorkState) -> Option<u32> {
+    unproven_offer_bounds(st).height_limit
 }
 
 /// Add Class A bytes for a block confirmed above the matched height.
