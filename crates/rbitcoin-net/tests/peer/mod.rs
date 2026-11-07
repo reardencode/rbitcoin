@@ -767,6 +767,82 @@ async fn getheaders_parent_of_the_tip_is_the_offer() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A getheaders reply that ends on the parent does not replace a newer offer.
+/// A reorg off that newer block still waits.
+#[tokio::test]
+async fn getheaders_keeps_a_newer_offer() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-keep-newer");
+    hub.ensure_genesis().unwrap();
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18481);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 81,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    session.note_last_tip_offered(child);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    on_getheaders(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+        &GetHeadersMessage::new(vec![], parent),
+    )
+    .await
+    .unwrap();
+    let NetworkMessage::Headers(sent) = out_rx.try_recv().unwrap().expect_msg() else {
+        panic!("getheaders should answer with headers");
+    };
+    assert_eq!(sent.last().unwrap().block_hash(), parent);
+    assert_eq!(
+        session.last_tip_offered(),
+        Some(child),
+        "a headers reply does not replace a newer offer"
+    );
+    hub.invalidate_block(child).unwrap();
+    let parent_time = hub.tip_header().unwrap().time;
+    let sibling_block = rbitcoin_consensus::mine_empty_regtest(
+        parent,
+        parent_time.saturating_add(2),
+        hub.tip_height().unwrap().saturating_add(1),
+    );
+    hub.accept_received_block(sibling_block).unwrap();
+    let sibling = hub.tip_hash().unwrap();
+    assert_ne!(sibling, child);
+    assert_ne!(sibling, parent);
+    let sibling_ev = Ok(rbitcoin_net::chain::TipEvent {
+        height: hub.tip_height().unwrap(),
+        hash: sibling,
+        header: hub.tip_header().unwrap(),
+        reorg_branch_len: 1,
+    });
+    assert!(
+        tip_is_reorg_vs_sent(&hub, Some(&session), &sibling_ev),
+        "a reorg off the newer offer still waits"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn count_block_invs(
     reader: &mut rbitcoin_net::v2::V2Reader,
     magic: Magic,

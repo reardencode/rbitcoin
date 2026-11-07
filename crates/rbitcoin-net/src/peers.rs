@@ -353,7 +353,8 @@ pub struct LivePeer {
     /// Last tip we offered this peer, or a handshake tip we already considered.
     /// An inv sets this and does not set [`Self::best_header_sent`]. A
     /// getheaders reply that ends on our tip, or on a block on the way to
-    /// that tip, sets this too. The 200ms reorg hold and a second flush of
+    /// that tip, sets this too, unless this is already a newer block still
+    /// on the way to the tip. The 200ms reorg hold and a second flush of
     /// the same tip both read it.
     last_tip_offered: Mutex<Option<BlockHash>>,
     /// Best connected block this peer advertised.
