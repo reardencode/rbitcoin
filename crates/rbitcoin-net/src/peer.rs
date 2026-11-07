@@ -4399,7 +4399,13 @@ pub async fn on_getheaders(
     if !withhold_stale {
         if let Some(s) = session {
             if let Some(last) = headers.last() {
-                s.note_best_header_sent(last.block_hash());
+                let hash = last.block_hash();
+                s.note_best_header_sent(hash);
+                // This reply ends on our tip, so the peer has it. The 200ms
+                // hold follows that tip. A stop on another branch does not.
+                if hub.tip_hash() == Some(hash) {
+                    s.note_last_tip_offered(hash);
+                }
             } else if let Some(tip) = empty_tip {
                 s.note_best_header_sent(tip);
             }

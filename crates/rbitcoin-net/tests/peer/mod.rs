@@ -623,6 +623,83 @@ async fn child_of_an_inv_is_not_held() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// getheaders that ends on the reorg tip is the offer the next block follows.
+/// After the reorg batch has already ended, that child goes out at once.
+#[tokio::test]
+async fn getheaders_of_a_reorg_tip_does_not_hold_its_child() {
+    use rbitcoin_net::v2::write_v2_msg;
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-reorg-child");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18479, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    write_v2_msg(&mut sess.writer, NetworkMessage::SendHeaders)
+        .await
+        .unwrap();
+    write_v2_msg(&mut sess.writer, NetworkMessage::Ping(1))
+        .await
+        .unwrap();
+    wait_pong(&mut sess.reader, sess.magic, 1).await;
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    let parent_hdrs =
+        collect_header_tips(&mut sess.reader, sess.magic, Duration::from_secs(2)).await;
+    assert!(
+        parent_hdrs.contains(&parent),
+        "the parent is announced, got {parent_hdrs:?}"
+    );
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    let offered_hdrs =
+        collect_header_tips(&mut sess.reader, sess.magic, Duration::from_secs(2)).await;
+    assert!(
+        offered_hdrs.contains(&offered),
+        "the child is announced, got {offered_hdrs:?}"
+    );
+    assert_eq!(sess.live.last_tip_offered(), Some(offered));
+    hub.invalidate_block(offered).unwrap();
+    assert_eq!(hub.tip_hash(), Some(parent));
+    write_v2_msg(
+        &mut sess.writer,
+        NetworkMessage::GetHeaders(GetHeadersMessage::new(
+            vec![genesis],
+            BlockHash::from_byte_array([0u8; 32]),
+        )),
+    )
+    .await
+    .unwrap();
+    let reply_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            std::time::Instant::now() < reply_deadline,
+            "getheaders should answer with the reorg tip"
+        );
+        let tips =
+            collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(50)).await;
+        if sess.live.header_marks().0 == Some(parent) && tips.contains(&parent) {
+            break;
+        }
+    }
+    // Let the reorg batch finish. The next block is a new announcement.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(20)).await;
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    assert_ne!(child, offered);
+    assert_ne!(child, parent);
+    let early = collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(150)).await;
+    assert!(
+        early.contains(&child),
+        "a child of the headers we just sent goes out before another reorg batch, got {early:?}"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn count_block_invs(
     reader: &mut rbitcoin_net::v2::V2Reader,
     magic: Magic,
@@ -646,6 +723,29 @@ async fn count_block_invs(
         }
     }
     n
+}
+
+async fn collect_header_tips(
+    reader: &mut rbitcoin_net::v2::V2Reader,
+    magic: Magic,
+    wait: Duration,
+) -> Vec<BlockHash> {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + wait;
+    let mut hashes = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame = match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
+            Ok(Ok(frame)) => frame,
+            _ => break,
+        };
+        if let NetworkMessage::Headers(headers) = frame.decode().payload() {
+            if let Some(last) = headers.last() {
+                hashes.push(last.block_hash());
+            }
+        }
+    }
+    hashes
 }
 
 async fn collect_block_invs(
