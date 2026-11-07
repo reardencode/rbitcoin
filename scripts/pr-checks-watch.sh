@@ -19,7 +19,6 @@ REQUIRED=(
   coverage
   pread
   rust-forward
-  nixos-module-eval
 )
 
 usage() {

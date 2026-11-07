@@ -33,8 +33,7 @@ all_green="$(
     macos pass 50s \
     coverage pass 2m \
     pread pass 2m \
-    rust-forward pass 2m \
-    nixos-module-eval pass 20s
+    rust-forward pass 2m
 )"
 rc=0
 out="$(CI_PR_CHECKS_TEXT="$all_green" "$RUN" --once 2>&1)" || rc=$?
@@ -50,7 +49,6 @@ analyze_pending_windows_green="$(
     coverage pass 2m \
     pread pass 2m \
     rust-forward pass 2m \
-    nixos-module-eval pass 20s \
     'Analyze (rust)' pending 0
 )"
 rc=0

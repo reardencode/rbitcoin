@@ -29,6 +29,7 @@ env:
 # test, windows, and macos each have their own runner.
 # coverage, pread, rust-forward, and nixos-module-eval wait for qc and test.
 # The module eval runs beside pread and rust-forward. It does not gate coverage.
+# It is not a Protected status check until the ruleset names nixos-module-eval.
 # pread is the Linux libc backend (`RBITCOIN_IO=pread`) for store and query.
 # `test` leaves that variable unset, so Linux stays on io_uring.
 # Mutants are not a PR check. Nightly workspace runs live in mutants.yml.

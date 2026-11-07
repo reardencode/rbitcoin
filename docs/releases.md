@@ -174,7 +174,7 @@ show as `core-functional / core-functional` and so on.
 
 | Check | Who |
 |-------|-----|
-| `qc` `test` `windows` `macos` `coverage` `pread` `rust-forward` `nixos-module-eval` | Every PR (`ci.yml`). `qc` runs fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, script self-tests, then clippy. `pread` is `RBITCOIN_IO=pread cargo test -p rbitcoin-store -p rbitcoin-query` on Ubuntu. `rust-forward` is `cargo check --workspace --all-targets` on the channel in `rust-forward.toml`. `pread`, `rust-forward`, and `nixos-module-eval` `need` `qc` and `test`, so they start with `coverage`. The module eval does not gate `coverage`. The `test` job leaves `RBITCOIN_IO` unset (io_uring) and uses rustc 1.95. |
+| `qc` `test` `windows` `macos` `coverage` `pread` `rust-forward` `nixos-module-eval` | Every PR (`ci.yml`). `qc` runs fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, script self-tests, then clippy. `pread` is `RBITCOIN_IO=pread cargo test -p rbitcoin-store -p rbitcoin-query` on Ubuntu. `rust-forward` is `cargo check --workspace --all-targets` on the channel in `rust-forward.toml`. `pread`, `rust-forward`, and `nixos-module-eval` `need` `qc` and `test`, so they start with `coverage`. The module eval does not gate `coverage`. It is not a Protected status check until the ruleset names `nixos-module-eval`. The `test` job leaves `RBITCOIN_IO` unset (io_uring) and uses rustc 1.95. |
 | `mutants` | Nightly `47 0 * * *` (17:47 Pacific during PDT) and `workflow_dispatch` (`mutants.yml`). Workspace tests. New mutants until half of the first job's budget, then the backlog; the second job does not open another new window. 8 hour budget in two jobs. Not required. Cursor and `MISSED` lines are on the `mutants-state` branch. |
 | `core-functional` | Nightly, `workflow_dispatch`, label **`core-functional`**; via `release-gate.yml` on label **`release`** **or** ship version |
 | `overlay-functional` | Nightly (`42 6`), `workflow_dispatch`, label **`overlay-functional`**; via `release-gate.yml` on label **`release`** **or** ship version |
@@ -188,7 +188,9 @@ is missing.
 
 Ask the operator to add **`release-extra`** as a **required** status check
 on `master` / `main` / `v*.*.x` (ruleset). Until then, agents still wait
-for it before merge.
+for it before merge. Ask the operator to add **`nixos-module-eval`** the
+same way after this workflow is on those branches. Until then the eval job
+runs on every PR and does not block merge.
 
 Unlabeled non-ship PRs keep cargo gates only (detect=`dev`, the three
 functional suites skipped, `release-extra` green).
