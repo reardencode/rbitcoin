@@ -234,4 +234,3 @@ file](#tcp-rpc-cookie), not `rpcuser` / `rpcpassword`.
 | ZMQ | LND's default bitcoind mode, Eclair, Dojo / Ashigaru | A publisher. Out of scope. LND's `rpcpolling` path does not need it ([`lightning.md`](./lightning.md)). Eclair and Dojo also need Core wallet RPC. |
 | Core wallet RPC | The Core-wallet table above, plus Eclair | Out of scope. |
 | Blockbook WebSocket | Trezor Suite | A new API. |
-| NBXplorer version gate | BTCPay | A client change. The block-scan methods are already served. |
