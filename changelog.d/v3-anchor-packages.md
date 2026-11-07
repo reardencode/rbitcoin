@@ -9,9 +9,9 @@ Added
   unconfirmed parent and one unconfirmed child, both version 3, at most
   10,000 vB, or 1,000 vB when its parent is unconfirmed. A non-version-3
   child of a version-3 parent is rejected too. Replacing the existing child
-  is allowed; a second child is `TRUC-violation` (there is no sibling
-  eviction). The limit is checked again when the transaction commits, so
-  two children admitted at the same time cannot both enter.
+  is allowed, and so is a second child that pays to evict the first
+  (sibling eviction). The limit is checked again when the transaction
+  commits, so two children admitted at the same time cannot both enter.
 - **A 0-fee transaction may carry one 0-value output (an anchor).** As in
   Core's ephemeral dust rule, the output is allowed only when the
   transaction pays no fee, and any child of it must spend that output or

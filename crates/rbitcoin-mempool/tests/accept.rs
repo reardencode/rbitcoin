@@ -608,8 +608,10 @@ fn truc_topology_and_sizes() {
     let child = ver_tx(&[out_of(&v3_parent, 0)], 3, vec![pay(150_000)]);
     mp.accept_tx(&child, &utxos, TIP_OK)
         .expect("one version-3 child");
+    // A second child is a sibling eviction; at the same fee it pays too little.
     let sibling = ver_tx(&[out_of(&v3_parent, 1)], 3, vec![pay(150_000)]);
-    assert_truc_violation(mp.accept_tx(&sibling, &utxos, TIP_OK));
+    let err = mp.accept_tx(&sibling, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
     let grandchild = ver_tx(&[out_of(&child, 0)], 3, vec![pay(100_000)]);
     assert_truc_violation(mp.accept_tx(&grandchild, &utxos, TIP_OK));
     let left = ver_tx(&[ops[3]], 3, vec![pay(400_000)]);
@@ -646,6 +648,160 @@ fn truc_topology_and_sizes() {
     );
     mp.accept_tx(&wide_v2, &utxos, TIP_OK)
         .expect("the TRUC child cap is only for version 3");
+}
+
+/// BIP 431 sibling eviction (Core `SingleTRUCChecks`): a second child of a
+/// version-3 parent replaces the first when it pays the replacement fee.
+#[test]
+fn truc_sibling_eviction() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[500_000, 500_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[ops[0]], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(190_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+
+    // A package child cannot pay to evict its parent's sibling: a member
+    // that needs the package feerate is `TRUC-violation`, as in Core.
+    let free = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(200_000)]);
+    let bump = ver_tx(&[out_of(&free, 0)], 3, vec![pay(100_000)]);
+    assert_truc_violation(
+        mp.accept_package(&[free, bump], &utxos, TIP_OK)
+            .map(|mut r| r.remove(0)),
+    );
+    assert!(mp.graph.contains(&first.compute_txid()));
+
+    let cheap = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(190_000)]);
+    let err = mp.accept_tx(&cheap, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
+    assert!(mp.graph.contains(&first.compute_txid()));
+
+    // A member that pays its own way evicts, as Core's per-tx pass does.
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(150_000)]);
+    let r = mp
+        .accept_package(std::slice::from_ref(&paying), &utxos, TIP_OK)
+        .expect("a sibling that pays more evicts the first child")
+        .remove(0);
+    assert!(
+        r.replaced.contains(&first.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+    assert!(!mp.graph.contains(&first.compute_txid()));
+    assert!(mp.graph.contains(&paying.compute_txid()));
+
+    // A sibling eviction and an ordinary replacement in one tx.
+    let unrelated = ver_tx(&[ops[1]], 3, vec![pay(490_000)]);
+    mp.accept_tx(&unrelated, &utxos, TIP_OK).unwrap();
+    let both = ver_tx(&[out_of(&parent, 0), ops[1]], 3, vec![pay(400_000)]);
+    let r = mp
+        .accept_tx(&both, &utxos, TIP_OK)
+        .expect("evicts the sibling and replaces the conflict");
+    assert!(
+        r.replaced.contains(&paying.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+    assert!(
+        r.replaced.contains(&unrelated.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
+}
+
+/// A sibling eviction must pay Core's absolute replacement fee. Libre's
+/// replace-by-feerate does not apply: a smaller sibling at a higher feerate
+/// but a lower fee would cut the pool's fee (Core `PaysForRBF`).
+#[test]
+fn truc_sibling_eviction_pays_the_absolute_fee() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(500_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[op], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    // About 200 vB at 1,000 sat.
+    let first = ver_tx(
+        &[out_of(&parent, 0)],
+        3,
+        vec![pay(199_000), return_pad(130)],
+    );
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+    // About 61 vB at 600 sat: over 1.25x the feerate, less absolute fee.
+    let smaller = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(199_400)]);
+    let err = mp.accept_tx(&smaller, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::RbfInsufficientSibling), "{err}");
+    assert!(mp.graph.contains(&first.compute_txid()));
+}
+
+/// A package that fails puts back what it replaced. Re-admitting a lifted
+/// member afterwards must not evict that put-back child again while the
+/// caller is told the package failed.
+#[test]
+fn failed_package_putback_does_not_evict_a_sibling() {
+    let dir = tmp_dir();
+    let (ops, mut utxos) = chain_coins(&[500_000, 500_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[ops[0]], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(199_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+
+    // A paying sibling parked on a coin this node has not seen yet.
+    let late = OutPoint {
+        txid: Txid::from_byte_array([0xcd; 32]),
+        vout: 0,
+    };
+    let sibling = ver_tx(&[out_of(&parent, 1), late], 3, vec![pay(250_000)]);
+    let _ = mp.park_announced(&sibling, BTreeSet::from([late.txid]), &[]);
+    utxos.map.insert(late, coin(pay(100_000)));
+
+    // Two 0-value outputs: `dust`, after the sibling has committed.
+    let bad = ver_tx(&[ops[1]], 2, vec![pay(0), pay(0)]);
+    assert!(mp
+        .accept_package(&[sibling.clone(), bad], &utxos, TIP_OK)
+        .is_err());
+    assert!(mp.graph.contains(&first.compute_txid()));
+    assert!(!mp.graph.contains(&sibling.compute_txid()));
+}
+
+/// A single accept already met the fee floor at prepare. A floor that rises
+/// before its commit does not turn its sibling eviction into
+/// `TRUC-violation`.
+#[test]
+fn truc_sibling_eviction_survives_a_floor_rise_before_commit() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(500_000);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = ver_tx(&[op], 3, vec![pay(200_000), pay(200_000)]);
+    mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+    let first = ver_tx(&[out_of(&parent, 0)], 3, vec![pay(199_000)]);
+    mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+    // 10,000 sat on ~60 vB: well above min relay, below the raised floor.
+    let paying = ver_tx(&[out_of(&parent, 1)], 3, vec![pay(190_000)]);
+    let mut prep = mp
+        .prepare_admit(
+            &paying,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: None,
+                waive: false,
+            },
+        )
+        .unwrap();
+    prep.sibling_eviction = SiblingEviction::On;
+    mp.note_evicted_feerate(1_000_000);
+    let r = mp
+        .commit_after_script(&paying, prep)
+        .expect("the sibling eviction still commits");
+    assert!(
+        r.replaced.contains(&first.compute_txid()),
+        "{:?}",
+        r.replaced
+    );
 }
 
 /// Two children staged before either commits: the second commit still sees

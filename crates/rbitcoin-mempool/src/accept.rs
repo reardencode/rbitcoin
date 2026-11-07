@@ -217,6 +217,9 @@ pub enum AcceptError {
     PackageNotTopo,
     /// Conflicting mempool txs exist and replacement does not pay enough.
     RbfInsufficient,
+    /// As [`Self::RbfInsufficient`], where the replaced set includes a TRUC
+    /// sibling (Core `insufficient fee (including sibling eviction)`).
+    RbfInsufficientSibling,
     Coinbase,
     /// Duplicate previous_output within the same transaction (011).
     InputsDuplicate,
@@ -252,6 +255,9 @@ impl std::fmt::Display for AcceptError {
             AcceptError::PackageEmpty => f.write_str("package empty"),
             AcceptError::PackageNotTopo => f.write_str("package not topologically ordered"),
             AcceptError::RbfInsufficient => f.write_str("rbf insufficient fee"),
+            AcceptError::RbfInsufficientSibling => {
+                f.write_str("rbf insufficient fee (including sibling eviction)")
+            }
             AcceptError::Coinbase => f.write_str("coinbase"),
             AcceptError::InputsDuplicate => f.write_str("inputs-duplicate"),
             AcceptError::ImmatureCoinbase => f.write_str("coinbase immature"),
@@ -515,6 +521,36 @@ pub struct PreparedAdmit {
     /// This tx was already marked and is being put back. The new slot keeps
     /// the byte even when this admit itself does not warn.
     pub keep_mark: bool,
+    /// Whether a second child of a version-3 parent may evict the first
+    /// (BIP 431 sibling eviction). Off unless the admit turns it on.
+    pub sibling_eviction: SiblingEviction,
+}
+
+/// BIP 431 sibling eviction for one admit. Core allows it only for a tx
+/// judged alone (`SingleAccept`, and `SingleInPackageAccept`: each member's
+/// own pass inside `AcceptPackage`), never for the package-feerate remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingEviction {
+    /// 1p1c pairs, put-backs, reorg re-adds, multi-tx `testmempoolaccept`.
+    Off,
+    /// A single accept, or a one-tx package: it already met its own fee floor.
+    On,
+    /// A member of a multi-tx package, admitted at the package feerate. It
+    /// evicts only when it pays its own floor, which is when Core's per-tx
+    /// pass would have admitted it. Otherwise it is the remainder, and a
+    /// second child is `TRUC-violation`.
+    IfPaysFloor,
+}
+
+impl SiblingEviction {
+    /// For each member of a package of `len` txs.
+    pub fn for_package(len: usize) -> Self {
+        if len > 1 {
+            SiblingEviction::IfPaysFloor
+        } else {
+            SiblingEviction::On
+        }
+    }
 }
 
 struct AdmitInputs {
@@ -998,7 +1034,7 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
         self.last_accept_stages = AcceptStageUs::default();
-        match self.accept_tx_with(tx, utxos, tip, 0, true, None) {
+        match self.accept_tx_with(tx, utxos, tip, 0, true, None, SiblingEviction::On) {
             Ok(r) => {
                 self.promote_orphans_of(r.txid, utxos, tip);
                 Ok(r)
@@ -1013,6 +1049,7 @@ impl ActiveMempool {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // each admit states its own policy
     pub fn accept_tx_with(
         &mut self,
         tx: &Transaction,
@@ -1021,6 +1058,7 @@ impl ActiveMempool {
         fee_delta: i64,
         report_orphans: bool,
         min_relay: Option<u64>,
+        sibling_eviction: SiblingEviction,
     ) -> Result<AcceptResult, AcceptError> {
         // Local `accept_tx` stays strict. The session bit is on the hub admit.
         let waive = false;
@@ -1035,6 +1073,7 @@ impl ActiveMempool {
                 waive,
             },
         )?;
+        prep.sibling_eviction = sibling_eviction;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -1225,6 +1264,7 @@ impl ActiveMempool {
             keep_accept_secs: None,
             trust_warn,
             keep_mark: false,
+            sibling_eviction: SiblingEviction::Off,
         })
     }
 
@@ -1597,7 +1637,10 @@ impl ActiveMempool {
         Ok(())
     }
 
-    /// BIP 431 TRUC, as Core `SingleTRUCChecks` without sibling eviction.
+    /// BIP 431 TRUC, as Core `SingleTRUCChecks`. `Ok(Some(sibling))` is a
+    /// second child whose only violation is the one-child limit, and whose
+    /// sibling can be evicted: the parent's only descendant, with no other
+    /// unconfirmed ancestor.
     ///
     /// Runs under the commit lock, so two children staged together cannot
     /// both pass against a parent that has neither yet.
@@ -1606,7 +1649,7 @@ impl ActiveMempool {
         tx: &Transaction,
         vsize: u64,
         scan: &ConflictScan,
-    ) -> Result<(), AcceptError> {
+    ) -> Result<Option<Txid>, AcceptError> {
         const VIOLATION: AcceptError = AcceptError::Policy("TRUC-violation");
         let is_truc = tx.version.0 == policy::TRUC_VERSION;
         for id in &scan.parent_txids {
@@ -1619,13 +1662,13 @@ impl ActiveMempool {
             }
         }
         if !is_truc {
-            return Ok(());
+            return Ok(None);
         }
         if vsize > policy::TRUC_MAX_VSIZE || scan.parent_txids.len() > 1 {
             return Err(VIOLATION);
         }
         let Some(parent) = scan.parent_txids.first() else {
-            return Ok(());
+            return Ok(None);
         };
         let entry = self
             .graph
@@ -1638,10 +1681,24 @@ impl ActiveMempool {
             .children
             .iter()
             .any(|c| scan.direct_conflicts.contains(c));
-        if !entry.children.is_empty() && !child_replaced {
-            return Err(VIOLATION);
+        if entry.children.is_empty() || child_replaced {
+            return Ok(None);
         }
-        Ok(())
+        // Core: the parent's descendant count is 2 and the sibling's
+        // ancestor count is 2. More is only possible after a reorg.
+        let mut children = entry.children.iter();
+        let (Some(sibling), None) = (children.next(), children.next()) else {
+            return Err(VIOLATION);
+        };
+        let alone = self
+            .graph
+            .get(sibling)
+            .is_some_and(|e| e.children.is_empty() && e.parents.len() == 1);
+        if alone {
+            Ok(Some(*sibling))
+        } else {
+            Err(VIOLATION)
+        }
     }
 
     /// A child of a parent with a dust output must spend that output (Core
@@ -1700,27 +1757,58 @@ impl ActiveMempool {
         let fee_sat = prep.fee_sat;
         let weight =
             sigops_adjusted_weight(prep.weight, prep.sigop_cost, self.graph.bytes_per_sigop());
-        self.check_truc(tx, weight.div_ceil(4), &scan)?;
-        self.check_ephemeral_spends(tx, &scan)?;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
+        let sibling = match self.check_truc(tx, weight.div_ceil(4), &scan)? {
+            Some(s)
+                if match prep.sibling_eviction {
+                    SiblingEviction::Off => false,
+                    SiblingEviction::On => true,
+                    SiblingEviction::IfPaysFloor => policy::meets_min_relay_fee_at(
+                        admit_fee,
+                        weight,
+                        self.mempool_min_fee_sat_kvb(),
+                    ),
+                } =>
+            {
+                Some(s)
+            }
+            Some(_) => return Err(AcceptError::Policy("TRUC-violation")),
+            None => None,
+        };
+        self.check_ephemeral_spends(tx, &scan)?;
 
-        let conflict_set = if !scan.direct_conflicts.is_empty() {
-            let direct: Vec<Txid> = scan.direct_conflicts.iter().copied().collect();
+        // The sibling joins the replaced set and pays for it like any
+        // conflict (Core adds it to `m_conflicts`).
+        let mut direct_conflicts = scan.direct_conflicts;
+        direct_conflicts.extend(sibling);
+        let conflict_set = if !direct_conflicts.is_empty() {
+            let direct: Vec<Txid> = direct_conflicts.iter().copied().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);
             let (direct_fee, direct_weight) = self
                 .graph
                 .set_fee_weight(&direct.iter().copied().collect::<BTreeSet<_>>());
-            if !rbf_allows_replacement(
-                admit_fee,
-                weight,
-                old_fee,
-                old_weight,
-                direct_fee,
-                direct_weight,
-            ) {
-                return Err(AcceptError::RbfInsufficient);
+            // Sibling eviction is Core's rule, so it pays Core's absolute fee
+            // (`PaysForRBF`); Libre's replace-by-feerate could lower it.
+            let pays = if sibling.is_some() {
+                rbf_pays_for_replacement(admit_fee, weight, old_fee, old_weight)
+            } else {
+                rbf_allows_replacement(
+                    admit_fee,
+                    weight,
+                    old_fee,
+                    old_weight,
+                    direct_fee,
+                    direct_weight,
+                )
+            };
+            if !pays {
+                return Err(if sibling.is_some() {
+                    AcceptError::RbfInsufficientSibling
+                } else {
+                    AcceptError::RbfInsufficient
+                });
             }
             set
         } else {
@@ -1743,8 +1831,8 @@ impl ActiveMempool {
         }
         // Parents of the direct conflicts only, not their ancestor closure.
         // After the cap, so an over-size cluster is `too-large-cluster`.
-        if !scan.direct_conflicts.is_empty() {
-            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
+        if !direct_conflicts.is_empty() {
+            self.reject_new_unconfirmed(tx, &direct_conflicts)?;
         }
         // Core `bad-txns-spends-conflicting-tx`. A parent in the conflict set
         // is evicted by this accept, and its outputs with it.
@@ -1774,7 +1862,7 @@ impl ActiveMempool {
         let mut queue = VecDeque::new();
         self.push_orphan_children(parent, &mut queue);
         while let Some(child) = queue.pop_front() {
-            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None) {
+            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None, SiblingEviction::On) {
                 Ok(r) => {
                     self.orphanage
                         .forget_taken_gen(&child.tx.compute_txid(), child.taken_gen);
@@ -2029,6 +2117,7 @@ impl ActiveMempool {
         Self::check_package_shape(txs)?;
 
         self.last_accept_stages = AcceptStageUs::default();
+        let member_eviction = SiblingEviction::for_package(txs.len());
         let member_min = if self.package_meets_min_relay(
             txs,
             utxos,
@@ -2050,14 +2139,24 @@ impl ActiveMempool {
                 lifted.push(parked);
             }
             // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
+            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min, member_eviction) {
                 Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
                     for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0, None) {
                         let id = item.tx.compute_txid();
-                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
+                        // A put-back after the failed package: it does not
+                        // evict the child the rollback just restored.
+                        match self.accept_tx_with(
+                            &item.tx,
+                            utxos,
+                            tip,
+                            0,
+                            true,
+                            None,
+                            SiblingEviction::Off,
+                        ) {
                             Ok(r) => {
                                 // Admitted, so the lift row is not in flight.
                                 self.orphanage.forget_taken_gen(&id, item.taken_gen);

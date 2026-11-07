@@ -1229,6 +1229,9 @@ pub fn accept_reject_reason(e: &impl std::fmt::Display) -> String {
     if s == "rbf insufficient fee" {
         return "insufficient fee".into();
     }
+    if s == "rbf insufficient fee (including sibling eviction)" {
+        return "insufficient fee (including sibling eviction)".into();
+    }
     if s == "min relay fee" {
         return "min relay fee not met".into();
     }
@@ -1385,7 +1388,7 @@ pub fn testmempoolaccept_package_rows(
             }));
             continue;
         }
-        match mp.accept_tx(tx) {
+        match mp.accept_test_package_member(tx) {
             Ok(r) => {
                 added.push(r.txid);
                 if fee_exceeds_max(r.fee_sat, r.weight, max_feerate) {
@@ -1546,7 +1549,7 @@ async fn testmempoolaccept_package_rows_work(
             }));
             continue;
         }
-        match mp.accept_tx_async(tx.clone()).await {
+        match mp.accept_test_package_member_async(tx.clone()).await {
             Ok(r) => {
                 added.push(r.txid);
                 if fee_exceeds_max(r.fee_sat, r.weight, max_feerate) {
