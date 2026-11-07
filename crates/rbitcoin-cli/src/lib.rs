@@ -11,6 +11,62 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+const CONVERT_PARAMS: &[(&str, usize)] = &[
+    ("addconnection", 2),
+    ("addnode", 2),
+    ("addpeeraddress", 1),
+    ("addpeeraddress", 2),
+    ("decoderawtransaction", 1),
+    ("disconnectnode", 1),
+    ("estimaterawfee", 0),
+    ("estimaterawfee", 1),
+    ("estimatesmartfee", 0),
+    ("estimatesmartfee", 2),
+    ("generate", 0),
+    ("generate", 1),
+    ("generateblock", 1),
+    ("generateblock", 2),
+    ("generatetoaddress", 0),
+    ("generatetoaddress", 2),
+    ("generatetodescriptor", 0),
+    ("generatetodescriptor", 2),
+    ("getblock", 1),
+    ("getblockhash", 0),
+    ("getblockheader", 1),
+    ("getblockstats", 0),
+    ("getblockstats", 1),
+    ("getblocktemplate", 0),
+    ("getmempoolancestors", 1),
+    ("getmempooldescendants", 1),
+    ("getnetworkhashps", 0),
+    ("getnetworkhashps", 1),
+    ("getnodeaddresses", 0),
+    ("getorphantxs", 0),
+    ("getrawmempool", 0),
+    ("getrawmempool", 1),
+    ("getrawtransaction", 1),
+    ("gettxout", 1),
+    ("gettxout", 2),
+    ("gettxspendingprevout", 0),
+    ("importmempool", 1),
+    ("mockscheduler", 0),
+    ("prioritisetransaction", 1),
+    ("prioritisetransaction", 2),
+    ("sendrawtransaction", 1),
+    ("sendrawtransaction", 2),
+    ("setmocktime", 0),
+    ("stop", 0),
+    ("submitpackage", 0),
+    ("submitpackage", 1),
+    ("submitpackage", 2),
+    ("testmempoolaccept", 0),
+    ("testmempoolaccept", 1),
+    ("waitforblock", 1),
+    ("waitforblockheight", 0),
+    ("waitforblockheight", 1),
+    ("waitfornewblock", 0),
+];
+
 #[doc(hidden)]
 pub fn usage() -> String {
     format!(
@@ -247,9 +303,17 @@ pub fn read_token(path: &Path) -> Result<String, String> {
     Ok(t.to_string())
 }
 
+fn convert_param(method: &str, index: usize) -> bool {
+    CONVERT_PARAMS.contains(&(method, index))
+}
+
 #[doc(hidden)]
-pub fn param_value(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+pub fn param_value(method: &str, index: usize, raw: &str) -> Value {
+    if convert_param(method, index) {
+        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+    } else {
+        Value::String(raw.to_string())
+    }
 }
 
 #[doc(hidden)]
@@ -349,7 +413,12 @@ pub fn dispatch_call(cfg: &CliConfig) -> Result<String, String> {
     if cmd == "help" {
         return Ok(usage());
     }
-    let params: Vec<Value> = cfg.params.iter().map(|p| param_value(p)).collect();
+    let params: Vec<Value> = cfg
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| param_value(cmd, i, p))
+        .collect();
     let sock = socket_path(cfg);
     let result = if cfg.rpc_url.is_none() && (cfg.socket.is_some() || sock.exists()) {
         let stream = connect_unix(&sock)?;

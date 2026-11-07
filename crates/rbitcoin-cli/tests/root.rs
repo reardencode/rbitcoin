@@ -4,11 +4,14 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use std::net::TcpListener;
 
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+type CapturedParams = Arc<Mutex<Option<Vec<serde_json::Value>>>>;
 
 fn exit_ok(c: ExitCode) -> bool {
     format!("{c:?}") == format!("{:?}", ExitCode::SUCCESS)
@@ -118,9 +121,13 @@ fn rpc_url_is_host_and_port() {
 
 #[test]
 fn param_tokens_json_or_string() {
-    assert_eq!(param_value("0"), serde_json::json!(0));
-    assert_eq!(param_value("true"), serde_json::json!(true));
-    assert_eq!(param_value("abc"), serde_json::json!("abc"));
+    assert_eq!(param_value("getblockhash", 0, "0"), serde_json::json!(0));
+    assert_eq!(param_value("getblock", 0, "0"), serde_json::json!("0"));
+    assert_eq!(param_value("getblock", 1, "true"), serde_json::json!(true));
+    assert_eq!(
+        param_value("getblockhash", 0, "abc"),
+        serde_json::json!("abc")
+    );
 }
 
 #[test]
@@ -207,10 +214,15 @@ fn default_rpc_port_follows_network() {
     assert_eq!(Network::Regtest.default_rpc_port(), 18443);
 }
 
-/// Answer one JSON-RPC request on `listener` with `"result": 7`.
+/// Serve one JSON-RPC request on `listener`, reply `"result": 7`, and
+/// capture the request's `params` into the returned slot.
 #[cfg(unix)]
-fn serve_one_rpc(listener: std::os::unix::net::UnixListener) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+fn serve_one_rpc(
+    listener: std::os::unix::net::UnixListener,
+) -> (CapturedParams, thread::JoinHandle<()>) {
+    let captured = Arc::new(Mutex::new(None));
+    let c = captured.clone();
+    let h = thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
         let mut raw = Vec::new();
         let mut tmp = [0u8; 1024];
@@ -221,13 +233,38 @@ fn serve_one_rpc(listener: std::os::unix::net::UnixListener) -> thread::JoinHand
             }
             raw.extend_from_slice(&tmp[..n]);
         }
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap_or(raw.len());
+        let content_length = String::from_utf8_lossy(&raw[..header_end])
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while raw.len() < header_end + content_length {
+            let n = s.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&tmp[..n]);
+        }
+        let body = &raw[header_end..header_end + content_length];
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+            *c.lock().unwrap() = v
+                .get("params")
+                .and_then(serde_json::Value::as_array)
+                .cloned();
+        }
         let body = "{\"jsonrpc\":\"1.0\",\"id\":\"1\",\"result\":7,\"error\":null}\n".to_string();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         s.write_all(resp.as_bytes()).unwrap();
-    })
+    });
+    (captured, h)
 }
 
 #[cfg(unix)]
@@ -236,7 +273,7 @@ fn unix_socket_needs_no_token() {
     use std::os::unix::net::UnixListener;
     let dir = tmp_datadir();
     let sock = dir.join("rpc.sock");
-    let h = serve_one_rpc(UnixListener::bind(&sock).unwrap());
+    let (_, h) = serve_one_rpc(UnixListener::bind(&sock).unwrap());
     let code = cli_main([
         "rbitcoin-cli",
         "--datadir",
@@ -257,7 +294,7 @@ fn rpc_socket_reaches_a_socket_outside_the_datadir() {
     use std::os::unix::net::UnixListener;
     let dir = tmp_datadir();
     let sock = dir.join("rpc-elsewhere.sock");
-    let h = serve_one_rpc(UnixListener::bind(&sock).unwrap());
+    let (_, h) = serve_one_rpc(UnixListener::bind(&sock).unwrap());
     let code = cli_main([
         "rbitcoin-cli",
         "--datadir",
@@ -312,4 +349,29 @@ fn parse_args_double_dash_ends_option_parsing() {
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("expected Action::Call, got Help or Version"),
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn getblock_keeps_a_digit_only_hash_a_string() {
+    use std::os::unix::net::UnixListener;
+    let dir = tmp_datadir();
+    let sock = dir.join("rpc.sock");
+    let (captured, h) = serve_one_rpc(UnixListener::bind(&sock).unwrap());
+    let code = cli_main([
+        "rbitcoin-cli",
+        "--datadir",
+        dir.to_str().unwrap(),
+        "getblock",
+        "123456789",
+        "2",
+    ]);
+    assert!(exit_ok(code), "getblock must succeed, got {code:?}");
+    let params = captured.lock().unwrap().take().unwrap();
+    assert_eq!(
+        params,
+        vec![serde_json::json!("123456789"), serde_json::json!(2)]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = h.join();
 }
