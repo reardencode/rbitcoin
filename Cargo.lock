@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-bench"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin",
  "rbitcoin-primitives",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-cli"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "mimalloc",
  "rbitcoin-primitives",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-consensus"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-electrum"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin",
  "rbitcoin-consensus",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-esplora"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "axum",
  "bitcoin",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-ibd"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin",
  "libc",
@@ -1099,11 +1099,11 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-log"
-version = "0.8.99"
+version = "0.9.99"
 
 [[package]]
 name = "rbitcoin-mempool"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin",
  "rbitcoin-consensus",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-net"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "arc-swap",
  "bip324",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-node"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "axum",
  "bitcoin",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-primitives"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin_hashes 0.14.101",
  "hex-conservative 0.2.3",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-query"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-rpc"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "axum",
  "base64",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-store"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "bitcoin_hashes 0.14.101",
  "getrandom 0.4.3",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-sv2"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "binary_sv2",
  "bitcoin",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-test"
-version = "0.8.99"
+version = "0.9.99"
 dependencies = [
  "binary_sv2",
  "bitcoin",
