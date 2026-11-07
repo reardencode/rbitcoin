@@ -219,8 +219,13 @@ pub struct ConfirmFeedInner {
     /// Heights at or below this are the matched chain. They do not spend the lead.
     pub lead_from: u32,
     /// Class A bytes still allowed above `lead_from`. `None` is no byte cap.
-    /// Offer lowers this as it notes bodies. A refresh keeps the tighter value.
+    /// Offer lowers this as it notes bodies. The same match keeps the tighter
+    /// value. A higher match installs the new remainder, minus wire still
+    /// reserved above that match.
     pub lead_bytes_left: Option<u64>,
+    /// Wire `offer_confirm_ready` has reserved above the match, by height.
+    /// Cleared when that height is accepted or the match moves to or past it.
+    pub lead_reserved: std::collections::BTreeMap<u32, u64>,
 }
 
 impl Default for ConfirmFeed {
@@ -239,6 +244,7 @@ impl ConfirmFeed {
                 height_limit: None,
                 lead_from: 0,
                 lead_bytes_left: None,
+                lead_reserved: std::collections::BTreeMap::new(),
             }),
             cv: std::sync::Condvar::new(),
             stop: AtomicBool::new(false),
@@ -271,9 +277,10 @@ impl ConfirmFeed {
         self.inner.lock().unwrap().height_limit = limit;
     }
 
-    /// Install the unproven lead. A later call keeps the smaller byte remainder
-    /// so blocks already noted are not offered again under a fresh budget.
-    /// `bytes_left == None` lifts the byte cap (the walk proved work).
+    /// Install the unproven lead. The same `lead_from` keeps the smaller byte
+    /// remainder, so blocks already noted are not offered again under a fresh
+    /// budget. A higher `lead_from` installs `bytes_left`, minus wire still
+    /// reserved above that height. `bytes_left == None` lifts the byte cap.
     pub fn set_unproven_bounds(
         &self,
         height_limit: Option<u32>,
@@ -281,13 +288,35 @@ impl ConfirmFeed {
         bytes_left: Option<u64>,
     ) {
         let mut g = self.inner.lock().unwrap();
+        let raised = lead_from > g.lead_from;
         g.height_limit = height_limit;
         g.lead_from = lead_from;
-        g.lead_bytes_left = match (g.lead_bytes_left, bytes_left) {
-            (_, None) => None,
-            (None, Some(n)) => Some(n),
-            (Some(cur), Some(n)) => Some(cur.min(n)),
+        if raised {
+            g.lead_reserved.retain(|&h, _| h > lead_from);
+        }
+        g.lead_bytes_left = match bytes_left {
+            None => {
+                g.lead_reserved.clear();
+                None
+            }
+            Some(n) if raised => {
+                let pending = g
+                    .lead_reserved
+                    .values()
+                    .fold(0u64, |acc, b| acc.saturating_add(*b));
+                Some(n.saturating_sub(pending))
+            }
+            Some(n) => match g.lead_bytes_left {
+                Some(cur) => Some(cur.min(n)),
+                None => Some(n),
+            },
         };
+    }
+
+    /// The block at `height` was accepted. Its reservation must not be
+    /// subtracted again when a later match refreshes the remainder.
+    pub fn release_lead_reserve(&self, height: u32) {
+        self.inner.lock().unwrap().lead_reserved.remove(&height);
     }
 
     /// This height is already noted or claimed. A second offer must not spend
@@ -3315,6 +3344,7 @@ pub fn offer_confirm_ready(
     };
     let limit = expect.saturating_add(OFFER_AHEAD);
     let mut noted = 0u32;
+    let mut reserved: Vec<(u32, u64)> = Vec::new();
     for ht in expect..=limit {
         if height_limit.is_some_and(|cap| ht > cap) {
             break;
@@ -3356,6 +3386,7 @@ pub fn offer_confirm_ready(
                     break;
                 }
                 bytes_left = Some(left - wire);
+                reserved.push((ht, wire));
             }
         }
         *max_ready_height = (*max_ready_height).max(ht);
@@ -3367,6 +3398,9 @@ pub fn offer_confirm_ready(
         let mut g = feed.inner.lock().unwrap();
         if g.lead_bytes_left.is_some() {
             g.lead_bytes_left = bytes_left;
+            for (ht, wire) in reserved {
+                g.lead_reserved.insert(ht, wire);
+            }
         }
     }
     noted

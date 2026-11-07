@@ -28,7 +28,7 @@ use bitcoin::BlockHash;
 use bitcoin::CompactTarget;
 use bitcoin::Work;
 use rbitcoin_net::chain::ChainHub;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,7 +41,9 @@ pub const WALK_CLOCK_SKEW: u64 = 2 * 60 * 60;
 /// Blocks confirm may run past the last height a second peer matched,
 /// while the walk has not proved minimum chain work.
 pub const UNPROVEN_LEAD_BLOCKS: u32 = 65_536;
-/// Class A bytes of that lead. Either cap stops the unproven tip.
+/// Class A bytes above the matched height. A full gibibyte stops further
+/// blocks above that height. The height cap stays the match plus
+/// [`UNPROVEN_LEAD_BLOCKS`].
 pub const UNPROVEN_LEAD_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[cfg(debug_assertions)]
@@ -179,8 +181,9 @@ pub struct HeaderWalk {
     pub length_exceeded: bool,
     /// Highest checkpoint height a non-reserved peer's full batch matched.
     pub witness_height: Option<u32>,
-    /// Class A bytes written above [`Self::witness_height`] while unproved.
-    pub lead_class_a_bytes: u64,
+    /// Class A wire accepted above the matched height, keyed by block height.
+    /// A later match drops heights at or below the new line.
+    pub lead_class_a: BTreeMap<u32, u64>,
 }
 
 /// One in-flight header ask on one lane. Not written to `header.adopt`.
@@ -3890,8 +3893,20 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         clock_refused: false,
         length_exceeded: false,
         witness_height: None,
-        lead_class_a_bytes: 0,
+        lead_class_a: BTreeMap::new(),
     })
+}
+
+/// Class A bytes still charged against the lead: only heights above the
+/// current match.
+fn class_a_above_match(walk: &HeaderWalk) -> u64 {
+    let matched = walk.witness_height.unwrap_or(walk.base_height);
+    walk.lead_class_a
+        .range((
+            std::ops::Bound::Excluded(matched),
+            std::ops::Bound::Unbounded,
+        ))
+        .fold(0u64, |acc, (_, n)| acc.saturating_add(*n))
 }
 
 /// What confirm may still offer while the walk is unproved.
@@ -3908,11 +3923,12 @@ pub struct UnprovenOfferBounds {
 
 /// Height and byte bounds for the next confirm offer.
 ///
-/// The byte remainder is what has already been confirmed. The feed keeps the
-/// tighter of that and the bytes it has already noted, so a later offer cannot
-/// spend the same gibibyte twice before those blocks land.
+/// The height cap is always the matched height plus [`UNPROVEN_LEAD_BLOCKS`].
+/// The byte remainder counts Class A above that height only. The feed keeps
+/// the tighter remainder while the match stays put, and takes this new
+/// remainder when the match moves up.
 #[doc(hidden)]
-pub fn unproven_offer_bounds(st: &IbdWorkState, confirmed_tip: u32) -> UnprovenOfferBounds {
+pub fn unproven_offer_bounds(st: &IbdWorkState, _confirmed_tip: u32) -> UnprovenOfferBounds {
     if !st.header_walk.origin || st.header_walk.proven {
         return UnprovenOfferBounds {
             height_limit: None,
@@ -3924,15 +3940,11 @@ pub fn unproven_offer_bounds(st: &IbdWorkState, confirmed_tip: u32) -> UnprovenO
         .header_walk
         .witness_height
         .unwrap_or(st.header_walk.base_height);
-    let height_limit = if st.header_walk.lead_class_a_bytes >= UNPROVEN_LEAD_BYTES {
-        Some(confirmed_tip)
-    } else {
-        Some(matched.saturating_add(UNPROVEN_LEAD_BLOCKS))
-    };
+    let spent = class_a_above_match(&st.header_walk);
     UnprovenOfferBounds {
-        height_limit,
+        height_limit: Some(matched.saturating_add(UNPROVEN_LEAD_BLOCKS)),
         lead_from: matched,
-        bytes_left: Some(UNPROVEN_LEAD_BYTES.saturating_sub(st.header_walk.lead_class_a_bytes)),
+        bytes_left: Some(UNPROVEN_LEAD_BYTES.saturating_sub(spent)),
     }
 }
 
@@ -3954,8 +3966,8 @@ pub fn note_unproven_class_a(st: &mut IbdWorkState, height: u32, wire_bytes: u64
         .witness_height
         .unwrap_or(st.header_walk.base_height);
     if height > matched {
-        st.header_walk.lead_class_a_bytes =
-            st.header_walk.lead_class_a_bytes.saturating_add(wire_bytes);
+        let slot = st.header_walk.lead_class_a.entry(height).or_insert(0);
+        *slot = slot.saturating_add(wire_bytes);
     }
 }
 
@@ -3979,6 +3991,7 @@ pub fn note_header_witness(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, h
     };
     let next = st.header_walk.witness_height.unwrap_or(0).max(height);
     st.header_walk.witness_height = Some(next);
+    st.header_walk.lead_class_a.retain(|&h, _| h > next);
 }
 
 /// Rewind depth allowed for this walk. The constant [`super::reorg::REWIND_MAX_DEPTH`]

@@ -1221,6 +1221,7 @@ pub fn take_confirm_events(
                 st.max_ready_height = st.max_ready_height.max(tip);
                 max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
                 if let Some(f) = feed {
+                    f.release_lead_reserve(height);
                     f.release_isolate_if_tip(tip);
                 }
             }
