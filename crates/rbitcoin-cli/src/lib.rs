@@ -11,6 +11,62 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+const CONVERT_PARAMS: &[(&str, usize)] = &[
+    ("addconnection", 2),
+    ("addnode", 2),
+    ("addpeeraddress", 1),
+    ("addpeeraddress", 2),
+    ("decoderawtransaction", 1),
+    ("disconnectnode", 1),
+    ("estimaterawfee", 0),
+    ("estimaterawfee", 1),
+    ("estimatesmartfee", 0),
+    ("estimatesmartfee", 2),
+    ("generate", 0),
+    ("generate", 1),
+    ("generateblock", 1),
+    ("generateblock", 2),
+    ("generatetoaddress", 0),
+    ("generatetoaddress", 2),
+    ("generatetodescriptor", 0),
+    ("generatetodescriptor", 2),
+    ("getblock", 1),
+    ("getblockhash", 0),
+    ("getblockheader", 1),
+    ("getblockstats", 0),
+    ("getblockstats", 1),
+    ("getblocktemplate", 0),
+    ("getmempoolancestors", 1),
+    ("getmempooldescendants", 1),
+    ("getnetworkhashps", 0),
+    ("getnetworkhashps", 1),
+    ("getnodeaddresses", 0),
+    ("getorphantxs", 0),
+    ("getrawmempool", 0),
+    ("getrawmempool", 1),
+    ("getrawtransaction", 1),
+    ("gettxout", 1),
+    ("gettxout", 2),
+    ("gettxspendingprevout", 0),
+    ("importmempool", 1),
+    ("mockscheduler", 0),
+    ("prioritisetransaction", 1),
+    ("prioritisetransaction", 2),
+    ("sendrawtransaction", 1),
+    ("sendrawtransaction", 2),
+    ("setmocktime", 0),
+    ("stop", 0),
+    ("submitpackage", 0),
+    ("submitpackage", 1),
+    ("submitpackage", 2),
+    ("testmempoolaccept", 0),
+    ("testmempoolaccept", 1),
+    ("waitforblock", 1),
+    ("waitforblockheight", 0),
+    ("waitforblockheight", 1),
+    ("waitfornewblock", 0),
+];
+
 #[doc(hidden)]
 pub fn usage() -> String {
     format!(
@@ -80,44 +136,56 @@ pub fn flag_name_and_eq(raw: &str) -> Option<(&str, Option<&str>)> {
     }
 }
 
+fn is_negative_number(a: &str) -> bool {
+    a.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+}
+
 #[doc(hidden)]
 pub fn parse_args(args: &[OsString]) -> Result<Action, String> {
     let mut cfg = CliConfig::default();
+    let mut positional_only = false;
     let mut i = 1usize;
     while i < args.len() {
         let a = args[i].to_string_lossy();
-        if a == "--help" || a == "-h" {
-            return Ok(Action::Help);
-        }
-        if a == "--version" || a == "-V" {
-            return Ok(Action::Version);
-        }
-        if a.starts_with('-') && !a.starts_with("--") {
-            return Err(format!("unknown argument `{a}`"));
-        }
-        if let Some((name, eq)) = flag_name_and_eq(a.as_ref()) {
-            let val = match eq {
-                Some(v) => {
-                    if v.is_empty() {
-                        return Err(format!("--{name} requires a value"));
-                    }
-                    v.to_string()
-                }
-                None => take_value(args, &mut i, &format!("--{name}"))?,
-            };
-            match name {
-                "datadir" => cfg.datadir = PathBuf::from(val),
-                "network" => {
-                    cfg.network =
-                        Network::parse(&val).map_err(|e| format!("invalid --network: {e}"))?;
-                }
-                "rpc-url" => cfg.rpc_url = Some(val),
-                "rpc-socket" => cfg.socket = Some(PathBuf::from(val)),
-                "rpc-token-file" => cfg.token_file = Some(PathBuf::from(val)),
-                other => return Err(format!("unknown argument `--{other}`")),
+        if !positional_only {
+            if a == "--help" || a == "-h" {
+                return Ok(Action::Help);
             }
-            i += 1;
-            continue;
+            if a == "--version" || a == "-V" {
+                return Ok(Action::Version);
+            }
+            if a == "--" {
+                positional_only = true;
+                i += 1;
+                continue;
+            }
+            if a.starts_with('-') && !a.starts_with("--") && !is_negative_number(a.as_ref()) {
+                return Err(format!("unknown argument `{a}`"));
+            }
+            if let Some((name, eq)) = flag_name_and_eq(a.as_ref()) {
+                let val = match eq {
+                    Some(v) => {
+                        if v.is_empty() {
+                            return Err(format!("--{name} requires a value"));
+                        }
+                        v.to_string()
+                    }
+                    None => take_value(args, &mut i, &format!("--{name}"))?,
+                };
+                match name {
+                    "datadir" => cfg.datadir = PathBuf::from(val),
+                    "network" => {
+                        cfg.network =
+                            Network::parse(&val).map_err(|e| format!("invalid --network: {e}"))?;
+                    }
+                    "rpc-url" => cfg.rpc_url = Some(val),
+                    "rpc-socket" => cfg.socket = Some(PathBuf::from(val)),
+                    "rpc-token-file" => cfg.token_file = Some(PathBuf::from(val)),
+                    other => return Err(format!("unknown argument `--{other}`")),
+                }
+                i += 1;
+                continue;
+            }
         }
         if cfg.command.is_none() {
             cfg.command = Some(a.into_owned());
@@ -235,9 +303,17 @@ pub fn read_token(path: &Path) -> Result<String, String> {
     Ok(t.to_string())
 }
 
+fn convert_param(method: &str, index: usize) -> bool {
+    CONVERT_PARAMS.contains(&(method, index))
+}
+
 #[doc(hidden)]
-pub fn param_value(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+pub fn param_value(method: &str, index: usize, raw: &str) -> Value {
+    if convert_param(method, index) {
+        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+    } else {
+        Value::String(raw.to_string())
+    }
 }
 
 #[doc(hidden)]
@@ -337,7 +413,12 @@ pub fn dispatch_call(cfg: &CliConfig) -> Result<String, String> {
     if cmd == "help" {
         return Ok(usage());
     }
-    let params: Vec<Value> = cfg.params.iter().map(|p| param_value(p)).collect();
+    let params: Vec<Value> = cfg
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| param_value(cmd, i, p))
+        .collect();
     let sock = socket_path(cfg);
     let result = if cfg.rpc_url.is_none() && (cfg.socket.is_some() || sock.exists()) {
         let stream = connect_unix(&sock)?;
