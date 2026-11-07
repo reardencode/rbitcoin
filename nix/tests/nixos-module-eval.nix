@@ -368,6 +368,7 @@ let
   bindNeedsListenMsg = "services.rbitcoin.netPermissionBind requires p2p.listen";
   bindTrustMsg = "services.rbitcoin.netPermissionBind cannot be combined with trustPeer";
   esploraSockNeedsEnableMsg = "services.rbitcoin.esplora.socketPath requires esplora.enable";
+  esploraOverlayNeedsTcpMsg = "services.rbitcoin.esplora.hiddenService and esplora.i2p need a TCP listener; unset esplora.socketPath";
   tokenNeedsRpcMsg = "services.rbitcoin.rpc.tokenFile requires an RPC listener";
   workQueueNeedsRpcMsg = "services.rbitcoin.rpc.workQueue requires an RPC listener";
   esploraHsNeedsEnableMsg = "services.rbitcoin.esplora.hiddenService requires esplora.enable";
@@ -904,6 +905,22 @@ assert builtins.match ".*--rpc-work-queue 8.*" (execOf {
 assert builtins.elem esploraHsNeedsEnableMsg (failedAssertions (badSystem {
   esplora.hiddenService = true;
 }));
+assert builtins.elem esploraOverlayNeedsTcpMsg (failedAssertions (badSystem {
+  esplora = {
+    enable = true;
+    socketPath = "/run/rbitcoin/esplora.sock";
+    hiddenService = true;
+  };
+}));
+assert builtins.elem esploraOverlayNeedsTcpMsg (failedAssertions (badSystem {
+  esplora = {
+    enable = true;
+    socketPath = "/run/rbitcoin/esplora.sock";
+    i2p = true;
+  };
+  i2p.sam = "127.0.0.1:7656";
+}));
+assert !builtins.elem esploraOverlayNeedsTcpMsg (failedAssertions system);
 assert builtins.match ".*--tor-control.*" (execOf {
   esplora.hiddenService = true;
 }) == null;

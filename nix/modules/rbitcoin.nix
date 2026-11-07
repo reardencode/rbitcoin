@@ -1353,6 +1353,10 @@ in
         message = "services.rbitcoin.esplora.hiddenService and esplora.i2p forward to 127.0.0.1; esplora.address must be 127.0.0.1 or 0.0.0.0";
       }
       {
+        assertion = !(cfg.esplora.hiddenService || cfg.esplora.i2p) || cfg.esplora.socketPath == null;
+        message = "services.rbitcoin.esplora.hiddenService and esplora.i2p need a TCP listener; unset esplora.socketPath";
+      }
+      {
         assertion = !(cfg.electrum.i2p || cfg.esplora.i2p) || cfg.i2p.sam != null;
         message = "services.rbitcoin.electrum.i2p and esplora.i2p require i2p.sam";
       }
