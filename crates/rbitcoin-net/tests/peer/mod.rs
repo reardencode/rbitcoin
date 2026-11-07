@@ -700,6 +700,73 @@ async fn getheaders_of_a_reorg_tip_does_not_hold_its_child() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A getheaders reply that ends on the parent of our tip is still the offer.
+/// The tip itself is then not held. A header on another branch is not an
+/// ancestor of the tip, so it is not recorded.
+#[tokio::test]
+async fn getheaders_parent_of_the_tip_is_the_offer() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-parent-offer");
+    hub.ensure_genesis().unwrap();
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18480);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 80,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    let stale = BlockHash::from_byte_array([0x11; 32]);
+    session.note_last_tip_offered(stale);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    on_getheaders(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+        &GetHeadersMessage::new(vec![], parent),
+    )
+    .await
+    .unwrap();
+    let NetworkMessage::Headers(sent) = out_rx.try_recv().unwrap().expect_msg() else {
+        panic!("getheaders should answer with headers");
+    };
+    assert_eq!(sent.last().unwrap().block_hash(), parent);
+    assert_eq!(
+        session.last_tip_offered(),
+        Some(parent),
+        "a reply that ends on the parent of the tip is the offer"
+    );
+    let child_ev = Ok(rbitcoin_net::chain::TipEvent {
+        height: hub.tip_height().unwrap(),
+        hash: child,
+        header: hub.tip_header().unwrap(),
+        reorg_branch_len: 0,
+    });
+    assert!(
+        !tip_is_reorg_vs_sent(&hub, Some(&session), &child_ev),
+        "the tip is a child of the headers we sent"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn count_block_invs(
     reader: &mut rbitcoin_net::v2::V2Reader,
     magic: Magic,

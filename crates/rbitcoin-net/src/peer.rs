@@ -4401,9 +4401,13 @@ pub async fn on_getheaders(
             if let Some(last) = headers.last() {
                 let hash = last.block_hash();
                 s.note_best_header_sent(hash);
-                // This reply ends on our tip, so the peer has it. The 200ms
-                // hold follows that tip. A stop on another branch does not.
-                if hub.tip_hash() == Some(hash) {
+                // The reply is our tip, or a block on the way to it (one more
+                // block may have connected while the header job ran). A stop
+                // on another branch does not.
+                if hub
+                    .tip_hash()
+                    .is_some_and(|tip| hub.is_header_ancestor(hash, tip))
+                {
                     s.note_last_tip_offered(hash);
                 }
             } else if let Some(tip) = empty_tip {
