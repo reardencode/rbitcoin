@@ -5106,6 +5106,7 @@ struct HeadersApply {
     from_peer: Vec<BlockHash>,
     best_known: Vec<BlockHash>,
     admits: Vec<(BlockHash, bitcoin::block::Header)>,
+    evicts: Vec<BlockHash>,
     misbehave: bool,
     /// `(announced height, our tip)` when the peer is a stale fork.
     disconnect: Option<(u32, u32)>,
@@ -5132,6 +5133,7 @@ fn classify_headers(
         from_peer: Vec::new(),
         best_known: Vec::new(),
         admits: Vec::new(),
+        evicts: Vec::new(),
         misbehave: false,
         disconnect: None,
         sync_height: None,
@@ -5170,6 +5172,31 @@ fn classify_headers(
             return apply;
         }
         let connecting = header_announcement_connects(hub, pending_before, prev);
+        // A peer can fill its bounded map with unrelated, valid-work forks.
+        // When a later batch continues a chain we can prove connects, retain
+        // only that chain's pending ancestors before admitting it. This gives
+        // useful progress room without increasing the per-peer memory cap.
+        let incoming = headers
+            .iter()
+            .filter(|hdr| !pending.contains_key(&hdr.block_hash()))
+            .count();
+        if connecting && pending.len().saturating_add(incoming) > MAX_PENDING_HEADERS {
+            let mut ancestors = HashSet::new();
+            let mut h = prev;
+            for _ in 0..PENDING_WALK_LIMIT {
+                let Some(hdr) = pending.get(&h) else {
+                    break;
+                };
+                ancestors.insert(h);
+                h = hdr.prev_blockhash;
+            }
+            pending.retain(|hash, _| ancestors.contains(hash));
+            apply.evicts = pending_before
+                .keys()
+                .filter(|hash| !pending.contains_key(*hash))
+                .copied()
+                .collect();
+        }
         for hdr in headers.iter().take(n) {
             let hash = hdr.block_hash();
             apply.from_peer.push(hash);
@@ -5244,6 +5271,9 @@ fn apply_headers(
     if apply.misbehave {
         misbehaving(&mut follow.ban_score, session);
         return Ok(());
+    }
+    for hash in apply.evicts {
+        follow.pending_headers.remove(&hash);
     }
     for hash in apply.from_peer {
         if let Some(s) = session {

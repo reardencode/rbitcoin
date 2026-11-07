@@ -283,7 +283,7 @@ async fn hostile_peer_session() {
 
     let hdr = Header {
         version: bitcoin::block::Version::TWO,
-        prev_blockhash: BlockHash::all_zeros(),
+        prev_blockhash: BlockHash::from_byte_array([0x99; 32]),
         merkle_root: bitcoin::TxMerkleNode::all_zeros(),
         time: 0,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
@@ -323,6 +323,31 @@ async fn hostile_peer_session() {
         .unwrap();
     assert_eq!(follow.pending_headers.len(), rbitcoin_net::peer::MAX_PENDING_HEADERS);
     assert!(!follow.pending_headers.contains_key(&extra_hash));
+
+    // A useful continuation from the stored tip must reclaim the unrelated
+    // pending branches and fit under the same per-peer cap.
+    let mut continuation = hub
+        .query
+        .wire_header_at_height(rbitcoin_primitives::Height(200))
+        .unwrap();
+    continuation.prev_blockhash = hub.tip_hash().unwrap();
+    continuation.merkle_root = bitcoin::TxMerkleNode::from_byte_array([0x55; 32]);
+    continuation.time = continuation.time.saturating_add(600);
+    continuation.nonce = 0;
+    rbitcoin_consensus::grind_regtest_pow(&mut continuation);
+    let continuation_hash = continuation.block_hash();
+    on_headers(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&peer),
+        &[continuation],
+    )
+    .await
+    .unwrap();
+    assert_eq!(follow.pending_headers.len(), 1);
+    assert!(follow.pending_headers.contains_key(&continuation_hash));
+
     while out_rx.try_recv().is_ok() {}
 
     let gh = GetHeadersMessage::new(vec![genesis], BlockHash::from_byte_array([0u8; 32]));
