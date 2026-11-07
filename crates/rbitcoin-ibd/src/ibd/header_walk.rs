@@ -4068,14 +4068,27 @@ pub fn note_header_witness(
     st.header_walk.lead_class_a.retain(|&h, _| h > next);
 }
 
-/// Rewind depth allowed for this walk. The constant [`super::reorg::REWIND_MAX_DEPTH`]
-/// stays 1,024. An unproved walk may drop back through the lead.
+/// Rewind depth for this walk. [`super::reorg::REWIND_MAX_DEPTH`] stays 1,024.
+/// The wide cap follows the confirmed tip. `publish_work` can mark the new
+/// headers proved while that tip is still under the floor.
 #[doc(hidden)]
-pub fn rewind_depth_cap(st: &IbdWorkState) -> u32 {
-    if st.header_walk.origin && !st.header_walk.proven {
+pub fn rewind_depth_cap(st: &IbdWorkState, hub: &ChainHub) -> u32 {
+    if st.header_walk.origin && leaving_unproved_lead(st, hub) {
         UNPROVEN_LEAD_BLOCKS
     } else {
         super::reorg::REWIND_MAX_DEPTH
+    }
+}
+
+/// True while a rewind would leave the unproved lead. A proved header
+/// candidate does not count: the confirmed chain's own work does.
+fn leaving_unproved_lead(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    if !st.header_walk.proven {
+        return true;
+    }
+    match hub.chain_work() {
+        Ok(work) => below_floor(hub, &work.to_be_bytes()),
+        Err(_) => false,
     }
 }
 

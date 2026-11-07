@@ -692,7 +692,7 @@ pub fn apply_header_rewind(
     hub: &ChainHub,
     path: &[BlockHash],
 ) -> Result<bool, NetError> {
-    let cap = super::header_walk::rewind_depth_cap(st);
+    let cap = super::header_walk::rewind_depth_cap(st, hub);
     let Some(prep) = prepare_header_rewind(hub, path, cap)? else {
         return Ok(false);
     };
@@ -782,7 +782,7 @@ pub(crate) fn apply_off_lock_rewind(
     let tip_before = tip_pair(hub);
     let cap = {
         let st = shared.lock().unwrap_or_else(|err| err.into_inner());
-        super::header_walk::rewind_depth_cap(&st)
+        super::header_walk::rewind_depth_cap(&st, hub)
     };
     let Some(prep) = prepare_header_rewind(hub, &path, cap)? else {
         return Ok(None);
