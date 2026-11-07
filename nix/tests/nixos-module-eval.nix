@@ -378,6 +378,10 @@ let
   tokenSysMsg = "services.rbitcoin.rpc.tokenFile must not live in a system directory";
   rpcSockSysMsg = "services.rbitcoin.rpc.socketPath must not live in a system directory";
   esploraSockSysMsg = "services.rbitcoin.esplora.socketPath must not live in a system directory";
+  connectCjdnsMsg = "services.rbitcoin.p2p.connect to a CJDNS address requires cjdns.reachable";
+  trustCjdnsMsg = "services.rbitcoin.trustPeer to a CJDNS address requires cjdns.reachable";
+  onlyNetOnionMsg = "services.rbitcoin.onlyNet onion requires proxy or onionProxy";
+  onlyNetI2pMsg = "services.rbitcoin.onlyNet i2p requires i2p.sam";
   onionGroupSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -842,7 +846,21 @@ assert builtins.elem esploraSockSysMsg (failedAssertions (badSystem {
 }));
 assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib"; }));
 assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/srv"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/tor"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/tor/root"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/tor"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/tor/onion"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/i2pd"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/nix/store/foo"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/run/systemd/rbitcoin"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/private"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/etc/nixos/rbitcoin"; }));
 assert !builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/rbitcoin"; }));
+assert !builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/home/rbitcoin"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/tor/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/tor/onion/x"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/i2pd/api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/home/rbitcoin/api.jsonl"; }));
 assert builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/var"; }));
 assert !builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/srv/rbitcoin-cold"; }));
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
@@ -944,4 +962,61 @@ assert !builtins.elem "tor.service" (badSystem {
   electrum.hiddenService = true;
 }).config.systemd.services.rbitcoin.wants;
 assert !builtins.elem spAndPruneMsg (failedAssertions system);
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc00::1]:8333" ];
+}));
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[FCAB::1]:8333" ];
+}));
+assert builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "192.0.2.1:8333" "[fc00::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  cjdns.reachable = true;
+  p2p.connect = [ "[fc00::1]:8333" ];
+}));
+assert builtins.match ".*--connect '[[]fc00::1[]]:8333'.*" (execOf {
+  cjdns.reachable = true;
+  p2p.connect = [ "[fc00::1]:8333" ];
+}) != null;
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fd00::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "[fc0::1]:8333" ];
+}));
+assert !builtins.elem connectCjdnsMsg (failedAssertions (badSystem {
+  p2p.connect = [ "192.0.2.1:8333" ];
+}));
+assert builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  trustPeer = "[fc00::1]:8333";
+}));
+assert !builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  cjdns.reachable = true;
+  trustPeer = "[fc00::1]:8333";
+}));
+assert !builtins.elem trustCjdnsMsg (failedAssertions (badSystem {
+  trustPeer = "[fd00::1]:8333";
+}));
+assert builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+}));
+assert !builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+  proxy = "127.0.0.1:9050";
+}));
+assert !builtins.elem onlyNetOnionMsg (failedAssertions (badSystem {
+  onlyNet = [ "onion" ];
+  onionProxy = "127.0.0.1:9050";
+}));
+assert builtins.elem onlyNetI2pMsg (failedAssertions (badSystem {
+  onlyNet = [ "i2p" ];
+}));
+assert !builtins.elem onlyNetI2pMsg (failedAssertions (badSystem {
+  onlyNet = [ "i2p" ];
+  i2p.sam = "127.0.0.1:7656";
+}));
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"

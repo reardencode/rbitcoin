@@ -79,31 +79,46 @@ let
     else
       "/run/tor/control.authcookie";
   # tmpfiles type d changes the owner of a directory that already exists, and
-  # ReadWritePaths would open that whole tree. A child such as /var/log/rbitcoin
-  # is the service's own directory. These paths are not.
-  systemDirs = [
+  # ReadWritePaths would open that whole tree. A child such as /var/lib/rbitcoin
+  # is this service's own directory. A child of /run/tor is still Tor's.
+  exactSystemDirs = [
     "/"
     "/bin"
     "/boot"
-    "/boot/efi"
     "/dev"
     "/etc"
-    "/etc/nixos"
-    "/etc/ssh"
-    "/etc/static"
-    "/etc/systemd"
     "/home"
     "/lib"
     "/lib64"
     "/mnt"
     "/nix"
-    "/nix/store"
-    "/nix/var"
-    "/nix/var/nix"
     "/opt"
     "/proc"
     "/root"
     "/run"
+    "/sbin"
+    "/srv"
+    "/sys"
+    "/tmp"
+    "/usr"
+    "/var"
+    "/var/cache"
+    "/var/lib"
+    "/var/lock"
+    "/var/log"
+    "/var/spool"
+    "/var/tmp"
+  ];
+  # The path itself and everything under it. /var/lib stays exact so
+  # /var/lib/rbitcoin is allowed. /nix/var/nix is covered by /nix/var.
+  ownedTrees = [
+    "/boot/efi"
+    "/etc/nixos"
+    "/etc/ssh"
+    "/etc/static"
+    "/etc/systemd"
+    "/nix/store"
+    "/nix/var"
     "/run/booted-system"
     "/run/credentials"
     "/run/current-system"
@@ -112,13 +127,9 @@ let
     "/run/nixos"
     "/run/opengl-driver"
     "/run/systemd"
+    "/run/tor"
     "/run/user"
     "/run/wrappers"
-    "/sbin"
-    "/srv"
-    "/sys"
-    "/tmp"
-    "/usr"
     "/usr/bin"
     "/usr/include"
     "/usr/lib"
@@ -126,28 +137,79 @@ let
     "/usr/local"
     "/usr/sbin"
     "/usr/share"
-    "/var"
-    "/var/cache"
     "/var/db"
     "/var/empty"
-    "/var/lib"
+    "/var/lib/i2pd"
     "/var/lib/nixos"
+    "/var/lib/private"
     "/var/lib/systemd"
-    "/var/lock"
-    "/var/log"
-    "/var/spool"
-    "/var/tmp"
+    "/var/lib/tor"
   ];
   unsafeServiceDir = p:
     let
       raw = toString p;
       parts = lib.filter (s: s != "") (lib.splitString "/" raw);
       key = if parts == [ ] then "/" else "/" + lib.concatStringsSep "/" parts;
+      inTree = root: key == root || lib.hasPrefix "${root}/" key;
     in
     raw == ""
     || !lib.hasPrefix "/" raw
     || lib.any (s: s == "." || s == "..") parts
-    || lib.elem key systemDirs;
+    || lib.elem key exactSystemDirs
+    || lib.any inTree ownedTrees;
+  # CJDNS is fc00::/8: the first octet is 0xfc. `fc::1` is 0x00fc and is not.
+  padHextet = s:
+    let
+      n = lib.stringLength s;
+    in
+    if n == 0 || n > 4 || builtins.match "[0-9a-f]{1,4}" s == null then
+      null
+    else
+      lib.substring n 4 ("0000" + s);
+  expandV6 = ip:
+    let
+      lower = lib.toLower ip;
+      halves = lib.splitString "::" lower;
+      groups =
+        if builtins.length halves > 2 then
+          null
+        else if builtins.length halves == 1 then
+          let
+            g = lib.splitString ":" lower;
+          in
+          if builtins.length g == 8 then g else null
+        else
+          let
+            left =
+              if builtins.elemAt halves 0 == "" then
+                [ ]
+              else
+                lib.splitString ":" (builtins.elemAt halves 0);
+            right =
+              if builtins.elemAt halves 1 == "" then
+                [ ]
+              else
+                lib.splitString ":" (builtins.elemAt halves 1);
+            missing = 8 - builtins.length left - builtins.length right;
+          in
+          if missing < 0 then
+            null
+          else
+            left ++ lib.genList (_: "0") missing ++ right;
+    in
+    if groups == null then null else map padHextet groups;
+  isCjdnsV6 = ip:
+    let
+      groups = expandV6 ip;
+      first = if groups == null || groups == [ ] then null else builtins.head groups;
+    in
+    first != null && lib.hasPrefix "fc" first;
+  isCjdnsConnect = addr:
+    let
+      m = builtins.match "[[]([0-9A-Fa-f:.]+)[]]:([0-9]+)" (lib.trim addr);
+      port = if m == null then null else lib.toInt (builtins.elemAt m 1);
+    in
+    m != null && port != null && port <= 65535 && isCjdnsV6 (builtins.head m);
 
   command = [
     "${cfg.package}/bin/rbitcoin-node"
@@ -348,6 +410,7 @@ in
       description = ''
         Directory for the node store, mempool, peers, logs, and RPC cookie.
         A system directory such as `/`, `/var`, or `/var/lib` is refused.
+        So is `/run/tor`, `/var/lib/tor`, `/var/lib/i2pd`, or anything inside those trees.
       '';
     };
 
@@ -358,6 +421,7 @@ in
       description = ''
         Pass `--trust-peer ADDR`. Null omits the flag and leaves P2P listen on.
         The address uses the same grammar as `--connect` (host:port, and `[IPv6]:port`).
+        An address in `fc00::/8` requires `cjdns.reachable`.
         Exactly one peer: the module also passes `--no-listen` and `--max-inbound 0`.
         Do not combine it with `p2p.listen`, `p2p.listenOnion`, or `p2p.maxInbound` above 0.
         Flag syntax and start errors: docs/operator/operations.md.
@@ -383,6 +447,7 @@ in
       description = ''
         Optional directory for append-only IBD files (seqsigwit, txstat, input, block filters, silent-payment tweaks).
         A system directory such as `/var` or `/srv` is refused.
+        So is `/run/tor`, `/var/lib/tor`, `/var/lib/i2pd`, or anything inside those trees.
       '';
     };
 
@@ -693,6 +758,7 @@ in
         or an RPC or Esplora socket or token directory, and that directory is writable
         under ProtectSystem=strict. The parent must be a directory this service owns.
         A system directory such as `/`, `/run`, `/tmp`, `/var/log`, or `/var/lib` is refused.
+        So is a file inside `/run/tor`, `/var/lib/tor`, or `/var/lib/i2pd`.
       '';
     };
 
@@ -840,7 +906,7 @@ in
         "cjdns"
       ]);
       default = [ ];
-      description = "Restrict P2P to these networks. onion requires proxy or onionProxy; i2p requires i2p.sam.";
+      description = "Restrict P2P to these networks. onion requires proxy or onionProxy; i2p requires i2p.sam; cjdns requires cjdns.reachable.";
     };
 
     p2p = {
@@ -883,7 +949,8 @@ in
         default = [ ];
         example = [ "192.0.2.10:8333" ];
         description = ''
-          Repeatable `--connect` addresses (host:port, `.onion:port`, or `{52}.b32.i2p:port`).
+          Repeatable `--connect` addresses (host:port, `.onion:port`, `{52}.b32.i2p:port`, or `[IPv6]:port`).
+          An address in `fc00::/8` requires `cjdns.reachable`.
           With `trustPeer`, leave this empty or set it to that same single address.
         '';
       };
@@ -989,7 +1056,7 @@ in
           Bind the unix JSON-RPC socket here (mode 0660) instead of {dataDir}/rpc.sock (0600).
           Its directory is created mode 0750, so members of `group` (for example mempool's
           backend) can connect without reading the datadir. Independent of `enable` (TCP).
-          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, `/var/log`, `/run/tor`, or `/var/lib/tor`, is refused.
         '';
       };
 
@@ -1011,7 +1078,7 @@ in
           Requires `enable`, `unixSocket`, or `socketPath` (the node writes the file only when an RPC listener starts).
           The node creates the file mode 0600. The parent directory is created mode 0750
           when it is not `dataDir` and not the `socketPath` directory.
-          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, `/var/log`, `/run/tor`, or `/var/lib/tor`, is refused.
         '';
       };
 
@@ -1152,7 +1219,7 @@ in
         description = ''
           Pass `--esplora-listen` a filesystem path (unix HTTP, mode 0660) instead of `address`:`port`.
           Requires `enable`. The parent directory is created mode 0750 when it is not `dataDir`.
-          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused. `openFirewall` is ignored.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, `/var/log`, `/run/tor`, or `/var/lib/tor`, is refused. `openFirewall` is ignored.
         '';
       };
 
@@ -1290,6 +1357,22 @@ in
       {
         assertion = !(builtins.elem "cjdns" cfg.onlyNet) || cfg.cjdns.reachable;
         message = "services.rbitcoin.onlyNet cjdns requires cjdns.reachable";
+      }
+      {
+        assertion = !(builtins.elem "onion" cfg.onlyNet) || cfg.proxy != null || cfg.onionProxy != null;
+        message = "services.rbitcoin.onlyNet onion requires proxy or onionProxy";
+      }
+      {
+        assertion = !(builtins.elem "i2p" cfg.onlyNet) || cfg.i2p.sam != null;
+        message = "services.rbitcoin.onlyNet i2p requires i2p.sam";
+      }
+      {
+        assertion = cfg.cjdns.reachable || !lib.any isCjdnsConnect cfg.p2p.connect;
+        message = "services.rbitcoin.p2p.connect to a CJDNS address requires cjdns.reachable";
+      }
+      {
+        assertion = cfg.trustPeer == null || cfg.cjdns.reachable || !isCjdnsConnect cfg.trustPeer;
+        message = "services.rbitcoin.trustPeer to a CJDNS address requires cjdns.reachable";
       }
       {
         assertion = cfg.rpc.cookieFile == null || cfg.rpc.enable;
