@@ -201,23 +201,26 @@ pub fn addnode(
 pub fn disconnectnode(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["address", "nodeid"])?;
     let hub = require_peers(ctx)?;
+    // A peer already leaving keeps its row until its session returns, but
+    // getpeerinfo no longer lists it. Miss it here too.
+    let listed = hub.snapshot();
+    let not_found = || {
+        rpc_error(
+            ERR_CLIENT_NODE_NOT_CONNECTED,
+            "Node not found in connected nodes",
+        )
+    };
     if let Some(id) = params.opt_u64(1, "nodeid")? {
-        if !hub.disconnect_id(id) {
-            return Err(rpc_error(
-                ERR_CLIENT_NODE_NOT_CONNECTED,
-                "Node not found in connected nodes",
-            ));
+        if !listed.iter().any(|p| p.id == id) || !hub.disconnect_id(id) {
+            return Err(not_found());
         }
         return Ok(Value::Null);
     }
     if let Some(a) = params.get(0, "address").and_then(|v| v.as_str()) {
         let addr = rbitcoin_net::parse_peer_net(a)
             .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
-        if !hub.disconnect_net(addr) {
-            return Err(rpc_error(
-                ERR_CLIENT_NODE_NOT_CONNECTED,
-                "Node not found in connected nodes",
-            ));
+        if !listed.iter().any(|p| p.net == addr) || !hub.disconnect_net(addr) {
+            return Err(not_found());
         }
         return Ok(Value::Null);
     }

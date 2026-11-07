@@ -3892,13 +3892,10 @@ impl PeerHub {
         rows.into_iter().map(|(_, a)| a).collect()
     }
 
-    /// `false` when there is no row or the peer is already leaving.
-    /// getpeerinfo hides a leaving row, so `disconnectnode` must miss it too.
     pub fn disconnect_id(&self, id: u64) -> bool {
         let Some(p) = self.get(id) else {
             return false;
         };
-        let leaving = p.stop.load(Ordering::SeqCst);
         // Do not abort the session. It still has to apply frames already
         // read; aborting it forgets those getdata asks.
         p.wake_for_disconnect();
@@ -3908,7 +3905,7 @@ impl PeerHub {
         if !p.handshake_complete() {
             self.unregister(id);
         }
-        !leaving
+        true
     }
 
     /// Disconnect one unprotected inbound when inbound slots are full.
