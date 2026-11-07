@@ -414,6 +414,10 @@ def rewrite_testmempoolaccept_abort(method: Any, parsed: dict[str, Any]) -> None
 _UNSPENDABLE_SPEND = re.compile(
     r"script verification failed: (?:script too large|OP_RETURN) txid=([0-9a-fA-F]{64})"
 )
+# One submitted tx with a missing input names the txid and omits CheckTxInputs.
+_MISSING_INPUT_TX = re.compile(
+    r"bad-txns-inputs-missingorspent in transaction ([0-9a-fA-F]{64})"
+)
 
 
 def rewrite_unspendable_spend(method: Any, parsed: dict[str, Any]) -> bool:
@@ -421,6 +425,8 @@ def rewrite_unspendable_spend(method: Any, parsed: dict[str, Any]) -> bool:
 
     The node still has the output. A scriptSig that fails the same way on
     `generateblock` gets the same sentence; that is this shim, not consensus.
+    A one-tx missing input is the same sentence: the node names the token
+    and the txid, and this proxy adds `CheckTxInputs`.
     """
     if method != "generateblock":
         return False
@@ -431,6 +437,8 @@ def rewrite_unspendable_spend(method: Any, parsed: dict[str, Any]) -> bool:
     if not isinstance(msg, str):
         return False
     found = _UNSPENDABLE_SPEND.search(msg)
+    if found is None:
+        found = _MISSING_INPUT_TX.search(msg)
     if found is None:
         return False
     txid = found.group(1)

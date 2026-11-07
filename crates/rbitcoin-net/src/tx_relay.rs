@@ -1742,12 +1742,10 @@ impl MempoolHub {
         self.accept_gen.lock().unwrap().get(wtxid).copied()
     }
 
-    /// Core `mempool_unbroadcast.py` debug.log needle when a local tx confirms
-    /// before a peer getdata's it.
+    /// A local tx left the unbroadcast set because it confirmed before a peer
+    /// fetched it. The functional debug-log map emits Core's sentence.
     pub fn unbroadcast_removed_log(txid: &Txid) -> String {
-        format!(
-            "p2p: Removed {txid} from set of unbroadcast txns before confirmation that txn was sent out"
-        )
+        format!("p2p: local tx {txid} left the unbroadcast set before a peer fetched it")
     }
 
     /// Count peer inv of txs we do not already hold (want → getdata path).

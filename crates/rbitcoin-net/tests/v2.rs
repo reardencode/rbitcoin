@@ -55,12 +55,12 @@ fn short_ids_cover_live_ibd_tip_commands() {
     assert!(short_id_for_command("verack").is_none());
     assert_eq!(
         v2_invalid_message_type_log(),
-        "p2p: V2 transport error: invalid message type"
+        "p2p: v2 peer sent a message type we do not know"
     );
     assert_eq!(MAX_V2_CONTENTS_LEN, 4_000_013);
     assert_eq!(
         v2_packet_too_large_log(4_000_014),
-        "p2p: V2 transport error: packet too large (4000014 bytes)"
+        "p2p: v2 packet is longer than the cap (4000014 bytes)"
     );
     assert_eq!(V2_CIPHER_EXPANSION, 20);
     assert_eq!(v2_other_recv_bytes(3), 23);
@@ -69,15 +69,15 @@ fn short_ids_cover_live_ibd_tip_commands() {
     assert!(short_id_for_command("sendaddrv2").is_none());
     assert_eq!(
         v2_handshake_timeout_log(0),
-        "p2p: V2 handshake timeout, disconnecting peer=0"
+        "p2p: v2 handshake timed out, disconnecting peer=0"
     );
     assert_eq!(
         v2_missing_garbage_terminator_log(),
-        "p2p: V2 transport error: missing garbage terminator"
+        "p2p: v2 handshake had no garbage terminator"
     );
     assert_eq!(
         v2_packet_decryption_failure_log(),
-        "p2p: V2 transport error: packet decryption failure"
+        "p2p: v2 packet did not decrypt"
     );
     // Placeholder slots 29–36 stay empty (unknown short id → protocol error).
     for id in 29u8..=36 {

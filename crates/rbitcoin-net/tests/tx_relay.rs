@@ -716,7 +716,7 @@ fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     let logs = rbitcoin_log::take_logs();
     rbitcoin_log::capture_logs(false);
     let needle = format!(
-        "p2p: Removed {} from set of unbroadcast txns before confirmation that txn was sent out",
+        "p2p: local tx {} left the unbroadcast set before a peer fetched it",
         tx.compute_txid()
     );
     assert!(logs.iter().any(|(_, m)| *m == needle), "{logs:?}");

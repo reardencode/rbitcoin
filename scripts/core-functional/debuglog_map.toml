@@ -55,15 +55,15 @@ match = 'p2p: ping timeout: ([0-9.]+)s'
 emit = ['ping timeout: {1}s']
 
 [[rule]]
-match = 'p2p: Removed ([0-9a-f]{64}) from set of unbroadcast txns before confirmation that txn was sent out'
+match = 'p2p: local tx ([0-9a-f]{64}) left the unbroadcast set before a peer fetched it'
 emit = ['Removed {1} from set of unbroadcast txns before confirmation that txn was sent out']
 
 [[rule]]
-match = 'p2p: V2 transport error: invalid message type'
+match = 'p2p: v2 peer sent a message type we do not know'
 emit = ['V2 transport error: invalid message type']
 
 [[rule]]
-match = 'p2p: V2 transport error: packet too large \((\d+) bytes\)'
+match = 'p2p: v2 packet is longer than the cap \((\d+) bytes\)'
 emit = ['V2 transport error: packet too large ({1} bytes)']
 
 [[rule]]
@@ -71,15 +71,15 @@ match = 'p2p: redundant version message from peer(=.*)?'
 emit = ['redundant version message from peer']
 
 [[rule]]
-match = 'p2p: V2 handshake timeout, disconnecting peer=(\d+)'
+match = 'p2p: v2 handshake timed out, disconnecting peer=(\d+)'
 emit = ['V2 handshake timeout, disconnecting peer={1}']
 
 [[rule]]
-match = 'p2p: V2 transport error: missing garbage terminator'
+match = 'p2p: v2 handshake had no garbage terminator'
 emit = ['V2 transport error: missing garbage terminator']
 
 [[rule]]
-match = 'p2p: V2 transport error: packet decryption failure'
+match = 'p2p: v2 packet did not decrypt'
 emit = ['V2 transport error: packet decryption failure']
 
 [[rule]]

@@ -451,7 +451,7 @@ async fn session_start_announces_a_tip_mined_during_handshake() {
         None,
         "an inv does not count as a header the peer has"
     );
-    assert_eq!(sess.live.catchup_announced(), Some(tip));
+    assert_eq!(sess.live.last_tip_offered(), Some(tip));
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
     let closed = announce_unsent_tip(
@@ -469,6 +469,377 @@ async fn session_start_announces_a_tip_mined_during_handshake() {
         "the same tip is not offered twice"
     );
     sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tip already queued on the receiver when the session starts is announced
+/// once. The header cursor stays empty, and a second offer sends nothing.
+#[tokio::test]
+async fn queued_tip_before_session_start_is_one_inv() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("queued-tip");
+    hub.ensure_genesis().unwrap();
+    let at_handshake = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let tip_rx = hub.subscribe_tips();
+    hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let tip = hub.tip_hash().unwrap();
+    assert_ne!(at_handshake, tip);
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session_with(
+        Arc::clone(&hub),
+        &peers,
+        18473,
+        Some(at_handshake),
+        Some(tip_rx),
+    )
+    .await;
+    assert_eq!(
+        count_block_invs(&mut sess.reader, sess.magic, tip, Duration::from_secs(2)).await,
+        1,
+        "a tip queued before the session starts is one block inv"
+    );
+    assert_eq!(
+        sess.live.header_marks().0,
+        None,
+        "an inv does not count as a header the peer has"
+    );
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let closed = announce_unsent_tip(
+        hub.as_ref(),
+        &out_tx,
+        &mut follow,
+        Some(sess.live.as_ref()),
+        Some(at_handshake),
+    )
+    .await
+    .unwrap();
+    assert!(!closed);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "the same tip is not offered twice"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An inv with an empty header cursor is the tip we offered. A burst of
+/// tips that are not descendants of that inv waits out the batch and leaves
+/// as one announcement. The header cursor stays empty.
+#[tokio::test]
+async fn inv_then_non_descendant_waits_out_the_batch() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("inv-batch");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18472, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    assert_eq!(
+        sess.live.last_tip_offered(),
+        None,
+        "a quiet connect offers nothing"
+    );
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    assert_eq!(
+        count_block_invs(
+            &mut sess.reader,
+            sess.magic,
+            offered,
+            Duration::from_secs(2)
+        )
+        .await,
+        1,
+        "the first tip is one inv"
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    assert_eq!(
+        sess.live.last_tip_offered(),
+        Some(offered),
+        "an inv is the tip we offered"
+    );
+    hub.invalidate_block(offered).unwrap();
+    let early = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(120)).await;
+    assert!(
+        early.is_empty(),
+        "a non-descendant tip waits out the batch, got {early:?}"
+    );
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let next = hub.tip_hash().unwrap();
+    assert_ne!(next, offered);
+    let later = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(500)).await;
+    assert_eq!(
+        later,
+        vec![next],
+        "the burst is one announcement of the final tip"
+    );
+    assert_eq!(
+        sess.live.header_marks().0,
+        None,
+        "an inv does not set the header cursor"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A child of an inv is a descendant, so it is announced at once.
+#[tokio::test]
+async fn child_of_an_inv_is_not_held() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("inv-child");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18474, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    assert_eq!(
+        count_block_invs(
+            &mut sess.reader,
+            sess.magic,
+            offered,
+            Duration::from_secs(2)
+        )
+        .await,
+        1
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    assert_ne!(child, offered);
+    let early = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(150)).await;
+    assert_eq!(
+        early,
+        vec![child],
+        "a child of the inv goes out before the reorg batch"
+    );
+    assert_eq!(sess.live.header_marks().0, None);
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// getheaders that ends on the reorg tip is the offer the next block follows.
+/// After the reorg batch has already ended, that child goes out at once.
+#[tokio::test]
+async fn getheaders_of_a_reorg_tip_does_not_hold_its_child() {
+    use rbitcoin_net::v2::write_v2_msg;
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-reorg-child");
+    hub.ensure_genesis().unwrap();
+    let genesis = hub.tip_hash().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let mut sess = open_decode_session(Arc::clone(&hub), &peers, 18479, Some(genesis)).await;
+    let _ = collect_block_invs(&mut sess.reader, sess.magic, Duration::from_millis(200)).await;
+    write_v2_msg(&mut sess.writer, NetworkMessage::SendHeaders)
+        .await
+        .unwrap();
+    write_v2_msg(&mut sess.writer, NetworkMessage::Ping(1))
+        .await
+        .unwrap();
+    wait_pong(&mut sess.reader, sess.magic, 1).await;
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    let parent_hdrs =
+        collect_header_tips(&mut sess.reader, sess.magic, Duration::from_secs(2)).await;
+    assert!(
+        parent_hdrs.contains(&parent),
+        "the parent is announced, got {parent_hdrs:?}"
+    );
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let offered = hub.tip_hash().unwrap();
+    let offered_hdrs =
+        collect_header_tips(&mut sess.reader, sess.magic, Duration::from_secs(2)).await;
+    assert!(
+        offered_hdrs.contains(&offered),
+        "the child is announced, got {offered_hdrs:?}"
+    );
+    assert_eq!(sess.live.last_tip_offered(), Some(offered));
+    hub.invalidate_block(offered).unwrap();
+    assert_eq!(hub.tip_hash(), Some(parent));
+    write_v2_msg(
+        &mut sess.writer,
+        NetworkMessage::GetHeaders(GetHeadersMessage::new(
+            vec![genesis],
+            BlockHash::from_byte_array([0u8; 32]),
+        )),
+    )
+    .await
+    .unwrap();
+    let reply_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            std::time::Instant::now() < reply_deadline,
+            "getheaders should answer with the reorg tip"
+        );
+        let tips =
+            collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(50)).await;
+        if sess.live.header_marks().0 == Some(parent) && tips.contains(&parent) {
+            break;
+        }
+    }
+    // Let the reorg batch finish. The next block is a new announcement.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(20)).await;
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    assert_ne!(child, offered);
+    assert_ne!(child, parent);
+    let early = collect_header_tips(&mut sess.reader, sess.magic, Duration::from_millis(150)).await;
+    assert!(
+        early.contains(&child),
+        "a child of the headers we just sent goes out before another reorg batch, got {early:?}"
+    );
+    sess.session.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A getheaders reply that ends on the parent of our tip is still the offer.
+/// The tip itself is then not held. A header on another branch is not an
+/// ancestor of the tip, so it is not recorded.
+#[tokio::test]
+async fn getheaders_parent_of_the_tip_is_the_offer() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-parent-offer");
+    hub.ensure_genesis().unwrap();
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18480);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 80,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    let stale = BlockHash::from_byte_array([0x11; 32]);
+    session.note_last_tip_offered(stale);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    on_getheaders(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+        &GetHeadersMessage::new(vec![], parent),
+    )
+    .await
+    .unwrap();
+    let NetworkMessage::Headers(sent) = out_rx.try_recv().unwrap().expect_msg() else {
+        panic!("getheaders should answer with headers");
+    };
+    assert_eq!(sent.last().unwrap().block_hash(), parent);
+    assert_eq!(
+        session.last_tip_offered(),
+        Some(parent),
+        "a reply that ends on the parent of the tip is the offer"
+    );
+    let child_ev = Ok(rbitcoin_net::chain::TipEvent {
+        height: hub.tip_height().unwrap(),
+        hash: child,
+        header: hub.tip_header().unwrap(),
+        reorg_branch_len: 0,
+    });
+    assert!(
+        !tip_is_reorg_vs_sent(&hub, Some(&session), &child_ev),
+        "the tip is a child of the headers we sent"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A getheaders reply that ends on the parent does not replace a newer offer.
+/// A reorg off that newer block still waits.
+#[tokio::test]
+async fn getheaders_keeps_a_newer_offer() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("gh-keep-newer");
+    hub.ensure_genesis().unwrap();
+    let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+    let parent = hub.tip_hash().unwrap();
+    hub.generate_to_script(1, script, vec![]).unwrap();
+    let child = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18481);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 81,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    session.note_last_tip_offered(child);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    on_getheaders(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+        &GetHeadersMessage::new(vec![], parent),
+    )
+    .await
+    .unwrap();
+    let NetworkMessage::Headers(sent) = out_rx.try_recv().unwrap().expect_msg() else {
+        panic!("getheaders should answer with headers");
+    };
+    assert_eq!(sent.last().unwrap().block_hash(), parent);
+    assert_eq!(
+        session.last_tip_offered(),
+        Some(child),
+        "a headers reply does not replace a newer offer"
+    );
+    hub.invalidate_block(child).unwrap();
+    let parent_time = hub.tip_header().unwrap().time;
+    let sibling_block = rbitcoin_consensus::mine_empty_regtest(
+        parent,
+        parent_time.saturating_add(2),
+        hub.tip_height().unwrap().saturating_add(1),
+    );
+    hub.accept_received_block(sibling_block).unwrap();
+    let sibling = hub.tip_hash().unwrap();
+    assert_ne!(sibling, child);
+    assert_ne!(sibling, parent);
+    let sibling_ev = Ok(rbitcoin_net::chain::TipEvent {
+        height: hub.tip_height().unwrap(),
+        hash: sibling,
+        header: hub.tip_header().unwrap(),
+        reorg_branch_len: 1,
+    });
+    assert!(
+        tip_is_reorg_vs_sent(&hub, Some(&session), &sibling_ev),
+        "a reorg off the newer offer still waits"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -495,6 +866,54 @@ async fn count_block_invs(
         }
     }
     n
+}
+
+async fn collect_header_tips(
+    reader: &mut rbitcoin_net::v2::V2Reader,
+    magic: Magic,
+    wait: Duration,
+) -> Vec<BlockHash> {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + wait;
+    let mut hashes = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame = match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
+            Ok(Ok(frame)) => frame,
+            _ => break,
+        };
+        if let NetworkMessage::Headers(headers) = frame.decode().payload() {
+            if let Some(last) = headers.last() {
+                hashes.push(last.block_hash());
+            }
+        }
+    }
+    hashes
+}
+
+async fn collect_block_invs(
+    reader: &mut rbitcoin_net::v2::V2Reader,
+    magic: Magic,
+    wait: Duration,
+) -> Vec<BlockHash> {
+    use rbitcoin_net::v2::read_v2_frame;
+    let deadline = std::time::Instant::now() + wait;
+    let mut hashes = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame = match tokio::time::timeout(left, read_v2_frame(reader, magic)).await {
+            Ok(Ok(frame)) => frame,
+            _ => break,
+        };
+        if let NetworkMessage::Inv(inv) = frame.decode().payload() {
+            for item in inv {
+                if let Inventory::Block(h) = item {
+                    hashes.push(*h);
+                }
+            }
+        }
+    }
+    hashes
 }
 
 #[test]
@@ -1371,6 +1790,16 @@ async fn open_decode_session(
     port: u16,
     tip_at_handshake: Option<BlockHash>,
 ) -> DecodeSession {
+    open_decode_session_with(hub, peers, port, tip_at_handshake, None).await
+}
+
+async fn open_decode_session_with(
+    hub: Arc<ChainHub>,
+    peers: &Arc<rbitcoin_net::peers::PeerHub>,
+    port: u16,
+    tip_at_handshake: Option<BlockHash>,
+    tip_rx: Option<broadcast::Receiver<rbitcoin_net::chain::TipEvent>>,
+) -> DecodeSession {
     use rbitcoin_net::v2::open_v2;
     use tokio::net::TcpListener;
 
@@ -1386,7 +1815,7 @@ async fn open_decode_session(
     let (server_stream, _) = listener.accept().await.unwrap();
     let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
     let (c_reader, c_writer, _wire, _shutdown) = client.await.unwrap();
-    let tip_rx = hub.subscribe_tips();
+    let tip_rx = tip_rx.unwrap_or_else(|| hub.subscribe_tips());
     let session_peer = Arc::clone(&live);
     let session = tokio::spawn(async move {
         let _ = peer_session_with(

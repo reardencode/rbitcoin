@@ -171,8 +171,8 @@ fn connecting_peer_v2_timeout_log_before_transport() {
     );
     assert!(
         logs.iter()
-            .any(|(_, m)| m.contains("V2 handshake timeout, disconnecting peer=0")),
-        "expected V2 handshake timeout, got {logs:?}"
+            .any(|(_, m)| m.contains("v2 handshake timed out, disconnecting peer=0")),
+        "expected a native v2 handshake timeout, got {logs:?}"
     );
 }
 
