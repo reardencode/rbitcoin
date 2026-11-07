@@ -372,10 +372,12 @@ let
   electrumHsNeedsEnableMsg = "services.rbitcoin.electrum.hiddenService requires electrum.enable";
   listenOnionNeedsInboundMsg = "services.rbitcoin.p2p.listenOnion requires p2p.maxInbound > 0";
   cookieOutsideMsg = "services.rbitcoin.tor.controlCookie must be a file in /run/tor or /var/lib/tor when the module configures tor";
-  apiLogRootMsg = "services.rbitcoin.apiLog must not live in /";
-  tokenRootMsg = "services.rbitcoin.rpc.tokenFile must not live in /";
-  rpcSockRootMsg = "services.rbitcoin.rpc.socketPath must not live in /";
-  esploraSockRootMsg = "services.rbitcoin.esplora.socketPath must not live in /";
+  dataDirSysMsg = "services.rbitcoin.dataDir must not be a system directory";
+  coldSysMsg = "services.rbitcoin.coldDataDir must not be a system directory";
+  apiLogSysMsg = "services.rbitcoin.apiLog must not live in a system directory";
+  tokenSysMsg = "services.rbitcoin.rpc.tokenFile must not live in a system directory";
+  rpcSockSysMsg = "services.rbitcoin.rpc.socketPath must not live in a system directory";
+  esploraSockSysMsg = "services.rbitcoin.esplora.socketPath must not live in a system directory";
   onionGroupSystem = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
@@ -807,17 +809,42 @@ assert builtins.elem esploraSockNeedsEnableMsg (failedAssertions (badSystem {
 assert builtins.match ".*--esplora-block-template.*" blockTemplateOffExec == null;
 assert builtins.elem "/var/log/rbitcoin" apiLogSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
 assert apiLogSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/log/rbitcoin".d.mode == "0750";
-assert builtins.elem apiLogRootMsg (failedAssertions (badSystem { apiLog = "/api.jsonl"; }));
-assert !builtins.elem apiLogRootMsg (failedAssertions (badSystem { apiLog = "/var/log/rbitcoin/api.jsonl"; }));
-assert builtins.elem tokenRootMsg (failedAssertions (badSystem {
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/lib/api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "api.jsonl"; }));
+assert builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/../api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/var/log/rbitcoin/api.jsonl"; }));
+assert !builtins.elem apiLogSysMsg (failedAssertions (badSystem { apiLog = "/run/rbitcoin/api.jsonl"; }));
+assert builtins.elem tokenSysMsg (failedAssertions (badSystem {
   rpc.unixSocket = true;
   rpc.tokenFile = "/rpc.token";
 }));
-assert builtins.elem rpcSockRootMsg (failedAssertions (badSystem { rpc.socketPath = "/rpc.sock"; }));
-assert builtins.elem esploraSockRootMsg (failedAssertions (badSystem {
+assert builtins.elem tokenSysMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rpc.token";
+}));
+assert !builtins.elem tokenSysMsg (failedAssertions (badSystem {
+  rpc.unixSocket = true;
+  rpc.tokenFile = "/run/rbitcoin/rpc.token";
+}));
+assert builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/rpc.sock"; }));
+assert builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/tmp/rpc.sock"; }));
+assert !builtins.elem rpcSockSysMsg (failedAssertions (badSystem { rpc.socketPath = "/run/rbitcoin/rpc.sock"; }));
+assert builtins.elem esploraSockSysMsg (failedAssertions (badSystem {
   esplora.enable = true;
   esplora.socketPath = "/esplora.sock";
 }));
+assert builtins.elem esploraSockSysMsg (failedAssertions (badSystem {
+  esplora.enable = true;
+  esplora.socketPath = "/var/log/esplora.sock";
+}));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib"; }));
+assert builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/srv"; }));
+assert !builtins.elem dataDirSysMsg (failedAssertions (badSystem { dataDir = "/var/lib/rbitcoin"; }));
+assert builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/var"; }));
+assert !builtins.elem coldSysMsg (failedAssertions (badSystem { coldDataDir = "/srv/rbitcoin-cold"; }));
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/srv/rbitcoin".d.mode == "0700";
 assert builtins.match ".*--check-blocks 4294967296.*" (execOf { checkBlocks = 4294967296; }) != null;
 assert builtins.elem 18444 bindFwSystem.config.networking.firewall.allowedTCPPorts;

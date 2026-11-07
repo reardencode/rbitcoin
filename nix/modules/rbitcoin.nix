@@ -78,6 +78,76 @@ let
       cfg.tor.controlCookie
     else
       "/run/tor/control.authcookie";
+  # tmpfiles type d changes the owner of a directory that already exists, and
+  # ReadWritePaths would open that whole tree. A child such as /var/log/rbitcoin
+  # is the service's own directory. These paths are not.
+  systemDirs = [
+    "/"
+    "/bin"
+    "/boot"
+    "/boot/efi"
+    "/dev"
+    "/etc"
+    "/etc/nixos"
+    "/etc/ssh"
+    "/etc/static"
+    "/etc/systemd"
+    "/home"
+    "/lib"
+    "/lib64"
+    "/mnt"
+    "/nix"
+    "/nix/store"
+    "/nix/var"
+    "/nix/var/nix"
+    "/opt"
+    "/proc"
+    "/root"
+    "/run"
+    "/run/booted-system"
+    "/run/credentials"
+    "/run/current-system"
+    "/run/lock"
+    "/run/media"
+    "/run/nixos"
+    "/run/opengl-driver"
+    "/run/systemd"
+    "/run/user"
+    "/run/wrappers"
+    "/sbin"
+    "/srv"
+    "/sys"
+    "/tmp"
+    "/usr"
+    "/usr/bin"
+    "/usr/include"
+    "/usr/lib"
+    "/usr/lib64"
+    "/usr/local"
+    "/usr/sbin"
+    "/usr/share"
+    "/var"
+    "/var/cache"
+    "/var/db"
+    "/var/empty"
+    "/var/lib"
+    "/var/lib/nixos"
+    "/var/lib/systemd"
+    "/var/lock"
+    "/var/log"
+    "/var/spool"
+    "/var/tmp"
+  ];
+  unsafeServiceDir = p:
+    let
+      raw = toString p;
+      parts = lib.filter (s: s != "") (lib.splitString "/" raw);
+      key = if parts == [ ] then "/" else "/" + lib.concatStringsSep "/" parts;
+    in
+    raw == ""
+    || !lib.hasPrefix "/" raw
+    || lib.any (s: s == "." || s == "..") parts
+    || lib.elem key systemDirs;
 
   command = [
     "${cfg.package}/bin/rbitcoin-node"
@@ -275,7 +345,10 @@ in
     dataDir = mkOption {
       type = types.path;
       default = "/var/lib/rbitcoin";
-      description = "Directory for the node store, mempool, peers, logs, and RPC cookie.";
+      description = ''
+        Directory for the node store, mempool, peers, logs, and RPC cookie.
+        A system directory such as `/`, `/var`, or `/var/lib` is refused.
+      '';
     };
 
     trustPeer = mkOption {
@@ -307,7 +380,10 @@ in
     coldDataDir = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Optional directory for append-only IBD files (seqsigwit, txstat, input, block filters, silent-payment tweaks).";
+      description = ''
+        Optional directory for append-only IBD files (seqsigwit, txstat, input, block filters, silent-payment tweaks).
+        A system directory such as `/var` or `/srv` is refused.
+      '';
     };
 
     user = mkOption {
@@ -615,7 +691,8 @@ in
         Pass `--api-log PATH` (one JSON line per Electrum, Esplora, and RPC call).
         The parent directory is created mode 0750 when it is not `dataDir`, `coldDataDir`,
         or an RPC or Esplora socket or token directory, and that directory is writable
-        under ProtectSystem=strict. A file directly in `/` is refused.
+        under ProtectSystem=strict. The parent must be a directory this service owns.
+        A system directory such as `/`, `/run`, `/tmp`, `/var/log`, or `/var/lib` is refused.
       '';
     };
 
@@ -912,7 +989,7 @@ in
           Bind the unix JSON-RPC socket here (mode 0660) instead of {dataDir}/rpc.sock (0600).
           Its directory is created mode 0750, so members of `group` (for example mempool's
           backend) can connect without reading the datadir. Independent of `enable` (TCP).
-          A file directly in `/` is refused.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused.
         '';
       };
 
@@ -934,7 +1011,7 @@ in
           Requires `enable`, `unixSocket`, or `socketPath` (the node writes the file only when an RPC listener starts).
           The node creates the file mode 0600. The parent directory is created mode 0750
           when it is not `dataDir` and not the `socketPath` directory.
-          A file directly in `/` is refused.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused.
         '';
       };
 
@@ -1075,7 +1152,7 @@ in
         description = ''
           Pass `--esplora-listen` a filesystem path (unix HTTP, mode 0660) instead of `address`:`port`.
           Requires `enable`. The parent directory is created mode 0750 when it is not `dataDir`.
-          A file directly in `/` is refused. `openFirewall` is ignored.
+          A parent that is a system directory, such as `/`, `/run`, `/tmp`, or `/var/log`, is refused. `openFirewall` is ignored.
         '';
       };
 
@@ -1300,20 +1377,28 @@ in
         message = "services.rbitcoin.tor.controlCookie must be a file in /run/tor or /var/lib/tor when the module configures tor";
       }
       {
-        assertion = cfg.apiLog == null || dirOf cfg.apiLog != "/";
-        message = "services.rbitcoin.apiLog must not live in /";
+        assertion = !unsafeServiceDir cfg.dataDir;
+        message = "services.rbitcoin.dataDir must not be a system directory";
       }
       {
-        assertion = cfg.rpc.tokenFile == null || dirOf cfg.rpc.tokenFile != "/";
-        message = "services.rbitcoin.rpc.tokenFile must not live in /";
+        assertion = cfg.coldDataDir == null || !unsafeServiceDir cfg.coldDataDir;
+        message = "services.rbitcoin.coldDataDir must not be a system directory";
       }
       {
-        assertion = cfg.rpc.socketPath == null || dirOf cfg.rpc.socketPath != "/";
-        message = "services.rbitcoin.rpc.socketPath must not live in /";
+        assertion = cfg.apiLog == null || !unsafeServiceDir (dirOf cfg.apiLog);
+        message = "services.rbitcoin.apiLog must not live in a system directory";
       }
       {
-        assertion = cfg.esplora.socketPath == null || dirOf cfg.esplora.socketPath != "/";
-        message = "services.rbitcoin.esplora.socketPath must not live in /";
+        assertion = cfg.rpc.tokenFile == null || !unsafeServiceDir (dirOf cfg.rpc.tokenFile);
+        message = "services.rbitcoin.rpc.tokenFile must not live in a system directory";
+      }
+      {
+        assertion = cfg.rpc.socketPath == null || !unsafeServiceDir (dirOf cfg.rpc.socketPath);
+        message = "services.rbitcoin.rpc.socketPath must not live in a system directory";
+      }
+      {
+        assertion = cfg.esplora.socketPath == null || !unsafeServiceDir (dirOf cfg.esplora.socketPath);
+        message = "services.rbitcoin.esplora.socketPath must not live in a system directory";
       }
       {
         assertion = cfg.rpc.workQueue == null || rpcListening;
