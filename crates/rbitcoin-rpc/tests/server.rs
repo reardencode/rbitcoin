@@ -1285,11 +1285,13 @@ async fn long_poll_deadline_returns_the_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The tip, not the deadline, ends the wait: the deadline is a minute out.
+/// How fast the tip wakes a wait is `published_tip_wakes_wait_for_tip`.
 async fn published_tip_wakes_waitfornewblock(handle: &RpcHandle, hub: &rbitcoin_net::ChainHub) {
     let addr = tcp_addr(handle);
     let auth = handle.auth.clone();
     let waiter = tokio::spawn(async move {
-        post_rpc(addr, &auth, "waitfornewblock", serde_json::json!([5_000])).await
+        post_rpc(addr, &auth, "waitfornewblock", serde_json::json!([60_000])).await
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -1311,9 +1313,9 @@ async fn published_tip_wakes_waitfornewblock(handle: &RpcHandle, hub: &rbitcoin_
     .expect("waitfornewblock parks before the tip");
     hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), Vec::new())
         .expect("publish a tip");
-    let body = tokio::time::timeout(std::time::Duration::from_millis(40), waiter)
+    let body = tokio::time::timeout(std::time::Duration::from_secs(10), waiter)
         .await
-        .expect("published tip wakes waitfornewblock within a few ms")
+        .expect("published tip wakes waitfornewblock before its deadline")
         .unwrap()
         .unwrap();
     assert!(body["result"]["height"].as_u64().unwrap() >= 1, "{body}");
@@ -1753,7 +1755,7 @@ async fn batch_waits_to_retake_the_queue_after_a_long_poll() {
     let (ctx, dir) = http_wait_ctx();
     let work_queue = Arc::new(Semaphore::new(1));
     let state = AppState {
-        ctx,
+        ctx: Arc::clone(&ctx),
         auth: RpcAuth::new("test-token"),
         cookie: None,
         work_queue: Arc::clone(&work_queue),
@@ -1763,7 +1765,7 @@ async fn batch_waits_to_retake_the_queue_after_a_long_poll() {
     };
     let batch = serde_json::json!([
         {"jsonrpc":"1.0","id":1,"method":"getblockcount"},
-        {"jsonrpc":"1.0","id":2,"method":"waitfornewblock","params":[400]},
+        {"jsonrpc":"1.0","id":2,"method":"waitfornewblock","params":[60_000]},
         {"jsonrpc":"1.0","id":3,"method":"getblockcount"}
     ]);
     let waiter = tokio::spawn(async move {
@@ -1773,13 +1775,22 @@ async fn batch_waits_to_retake_the_queue_after_a_long_poll() {
         )
         .await
     });
-    // getblockcount takes the only slot and drops it when the wait starts.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    // getblockcount takes the only slot. The batch drops it before the
+    // long-poll shows in getrpcinfo.
+    wait_for_active_call(&ctx, "waitfornewblock", true).await;
     let held = work_queue
         .clone()
         .try_acquire_owned()
         .expect("slot free during the long-poll");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.chain
+        .as_ref()
+        .expect("chain")
+        .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), Vec::new())
+        .expect("publish a tip");
+    wait_for_active_call(&ctx, "waitfornewblock", false).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
     assert!(
         !waiter.is_finished(),
         "the batch must wait for a work-queue slot after the long-poll"
@@ -3040,6 +3051,25 @@ async fn unix_socket_needs_no_http_auth() {
         "unix unauthenticated getblockcount: {text}"
     );
     handle.shutdown().await;
+}
+
+/// Waits until `method` is or is no longer listed in `getrpcinfo`.
+async fn wait_for_active_call(ctx: &rbitcoin_rpc::methods::RpcContext, method: &str, listed: bool) {
+    let seen = || {
+        ctx.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot()
+            .iter()
+            .any(|(m, _)| m == method)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while seen() != listed {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{method} listed={listed} in getrpcinfo"));
 }
 
 fn http_wait_ctx() -> (
