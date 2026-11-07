@@ -3460,10 +3460,11 @@ async fn node_run_p2p_short() {
             let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
         });
 
-        run_p2p(cfg).await.expect("run_p2p");
-        match pin.await {
-            Ok(()) => {}
-            Err(e) => panic!("rpc pin join: {e}"),
+        // A failed pin never sends `stop`. Fail on it now, not at the wall.
+        let node = async { run_p2p(cfg).await.map_err(|e| format!("run_p2p: {e:?}")) };
+        let pin = async { pin.await.map_err(|e| format!("rpc pin join: {e}")) };
+        if let Err(e) = tokio::try_join!(node, pin) {
+            panic!("{e}");
         }
 
         let q = Query::open_or_create_tiny(node_dir.path().join("store")).unwrap();
