@@ -959,6 +959,7 @@ assert !builtins.elem "tor.service" (badSystem {
 assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
 assert onionGroupSystem.config.users.groups ? tor;
 assert listenOnionGroupSystem.config.users.groups ? tor;
+assert onionGroupSystem.config.ids.gids.tor == 35;
 assert onionGroupSystem.config.users.groups.tor.gid == onionGroupSystem.config.ids.gids.tor;
 assert listenOnionGroupSystem.config.users.groups.tor.gid == listenOnionGroupSystem.config.ids.gids.tor;
 assert system.config.users.groups.tor.gid == system.config.ids.gids.tor;
