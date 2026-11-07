@@ -2476,14 +2476,20 @@ pub fn note_stored_candidate(
     let _ = extend_tip(st, hub, headers, Some(peer));
 }
 
-/// A batch shorter than a full window, while the walk is still under the
-/// work floor. That chain ended light.
+/// A batch shorter than a full window whose work, after the batch, is still
+/// under the floor. A short batch that itself crosses the floor is kept.
 #[doc(hidden)]
 pub fn short_below_floor(st: &IbdWorkState, hub: &ChainHub, headers: &[Header]) -> bool {
-    st.header_walk.origin
-        && !headers.is_empty()
-        && headers.len() < rbitcoin_net::codec::MAX_HEADERS_RESULTS
-        && below_floor(hub, &st.header_walk.tip_work())
+    if !st.header_walk.origin
+        || headers.is_empty()
+        || headers.len() >= rbitcoin_net::codec::MAX_HEADERS_RESULTS
+    {
+        return false;
+    }
+    let after = work_at(st, hub, headers[0].prev_blockhash)
+        .map(|parent| chain_work_after(parent, headers))
+        .unwrap_or_else(|| Work::from_be_bytes(st.header_walk.tip_work()));
+    below_floor(hub, &after.to_be_bytes())
 }
 
 fn over_length_at(st: &IbdWorkState, end_height: u64) -> bool {

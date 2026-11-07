@@ -6313,6 +6313,45 @@ fn opened(
     (_dir, hub, st, gen_hdr)
 }
 
+/// The floor sits on the next header. That one requested header extends the
+/// walk and proves it. A one-header reply that is still under the floor
+/// after it is added still adds nothing and drops the reservation.
+#[test]
+fn a_short_batch_that_reaches_the_floor_is_kept() {
+    let (_dir, mut hub, mut st, gen) = opened("unproven-cross-floor", false);
+    let mut min_work_be = st.header_walk.tip_work();
+    for byte in min_work_be.iter_mut().rev() {
+        let (next, wrapped) = byte.overflowing_add(1);
+        *byte = next;
+        if !wrapped {
+            break;
+        }
+    }
+    hub.milestone = rbitcoin_consensus::Milestone {
+        height: 1_000_000,
+        anchor: Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: BlockHash::from_byte_array([0xcd; 32]),
+            min_work_be,
+        }),
+    };
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let one = headers_after(gen, 1, 1);
+    let tip = one[0].block_hash();
+    apply(&mut st, &hub, 0, one);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip));
+    assert!(st.header_walk.proven);
+    assert!(!st.header_walk.walk_quiet.contains(&0));
+
+    let (_dir, hub, mut st, gen) = opened("unproven-still-under", true);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let before = hub.query.store().header_count();
+    apply(&mut st, &hub, 0, headers_after(gen, 1, 2));
+    assert!(st.header_walk.checkpoints.is_empty());
+    assert_eq!(hub.query.store().header_count(), before);
+    assert_ne!(st.header_walk.reserved, Some(0));
+    assert!(!st.header_walk.proven);
+}
+
 /// Below the floor a one-header reply adds no checkpoint and drops the
 /// reservation. A full window that passes context extends, including a
 /// lighter challenger. Above the floor a short reply that does not extend
