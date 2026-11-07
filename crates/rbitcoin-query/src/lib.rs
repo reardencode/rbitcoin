@@ -732,7 +732,59 @@ impl Query {
             q.repair_sp_tweaks(t)?;
         }
         q.sweep_spill_at_or_below_pruneheight()?;
+        q.release_pruned_seqsigwit_stem()?;
         Ok(q)
+    }
+
+    /// Copy any missing keep-window spill from the witness stem, then cut that
+    /// stem down to its header. A stem that is already only a header is left
+    /// alone, including the create slack.
+    pub fn release_pruned_seqsigwit_stem(&self) -> Result<(), QueryError> {
+        if !self.prune_seqsigwit() || !self.store.txs.seqsigwit_stem_needs_release() {
+            return Ok(());
+        }
+        self.fill_missing_seqsigwit_window()?;
+        self.store.set_prune_seqsigwit_mode(true);
+        self.store.txs.cut_seqsigwit_stem_to_header()
+    }
+
+    fn fill_missing_seqsigwit_window(&self) -> Result<(), QueryError> {
+        let Some(tip) = self.tip_height() else {
+            return Ok(());
+        };
+        let from = match self.pruneheight() {
+            Some(ph) => ph.0.saturating_add(1),
+            None => tip
+                .0
+                .saturating_sub(Self::SEQSIGWIT_KEEP_HEIGHTS.saturating_sub(1)),
+        };
+        if from > tip.0 {
+            return Ok(());
+        }
+        for h in from..=tip.0 {
+            let path = self.seqsigwit_spill_file(h)?;
+            if path.is_file() {
+                continue;
+            }
+            let fks = match self.block_tx_fks(Height(h)) {
+                Ok(v) => v,
+                Err(StoreError::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if fks.is_empty() {
+                continue;
+            }
+            let mut owned = Vec::with_capacity(fks.len());
+            for fk in fks {
+                owned.push((fk, self.store.txs.seqsigwit_inputs_from_stem(fk)?));
+            }
+            let rows: Vec<(Fk, &[InputRecord])> = owned
+                .iter()
+                .map(|(fk, ins)| (*fk, ins.as_slice()))
+                .collect();
+            self.persist_seqsigwit_spill_height(Height(h), &rows)?;
+        }
+        Ok(())
     }
 
     #[inline]
@@ -897,9 +949,13 @@ impl Query {
             if self.pruneheight().is_none() {
                 self.persist_pruneheight(u32::MAX)?;
             }
+            // Seed while the stem is still readable. Later confirms must not
+            // append it.
             if !was_on {
                 self.seed_recent_seqsigwit_from_store()?;
             }
+            self.store.set_prune_seqsigwit_mode(true);
+            self.release_pruned_seqsigwit_stem()?;
         } else {
             self.clear_seqsigwit_ram_window();
             self.set_pruneheight(None)?;
@@ -1258,12 +1314,10 @@ impl Query {
                 if let Some(v) = appended.remove(&id) {
                     v
                 } else {
-                    let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
-                    ins
+                    self.inputs_for_confirmed_window(fk)?
                 }
             } else {
-                let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
-                ins
+                self.inputs_for_confirmed_window(fk)?
             };
             let bytes = ins.iter().map(|i| i.encoded_len() as u64).sum();
             staged.push((fk, ins, bytes));
@@ -1310,6 +1364,20 @@ impl Query {
             }
         }
         Ok(())
+    }
+
+    /// Witness for a confirmed height already in the window, or the archive stem
+    /// when prune mode is off. A prune-mode miss fails the confirm.
+    fn inputs_for_confirmed_window(&self, fk: Fk) -> Result<Vec<InputRecord>, QueryError> {
+        let tx = self.get_tx(fk)?;
+        if let Some(ins) = self.seqsigwit_spill_inputs_with_count(fk, tx.input_count)? {
+            return Ok(ins);
+        }
+        if self.store.prune_seqsigwit_mode() {
+            return Err(StoreError::Corrupt("seqsigwit window miss"));
+        }
+        let (_tx, ins, _outs) = self.store.get_tx_full(fk)?;
+        Ok(ins)
     }
 
     #[doc(hidden)]

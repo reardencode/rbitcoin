@@ -8,9 +8,23 @@ fn connect_range(
 ) -> Fk {
     let start = hashes.len() as u32;
     for h in start..start + n {
-        let (header, mut ta) = coinbase_block(h, prev, parent_hash);
+        let (mut header, mut ta) = coinbase_block(h, prev, parent_hash);
         if !witness.is_empty() {
             ta.inputs[0].witness = vec![witness.to_vec()];
+        }
+        // One coinbase: the merkle root is that txid. The fixture's stand-in
+        // root fails tip revalidate and drops the height the spill is keyed by.
+        if h > 0 {
+            header.merkle_root = ta.tx.txid;
+            let ph = parent_hash.expect("parent hash");
+            header.hash = rbitcoin_store::block_header_hash(
+                header.version,
+                &ph,
+                &header.merkle_root,
+                header.timestamp,
+                header.bits,
+                header.nonce,
+            );
         }
         parent_hash = Some(header.hash);
         hashes.push(header.hash);
@@ -214,6 +228,158 @@ impl Drop for Disarm {
     fn drop(&mut self) {
         rbitcoin_store::io_handle::disarm_pwrite(self.0);
     }
+}
+
+fn assert_witness_stem_unwritten(q: &Query, body_len: u64) {
+    let path = q.store().path().join("seqsigwit.body");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), body_len);
+    assert_eq!(
+        q.store().txs.seqsigwit.body_logical_len(),
+        rbitcoin_store::file::FILE_HEADER_LEN as u64
+    );
+    assert_eq!(q.store().txs.seqsigwit_loc.count(), 0);
+    assert_eq!(q.store().txs.input.count(), q.store().txs.count());
+    assert!(q.store().txs.count() > Query::SEQSIGWIT_KEEP_HEIGHTS as u64);
+}
+
+/// Prune from an empty store. Confirm keeps the witness stem at the size
+/// `create` left (header plus slack) and serves the keep window from spill files.
+#[test]
+fn pruned_from_genesis_does_not_grow_seqsigwit_body() {
+    let (dir, q) = temp_query("prune-from-genesis");
+    q.set_prune_seqsigwit(true).unwrap();
+    let body = q.store().path().join("seqsigwit.body");
+    let body_len = std::fs::metadata(&body).unwrap().len();
+    let mut hashes = Vec::new();
+    connect_range(&q, Fk::NULL, None, 300, &[0x55], &mut hashes);
+    let tip = q.tip_height().unwrap().0;
+    let ph = q.pruneheight().unwrap().0;
+    assert_eq!(ph, tip - Query::SEQSIGWIT_KEEP_HEIGHTS);
+    assert_witness_stem_unwritten(&q, body_len);
+    for h in (ph + 1)..=tip {
+        let block = q.reconstruct_block_at_height(Height(h)).unwrap();
+        assert_eq!(
+            block.txdata[0].input[0].witness.to_vec(),
+            vec![vec![0x55]]
+        );
+        assert!(q
+            .store()
+            .path()
+            .join(format!("seqsigwit.window/{h}.bin"))
+            .is_file());
+    }
+    let err = q.reconstruct_block_at_height(Height(ph)).unwrap_err();
+    assert!(matches!(err, StoreError::Pruned { height } if height == ph), "{err:?}");
+    q.store().sync_spend_durable(tip).unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert_witness_stem_unwritten(&q, body_len);
+    let block = q.reconstruct_block_at_height(Height(tip)).unwrap();
+    assert_eq!(
+        block.txdata[0].input[0].witness.to_vec(),
+        vec![vec![0x55]]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn assert_witness_stem_cut(q: &Query) {
+    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
+    for name in ["seqsigwit.body", "seqsigwit.loc"] {
+        let len = std::fs::metadata(q.store().path().join(name)).unwrap().len();
+        assert_eq!(len, header, "{name}");
+    }
+    assert_eq!(q.store().txs.seqsigwit_loc.count(), 0);
+    assert_eq!(
+        q.store().txs.seqsigwit.body_logical_len(),
+        header
+    );
+}
+
+/// Archive first, then enable prune. The keep window is copied out and the
+/// witness stem's allocated size returns to the header.
+#[test]
+fn enabling_prune_cuts_seqsigwit_body() {
+    let (dir, q) = temp_query("prune-cut-on-enable");
+    let mut hashes = Vec::new();
+    connect_range(&q, Fk::NULL, None, 300, &[0x42], &mut hashes);
+    let n_tx = q.store().txs.count();
+    let n_in = q.store().txs.input.count();
+    let n_id = q.store().txs.txids.count();
+    let tip = q.tip_height().unwrap().0;
+    q.set_prune_seqsigwit(true).unwrap();
+    q.apply_prune_seqsigwit_tip().unwrap();
+    let ph = q.pruneheight().unwrap().0;
+    assert_eq!(ph, tip - Query::SEQSIGWIT_KEEP_HEIGHTS);
+    assert_eq!(q.store().txs.count(), n_tx);
+    assert_eq!(q.store().txs.input.count(), n_in);
+    assert_eq!(q.store().txs.txids.count(), n_id);
+    assert_witness_stem_cut(&q);
+    let kept = q.reconstruct_block_at_height(Height(tip)).unwrap();
+    assert_eq!(kept.txdata[0].input[0].witness.to_vec(), vec![vec![0x42]]);
+    let err = q.reconstruct_block_at_height(Height(ph)).unwrap_err();
+    assert!(matches!(err, StoreError::Pruned { height } if height == ph), "{err:?}");
+    q.store().sync_spend_durable(tip).unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert_witness_stem_cut(&q);
+    assert_eq!(q.store().txs.count(), n_tx);
+    connect_range(&q, q.tip_header_fk().unwrap().unwrap(), Some(hashes[tip as usize]), 1, &[0x43], &mut hashes);
+    assert_witness_stem_cut(&q);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sidecar and a fat stem, one keep-window file absent. Open refills that
+/// height from the stem, then cuts the stem.
+#[test]
+fn startup_refills_missing_window_then_cuts() {
+    let (dir, q) = temp_query("prune-refill-cut");
+    let mut hashes = Vec::new();
+    connect_range(&q, Fk::NULL, None, 300, &[0x44], &mut hashes);
+    let n_tx = q.store().txs.count();
+    let tip = q.tip_height().unwrap().0;
+    let ph = tip - Query::SEQSIGWIT_KEEP_HEIGHTS;
+    let missing = tip - 1;
+    for h in (ph + 1)..=tip {
+        if h == missing {
+            continue;
+        }
+        let fks = q.block_tx_fks(Height(h)).unwrap();
+        let mut owned = Vec::new();
+        for fk in fks {
+            let tx = q.get_tx(fk).unwrap();
+            let mut ins = Vec::new();
+            for i in 0..tx.input_count {
+                ins.push(q.tx_input_at_fk(fk, &tx, i).unwrap());
+            }
+            owned.push((fk, ins));
+        }
+        let rows: Vec<(Fk, &[InputRecord])> = owned
+            .iter()
+            .map(|(fk, ins)| (*fk, ins.as_slice()))
+            .collect();
+        q.persist_seqsigwit_spill_height(Height(h), &rows).unwrap();
+    }
+    std::fs::write(
+        q.store().path().join("seqsigwit.prune"),
+        ph.to_le_bytes(),
+    )
+    .unwrap();
+    q.store().sync_spend_durable(tip).unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert!(q
+        .store()
+        .path()
+        .join(format!("seqsigwit.window/{missing}.bin"))
+        .is_file());
+    assert_witness_stem_cut(&q);
+    assert_eq!(q.store().txs.count(), n_tx);
+    let block = q.reconstruct_block_at_height(Height(missing)).unwrap();
+    assert_eq!(
+        block.txdata[0].input[0].witness.to_vec(),
+        vec![vec![0x44]]
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

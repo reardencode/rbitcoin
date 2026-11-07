@@ -93,7 +93,7 @@ Clean smoke:
 | `--no-seeds` | `no_seeds=` | seeds on |
 | `--sh-index` | `sh_index=` | **off** — Class B scripthash (address/history; Electrum/Esplora start without it) |
 | `--block-filter-index` | `block_filter_index=` | **off** — BIP158 basic filters. Independent of `--sh-index`. IBD seals them when the flag is on from the start. A later enable still materializes after catch-up: the `rbtc-idx-wb` builder fills the gap from Class A in the background (`index: build from=… to=…`, progress every 10 s with `read=` `build=` `commit=` ms for that interval, `index: build done`). A caught-up chain seals new blocks on the confirm write thread; follow, relay, and Electrum do not wait for it. With `--sp-tweaks` the same pass builds both indexes. Works with `--prune-seqsigwit`. `tip: accept` shows `bf=` and `bf_lag=`. `NODE_COMPACT_FILTERS` is advertised once filters first reach the tip (`blockfilter: caught up …`); peers that connected earlier do not learn the bit. RPC `getblockfilter` serves a sealed height, one block whose parent filter is already sealed, and a stale branch back to that sealed fork point. An unsealed best-chain gap is refused. `/rest/blockfilter/` and P2P serve heights the watermark covers; a stop past the watermark is silence |
-| `--prune-seqsigwit` | `prune_seqsigwit=` | **off** — unpruned reads `seqsigwit.body`. On: refuse wire reconstruct below tip−288 **heights**, advertise `NETWORK_LIMITED`, and keep those heights as `store/seqsigwit.window/{height}.bin` plus a RAM cache. Refused with `--sp-tweaks`, and once pruned a datadir serves no tweaks |
+| `--prune-seqsigwit` | `prune_seqsigwit=` | **off** — unpruned reads `seqsigwit.body`. On: witness for the last 288 heights lives only in `store/seqsigwit.window/{height}.bin` plus a RAM cache, and `seqsigwit.body` / `seqsigwit.loc` stay header-sized. Enabling the flag on an archive copies that window out of the stem and cuts the stem. Wire reconstruct below the watermark is refused. Advertises `NETWORK_LIMITED`. `txout`, `input`, `txstat`, and block filters are not pruned. Refused with `--sp-tweaks`, and once pruned a datadir serves no tweaks |
 | `--datadir-hdd` | `datadir_hdd=` | **off** — main datadir is rotating media. The node does not probe the device. On: each Class A body stem is its own pwrite wave; the write thread holds the spindle across those pwrites and again across spend annotate; `tx.head` insert starts after annotate. Lookup and load wait before each bulk read. Script threads, RPC, scripthash extract, and the index builder do not. Off keeps one shared wave and overlaps the head insert. When `--store-read-budget` is omitted or `0`, this also selects 1 API store read |
 | `--prune-seqsigwit-ram-threshold-bytes N` | `prune_seqsigwit_ram_threshold_bytes=` | `268435456` (256 MiB). `0` keeps nothing in RAM: every height, including tiny IBD blocks, is read from its file |
 | `--electrum-max-subs N` | `electrum_max_subs=` | **10000** — `blockchain.scripthash.subscribe` per Electrum connection (>= 1). Wallets subscribe every receive/change address up to their gap limit. |
@@ -284,9 +284,11 @@ A hot-store sidecar `seqsigwit.reloc` records the split. Opening without
 `--datadir-cold` then refuses. Do not leave a cold file in both places.
 `--prune-seqsigwit` is not this split. It writes `{store}/seqsigwit.prune`
 (the pruneheight) and keeps the 288-height window at
-`{store}/seqsigwit.window/{height}.bin` on the **hot** store, including when
-`seqsigwit.body` is on `--datadir-cold`. It does not delete `txstat`, `input`,
-block filters, or tweaks. A datadir that already has the prune sidecar refuses
+`{store}/seqsigwit.window/{height}.bin` on the **hot** store. The witness
+stem (`seqsigwit.body`, `seqsigwit.loc`, and its off/ovf) stays a header,
+including when those files sit on `--datadir-cold`. Enabling the flag on an
+archive copies the kept heights out and cuts the stem. It does not delete
+`txstat`, `input`, block filters, or tweaks. A datadir that already has the prune sidecar refuses
 to start unless the flag is set again
 (`datadir is pruned-seqsigwit; restart with --prune-seqsigwit enabled`).
 Disconnect at or below that pruneheight fails closed. Moving an

@@ -397,8 +397,9 @@ Trust-peer: --trust-peer ADDR (conf trustpeer=) dials only that address, the sam
 Scripthash: --sh-index (default off) builds Class B for Electrum/Esplora address history.\n\
 Block filters: --block-filter-index (default off) builds BIP158 basic filters. Independent of --sh-index.\n\
   Electrum/Esplora start without it; scripthash/address methods fail closed.\n\
-  --prune-seqsigwit refuse seqsigwit reconstruct below tip-288 heights; advertise NETWORK_LIMITED.\n\
-    Kept heights are store/seqsigwit.window/{{height}}.bin plus a RAM cache. Unpruned nodes read seqsigwit.body.\n\
+  --prune-seqsigwit keep witness only for the last 288 heights, in store/seqsigwit.window/{{height}}.bin plus a RAM cache.\n\
+    seqsigwit.body stays a header. Enabling the flag on an archive copies that window out and cuts the stem. Advertise NETWORK_LIMITED.\n\
+    Unpruned nodes read seqsigwit.body. txout, input, txstat, and filters are not pruned.\n\
   --prune-seqsigwit-ram-threshold-bytes N RAM cap for that cache (default 268435456; 0 keeps nothing in RAM).\n\
   --max-sh-creates N refuses an unpaged Electrum/Esplora join with more than N creates (default 10000; 0 = unlimited). A paged history request is still served.\n\
   --heavy-sh-creates N runs unpaged Electrum/Esplora joins with more than N creates one at a time across the node (default 10000; 0 = no limit). Lighter joins stay parallel.\n\
@@ -427,7 +428,7 @@ RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (defau
 Cold files: --datadir-cold PATH puts append-only IBD files under PATH/store\n\
   (seqsigwit, txstat, input, and blockfilter / sp_tweaks once enabled).\n\
   Default (flag omitted): those files live under --datadir. --prune-seqsigwit\n\
-  is separate: it drops old seqsigwit and keeps a 288-height window on the hot store.\n\
+  is separate: witness lives only in the 288 hot height files, and seqsigwit.body stays a header.\n\
   --datadir-hdd says the main datadir is rotating media. The node does not probe the device. When --store-read-budget is omitted or 0, API store reads are limited to 1.\n\
   Default off keeps the SSD confirm schedule.\n\
 Conf: --conf FILE (snake_case key=value; CLI kebab overrides conf). See OPERATOR.md and docs/rpc.md.\n\

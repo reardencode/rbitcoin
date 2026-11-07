@@ -836,6 +836,32 @@ pub fn short_new_layout_input(
     }
 }
 
+/// Prune mode with a witness loc that does not cover the creates cannot
+/// rebuild a short `input` from `seqsigwit`. The short input is the tail
+/// that never landed.
+#[doc(hidden)]
+pub fn pruned_uncovered_input_floor(
+    stems: &ClassASkewStems<'_>,
+    n_loc: u64,
+    n_txids: u64,
+    n_seqsigwit_loc: u64,
+    prune_seqsigwit_mode: bool,
+    input_existed: bool,
+) -> Option<u64> {
+    if !prune_seqsigwit_mode || !input_existed {
+        return None;
+    }
+    let stem = stem_min(n_loc, n_txids, n_seqsigwit_loc, true);
+    if stem == 0 || n_seqsigwit_loc >= stem {
+        return None;
+    }
+    let n_in = stems.input.count();
+    if n_in >= stem {
+        return None;
+    }
+    Some(n_in)
+}
+
 #[doc(hidden)]
 pub fn class_a_skew_stem_ends(
     stems: &ClassASkewStems<'_>,
@@ -933,14 +959,22 @@ pub fn repair_class_a_count_skew(
     let n_loc = stems.create_loc.count();
     let n_txids = stems.txids.count();
     let n_seqsigwit_loc = stems.seqsigwit_loc.count();
-    let short_input = short_new_layout_input(
+    let short_input = pruned_uncovered_input_floor(
         &stems,
         n_loc,
         n_txids,
         n_seqsigwit_loc,
         prune_seqsigwit_mode,
         input_existed,
-    )?;
+    )
+    .or(short_new_layout_input(
+        &stems,
+        n_loc,
+        n_txids,
+        n_seqsigwit_loc,
+        prune_seqsigwit_mode,
+        input_existed,
+    )?);
     let skewed = class_a_skew_target_count(
         n_loc,
         n_txids,
@@ -1192,11 +1226,12 @@ impl TxTable {
         seqsigwit_dir: &Path,
         opts: HeadOpenOpts,
     ) -> Result<Self, StoreError> {
-        let prune_seqsigwit_mode = false;
         crate::store::rename_legacy_inwit_files(dir)?;
         crate::store::rename_legacy_input_files(dir)?;
         crate::store::rename_legacy_inwit_files(seqsigwit_dir)?;
         crate::store::rename_legacy_input_files(seqsigwit_dir)?;
+        // Sidecar lives on the hot store, including when the stem is cold.
+        let prune_seqsigwit_mode = dir.join("seqsigwit.prune").is_file();
         let (seal_bits, workers) = Self::resolve_open_opts(opts);
         unlink_leftover_class_a_idx(dir)?;
         if seqsigwit_dir != dir {
@@ -1209,19 +1244,22 @@ impl TxTable {
         let create_loc = open_or_create_create_loc(dir)?;
         let seqsigwit_loc = open_or_create_seqsigwit_loc(seqsigwit_dir)?;
         let loc_count = create_loc.count();
+        // The sidecar is prune mode for reads and later appends. The witness
+        // stem still seals the tip until its locator no longer covers creates.
+        let stem_retired = prune_seqsigwit_mode && seqsigwit_loc.count() < loc_count;
         let body = if had_txout {
             VarTable::open_body_only(dir, "txout", TableKind::TxOut, loc_count)?
         } else {
             VarTable::create_body_only(dir, "txout", TableKind::TxOut)?
         };
-        if had_txout && loc_count > 0 && (!had_spent || (!had_seqsigwit && !prune_seqsigwit_mode)) {
+        if had_txout && loc_count > 0 && (!had_spent || (!had_seqsigwit && !stem_retired)) {
             return Err(StoreError::Corrupt(
                 "schema 15 Class A missing seqsigwit/spent for existing txout creates; wipe + IBD \
                  (or --datadir-cold if seqsigwit is on a cold volume)",
             ));
         }
         let seqsigwit = if had_seqsigwit {
-            let in_count = if prune_seqsigwit_mode {
+            let in_count = if stem_retired {
                 seqsigwit_loc.count()
             } else {
                 loc_count
@@ -1280,7 +1318,7 @@ impl TxTable {
                 txstat: &txstat,
                 input: &input,
             },
-            prune_seqsigwit_mode,
+            stem_retired,
             input_existed,
         )?;
         let n_bodies = create_loc.count();
@@ -1500,6 +1538,11 @@ impl TxTable {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Witness locator no longer names every create. Seal and skew ignore it.
+    fn seqsigwit_stem_retired(&self) -> bool {
+        self.prune_seqsigwit_mode() && self.seqsigwit_loc.count() < self.count()
+    }
+
     pub fn set_prune_seqsigwit_mode(&self, on: bool) {
         self.prune_seqsigwit_mode
             .store(on, std::sync::atomic::Ordering::Release);
@@ -1518,6 +1561,54 @@ impl TxTable {
         self.seqsigwit_loc.truncate_to_count(0)?;
         self.seqsigwit
             .truncate_body_to(0, crate::file::FILE_HEADER_LEN as u64)
+    }
+
+    /// The witness stem still holds rows or an allocation past create slack.
+    pub fn seqsigwit_stem_needs_release(&self) -> bool {
+        let header = crate::file::FILE_HEADER_LEN as u64;
+        if self.seqsigwit_loc.count() > 0 || self.seqsigwit.body_logical_len() > header {
+            return true;
+        }
+        self.seqsigwit
+            .body
+            .file_cap
+            .load(std::sync::atomic::Ordering::Acquire)
+            > header.saturating_add(crate::file::CREATE_FILE_SLACK)
+    }
+
+    /// Inputs from `seqsigwit.body` even when prune mode makes [`Self::get_full`]
+    /// return [`StoreError::NotFound`]. The locator must still name `fk`.
+    pub fn seqsigwit_inputs_from_stem(&self, fk: Fk) -> Result<Vec<InputRecord>, StoreError> {
+        let tx = self.get(fk)?;
+        let ir = self
+            .seqsigwit_loc
+            .range_batch(&[fk])?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or(StoreError::NotFound)?;
+        let seqsigwit = self
+            .seqsigwit
+            .with_bytes_at(ir.0, ir.1, |b| Ok(b.to_vec()))?;
+        let mut ins = if tx.input_count == 0 {
+            decode_seqsigwit_secret_to_end(&seqsigwit, Some(&self.secret))?
+        } else {
+            decode_seqsigwit_secret(&seqsigwit, tx.input_count, Some(&self.secret))?
+        };
+        self.stamp_seqsigwit_prevouts(fk, &mut ins)?;
+        Ok(ins)
+    }
+
+    /// Drop the witness stem's rows and its allocation back to the file header.
+    pub fn cut_seqsigwit_stem_to_header(&self) -> Result<(), StoreError> {
+        let header = crate::file::FILE_HEADER_LEN as u64;
+        self.seqsigwit_loc.truncate_to_count(0)?;
+        self.seqsigwit_loc.loc.release_to_len(header)?;
+        self.seqsigwit_loc.off.release_to_len(header)?;
+        self.seqsigwit_loc.ovf.release_to_len(header)?;
+        self.seqsigwit.truncate_body_to(0, header)?;
+        self.seqsigwit.body.release_to_len(header)?;
+        Ok(())
     }
 
     /// Seal unsealed non-tails from Class A (crash/restart). Keys are not retained.
@@ -1661,7 +1752,7 @@ impl TxTable {
     /// overflow header. A body header is not part of this count: open
     /// truncates a body that ran ahead and refuses one that fell short.
     fn locator_header_count(&self) -> Result<u64, StoreError> {
-        let prune = self.prune_seqsigwit_mode();
+        let prune = self.seqsigwit_stem_retired();
         let mut hi = durable_loc_count(
             &self.create_loc.loc,
             &self.create_loc.off,
@@ -1694,7 +1785,7 @@ impl TxTable {
         if loc {
             return true;
         }
-        if self.prune_seqsigwit_mode() {
+        if self.seqsigwit_stem_retired() {
             return false;
         }
         file_header_behind(&self.seqsigwit_loc.loc)
