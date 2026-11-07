@@ -960,6 +960,7 @@ assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.ser
 assert onionGroupSystem.config.users.groups ? tor;
 assert listenOnionGroupSystem.config.users.groups ? tor;
 assert onionGroupSystem.config.ids.gids.tor == 35;
+assert (moduleOnly { }).config.ids.gids.tor == onionGroupSystem.config.ids.gids.tor;
 assert onionGroupSystem.config.users.groups.tor.gid == onionGroupSystem.config.ids.gids.tor;
 assert listenOnionGroupSystem.config.users.groups.tor.gid == listenOnionGroupSystem.config.ids.gids.tor;
 assert system.config.users.groups.tor.gid == system.config.ids.gids.tor;
