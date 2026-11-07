@@ -109,6 +109,8 @@ async fn tor_wallet_hs_electrum_esplora() {
     let mut cfg = tor_b(&env, dir.path(), rpc);
     cfg.listen.electrum = Some(electrum);
     cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(esplora));
+    cfg.electrum_onion = true;
+    cfg.esplora_onion = true;
     cfg.shindex = true;
     let node = spawn_node(cfg, rpc).await;
     generate_n(rpc, 1).await;

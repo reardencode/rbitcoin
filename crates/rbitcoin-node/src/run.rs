@@ -1158,13 +1158,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     );
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), electrum_handles.first()) {
         if let Some(hs) = shutdown.or_fail(
-            shutdown
-                .run_until_cancelled(ctl.add_named_onion(
-                    config.datadir.path(),
-                    "electrum",
-                    h.local_addr,
-                ))
-                .await,
+            add_wallet_onion(
+                &shutdown,
+                &config,
+                ctl,
+                WalletListener::Electrum,
+                h.local_addr,
+            )
+            .await,
         ) {
             info!(
                 "electrum onion {}.onion:{}",
@@ -1194,25 +1195,24 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         )
         .await,
     );
-    if config.esplora_onion {
-        if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
-            if let Some(hs) = shutdown.or_fail(
-                shutdown
-                    .run_until_cancelled(ctl.add_named_onion(
-                        config.datadir.path(),
-                        "esplora",
-                        h.local_addr,
-                    ))
-                    .await,
-            ) {
-                info!(
-                    "esplora onion http://{}.onion:{} (/ws same port)",
-                    hs.service_id,
-                    h.local_addr.port()
-                );
-                node.peers
-                    .set_wallet_onion(format!("{}.onion", hs.service_id), h.local_addr.port());
-            }
+    if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
+        if let Some(hs) = shutdown.or_fail(
+            add_wallet_onion(
+                &shutdown,
+                &config,
+                ctl,
+                WalletListener::Esplora,
+                h.local_addr,
+            )
+            .await,
+        ) {
+            info!(
+                "esplora onion http://{}.onion:{} (/ws same port)",
+                hs.service_id,
+                h.local_addr.port()
+            );
+            node.peers
+                .set_wallet_onion(format!("{}.onion", hs.service_id), h.local_addr.port());
         }
     }
     if let Some(h) = esplora_handles.first() {
@@ -1228,33 +1228,31 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         status.attach_sv2(Arc::clone(s));
     }
     let mut i2p_wallet = Vec::new();
-    if config.listen.i2p_accept_incoming && !shutdown.requested() {
+    if !shutdown.requested() {
         if let Some(addr) = config.listen.i2p_sam {
             if let Some(h) = electrum_handles.first() {
                 i2p_wallet.extend(
                     shutdown.or_fail(
-                        start_i2p_named_forward(
+                        wallet_i2p_forward(
                             addr,
-                            config.datadir.path(),
-                            "electrum",
+                            &config,
+                            WalletListener::Electrum,
                             h.local_addr.port(),
                         )
-                        .await
-                        .map(Some),
+                        .await,
                     ),
                 );
             }
             if let Some(h) = esplora_handles.first() {
                 i2p_wallet.extend(
                     shutdown.or_fail(
-                        start_i2p_named_forward(
+                        wallet_i2p_forward(
                             addr,
-                            config.datadir.path(),
-                            "esplora",
+                            &config,
+                            WalletListener::Esplora,
                             h.local_addr.port(),
                         )
-                        .await
-                        .map(Some),
+                        .await,
                     ),
                 );
             }
@@ -1335,13 +1333,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     );
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         if let Some(hs) = shutdown.or_fail(
-                            shutdown
-                                .run_until_cancelled(ctl.add_named_onion(
-                                    config.datadir.path(),
-                                    "electrum",
-                                    h.local_addr,
-                                ))
-                                .await,
+                            add_wallet_onion(
+                                &shutdown,
+                                &config,
+                                ctl,
+                                WalletListener::Electrum,
+                                h.local_addr,
+                            )
+                            .await,
                         ) {
                             info!(
                                 "electrum onion {}.onion:{}",
@@ -1356,22 +1355,19 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                             );
                         }
                     }
-                    if config.listen.i2p_accept_incoming {
-                        if let Some(addr) = config.listen.i2p_sam {
-                            if let Some(h) = handles.first() {
-                                i2p_wallet.extend(
-                                    shutdown.or_fail(
-                                        start_i2p_named_forward(
-                                            addr,
-                                            config.datadir.path(),
-                                            "electrum",
-                                            h.local_addr.port(),
-                                        )
-                                        .await
-                                        .map(Some),
-                                    ),
-                                );
-                            }
+                    if let Some(addr) = config.listen.i2p_sam {
+                        if let Some(h) = handles.first() {
+                            i2p_wallet.extend(
+                                shutdown.or_fail(
+                                    wallet_i2p_forward(
+                                        addr,
+                                        &config,
+                                        WalletListener::Electrum,
+                                        h.local_addr.port(),
+                                    )
+                                    .await,
+                                ),
+                            );
                         }
                     }
                     if let Some(h) = handles.first() {
@@ -1397,45 +1393,41 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         )
                         .await,
                     );
-                    if config.esplora_onion {
-                        if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
-                            if let Some(hs) = shutdown.or_fail(
-                                shutdown
-                                    .run_until_cancelled(ctl.add_named_onion(
-                                        config.datadir.path(),
-                                        "esplora",
-                                        h.local_addr,
-                                    ))
-                                    .await,
-                            ) {
-                                info!(
-                                    "esplora onion http://{}.onion:{} (/ws same port)",
-                                    hs.service_id,
-                                    h.local_addr.port()
-                                );
-                                node.peers.set_wallet_onion(
-                                    format!("{}.onion", hs.service_id),
-                                    h.local_addr.port(),
-                                );
-                            }
+                    if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
+                        if let Some(hs) = shutdown.or_fail(
+                            add_wallet_onion(
+                                &shutdown,
+                                &config,
+                                ctl,
+                                WalletListener::Esplora,
+                                h.local_addr,
+                            )
+                            .await,
+                        ) {
+                            info!(
+                                "esplora onion http://{}.onion:{} (/ws same port)",
+                                hs.service_id,
+                                h.local_addr.port()
+                            );
+                            node.peers.set_wallet_onion(
+                                format!("{}.onion", hs.service_id),
+                                h.local_addr.port(),
+                            );
                         }
                     }
-                    if config.listen.i2p_accept_incoming {
-                        if let Some(addr) = config.listen.i2p_sam {
-                            if let Some(h) = handles.first() {
-                                i2p_wallet.extend(
-                                    shutdown.or_fail(
-                                        start_i2p_named_forward(
-                                            addr,
-                                            config.datadir.path(),
-                                            "esplora",
-                                            h.local_addr.port(),
-                                        )
-                                        .await
-                                        .map(Some),
-                                    ),
-                                );
-                            }
+                    if let Some(addr) = config.listen.i2p_sam {
+                        if let Some(h) = handles.first() {
+                            i2p_wallet.extend(
+                                shutdown.or_fail(
+                                    wallet_i2p_forward(
+                                        addr,
+                                        &config,
+                                        WalletListener::Esplora,
+                                        h.local_addr.port(),
+                                    )
+                                    .await,
+                                ),
+                            );
                         }
                     }
                     if let Some(h) = handles.first() {
@@ -2424,6 +2416,71 @@ pub fn electrum_tip_notify(ev: TipEvent) -> Option<TipNotify> {
             None
         },
     })
+}
+
+/// A wallet listener that can be published as a Tor onion and over I2P.
+#[derive(Clone, Copy)]
+enum WalletListener {
+    Electrum,
+    Esplora,
+}
+
+impl WalletListener {
+    /// Key file stem under `{datadir}/onion/` and `{datadir}/i2p/`.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Electrum => "electrum",
+            Self::Esplora => "esplora",
+        }
+    }
+
+    /// `--electrum-onion` / `--esplora-onion`.
+    fn onion(self, config: &NodeConfig) -> bool {
+        match self {
+            Self::Electrum => config.electrum_onion,
+            Self::Esplora => config.esplora_onion,
+        }
+    }
+
+    /// `--electrum-i2p` / `--esplora-i2p`.
+    fn i2p(self, config: &NodeConfig) -> bool {
+        match self {
+            Self::Electrum => config.electrum_i2p,
+            Self::Esplora => config.esplora_i2p,
+        }
+    }
+}
+
+/// `ADD_ONION` for a wallet listener. `None` when its onion switch is off
+/// or shutdown is requested first.
+async fn add_wallet_onion(
+    shutdown: &Shutdown,
+    config: &NodeConfig,
+    ctl: &mut crate::tor_control::TorControl,
+    listener: WalletListener,
+    bound: SocketAddr,
+) -> Result<Option<crate::tor_control::HiddenService>, NodeError> {
+    if !listener.onion(config) {
+        return Ok(None);
+    }
+    shutdown
+        .run_until_cancelled(ctl.add_named_onion(config.datadir.path(), listener.name(), bound))
+        .await
+}
+
+/// SAM `STREAM FORWARD` to a wallet listener. `None` when its I2P switch is off.
+async fn wallet_i2p_forward(
+    sam_addr: SocketAddr,
+    config: &NodeConfig,
+    listener: WalletListener,
+    port: u16,
+) -> Result<Option<rbitcoin_net::I2pSam>, NodeError> {
+    if !listener.i2p(config) {
+        return Ok(None);
+    }
+    start_i2p_named_forward(sam_addr, config.datadir.path(), listener.name(), port)
+        .await
+        .map(Some)
 }
 
 pub async fn start_i2p_named_forward(

@@ -156,8 +156,9 @@ The module options cover the operator flags in
 the node default. A bool that defaults on passes `=0` when set false
 (`proxyRandomize`, `mempool.persist`, `mempool.prefillCompact`,
 `netPermissionRelay`). `p2p.maxInbound` defaults to 200 and omits
-`--max-inbound` at that value. `esplora.hiddenService = false` passes
-`--esplora-onion=0` when Tor control is on. An onion flag with `tor.control`
+`--max-inbound` at that value. `electrum.hiddenService` and
+`esplora.hiddenService` (and their `i2p` twins) default off and pass only the
+positive flag. An onion flag with `tor.control`
 unset enables `services.tor`, opens `127.0.0.1:9051`, and writes a
 group-readable `/run/tor/control.authcookie`. An explicit `tor.control` is
 left to the operator's daemon. `rpc.unixSocket` passes `--rpc`
