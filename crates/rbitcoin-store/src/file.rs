@@ -573,6 +573,19 @@ impl TableFile {
         Ok(())
     }
 
+    /// Publish `logical` and drop the file allocation past it.
+    ///
+    /// [`Self::set_logical_len`] leaves the fallocated tail in place. Prune
+    /// uses this so the bytes come back.
+    pub fn release_to_len(&self, logical: u64) -> Result<(), StoreError> {
+        self.set_logical_len(logical)?;
+        let file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        set_file_len(&file, &self.path, logical)?;
+        drop(file);
+        self.file_cap.store(logical, Ordering::Release);
+        Ok(())
+    }
+
     /// Store `logical` as the prefixed-header length.
     ///
     /// A non-zero `header_cap` is a body end whose locator header did not

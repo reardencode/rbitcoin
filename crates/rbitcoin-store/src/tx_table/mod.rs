@@ -1563,6 +1563,54 @@ impl TxTable {
             .truncate_body_to(0, crate::file::FILE_HEADER_LEN as u64)
     }
 
+    /// The witness stem still holds rows or an allocation past create slack.
+    pub fn seqsigwit_stem_needs_release(&self) -> bool {
+        let header = crate::file::FILE_HEADER_LEN as u64;
+        if self.seqsigwit_loc.count() > 0 || self.seqsigwit.body_logical_len() > header {
+            return true;
+        }
+        self.seqsigwit
+            .body
+            .file_cap
+            .load(std::sync::atomic::Ordering::Acquire)
+            > header.saturating_add(crate::file::CREATE_FILE_SLACK)
+    }
+
+    /// Inputs from `seqsigwit.body` even when prune mode makes [`Self::get_full`]
+    /// return [`StoreError::NotFound`]. The locator must still name `fk`.
+    pub fn seqsigwit_inputs_from_stem(&self, fk: Fk) -> Result<Vec<InputRecord>, StoreError> {
+        let tx = self.get(fk)?;
+        let ir = self
+            .seqsigwit_loc
+            .range_batch(&[fk])?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or(StoreError::NotFound)?;
+        let seqsigwit = self
+            .seqsigwit
+            .with_bytes_at(ir.0, ir.1, |b| Ok(b.to_vec()))?;
+        let mut ins = if tx.input_count == 0 {
+            decode_seqsigwit_secret_to_end(&seqsigwit, Some(&self.secret))?
+        } else {
+            decode_seqsigwit_secret(&seqsigwit, tx.input_count, Some(&self.secret))?
+        };
+        self.stamp_seqsigwit_prevouts(fk, &mut ins)?;
+        Ok(ins)
+    }
+
+    /// Drop the witness stem's rows and its allocation back to the file header.
+    pub fn cut_seqsigwit_stem_to_header(&self) -> Result<(), StoreError> {
+        let header = crate::file::FILE_HEADER_LEN as u64;
+        self.seqsigwit_loc.truncate_to_count(0)?;
+        self.seqsigwit_loc.loc.release_to_len(header)?;
+        self.seqsigwit_loc.off.release_to_len(header)?;
+        self.seqsigwit_loc.ovf.release_to_len(header)?;
+        self.seqsigwit.truncate_body_to(0, header)?;
+        self.seqsigwit.body.release_to_len(header)?;
+        Ok(())
+    }
+
     /// Seal unsealed non-tails from Class A (crash/restart). Keys are not retained.
     #[doc(hidden)]
     pub fn seal_unsealed_nontail_from_body(&self) -> Result<(), StoreError> {
