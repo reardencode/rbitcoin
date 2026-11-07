@@ -2528,6 +2528,17 @@ fn over_length(st: &IbdWorkState, extra: usize) -> bool {
     over_length_at(st, wide.saturating_add(extra as u64))
 }
 
+/// A stored continuation that would pass the length cap. Sets the flag.
+/// The caller must not write or enqueue the batch.
+#[doc(hidden)]
+pub fn store_would_pass_length(st: &mut IbdWorkState, extra: usize) -> bool {
+    if !over_length(st, extra) {
+        return false;
+    }
+    st.header_walk.length_exceeded = true;
+    true
+}
+
 pub fn extend_tip(
     st: &mut IbdWorkState,
     hub: &ChainHub,

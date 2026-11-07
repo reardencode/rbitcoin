@@ -6523,6 +6523,32 @@ fn a_walk_longer_than_six_headers_per_second_does_not_extend() {
     let _ = dir;
 }
 
+/// Two accepted headers, then a requested 2,000-header continuation past a
+/// cap of 60. The continuation is not stored, and that peer leaves.
+#[test]
+fn an_overlong_stored_continuation_is_not_written() {
+    let (_dir, hub, mut st, gen) = opened("unproven-store-len", false);
+    st.header_walk.max_headers = Some(60);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let two = headers_after(gen, 2, 1);
+    let tip = *two.last().unwrap();
+    apply(&mut st, &hub, 0, two);
+    assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
+    assert!(!st.header_walk.length_exceeded);
+    let before = hub.query.store().header_count();
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(
+        &mut st,
+        &hub,
+        0,
+        headers_after(tip, rbitcoin_net::codec::MAX_HEADERS_RESULTS as u32, 2),
+    );
+    assert_eq!(hub.query.store().header_count(), before);
+    assert!(st.header_walk.length_exceeded);
+    assert_ne!(st.header_walk.reserved, Some(0));
+    assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
+}
+
 /// A heavier batch whose end is past the header-rate cap does not replace the tip.
 #[test]
 fn a_heavier_fork_past_the_header_rate_does_not_replace_the_tip() {

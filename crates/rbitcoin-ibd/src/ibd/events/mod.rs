@@ -730,7 +730,12 @@ pub fn plan_header_reply(
             }
             headers.len()
         }
-        super::header_walk::HeaderClass::WalkStore => headers.len(),
+        super::header_walk::HeaderClass::WalkStore => {
+            if super::header_walk::store_would_pass_length(st, headers.len()) {
+                return HeaderPlan::Done;
+            }
+            headers.len()
+        }
         super::header_walk::HeaderClass::Stray => {
             let before = super::header_walk::candidate_tip(st);
             if super::header_walk::suppress_competing_chain(st, hub, peer, &headers)
