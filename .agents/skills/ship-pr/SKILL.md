@@ -77,8 +77,8 @@ Coverage and native `windows` / `macos` stay GitHub Actions;
 
 Required jobs: `qc`, `test`, `windows`, `macos`, `coverage`, `pread`,
 `rust-forward`, and `nixos-module-eval`. `qc` is fmt, ast-grep, deny, the
-script self-tests, then clippy, on one runner. `nixos-module-eval` is its own
-job and does not gate `coverage`, `pread`, or `rust-forward`. `pread` is GitHub Actions only:
+script self-tests, then clippy, on one runner. `nixos-module-eval` waits for `qc` and `test` and runs beside `pread` and
+`rust-forward`. It does not gate `coverage`. `pread` is GitHub Actions only:
 `RBITCOIN_IO=pread cargo test -p rbitcoin-store -p rbitcoin-query` after
 `qc` and `test`, in parallel with `coverage`. `rust-forward` is the same
 wait: `cargo check --workspace --all-targets` on the channel in

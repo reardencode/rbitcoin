@@ -270,13 +270,13 @@ cut folds those files in. Owner: [`docs/releases.md`](./docs/releases.md).
 Required **jobs** match [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
 (`qc`, `test`, `windows`, `macos`, `coverage`, `pread`, `rust-forward`,
 `nixos-module-eval`). `qc` is fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny,
-the script self-tests, then clippy, on one runner. `nixos-module-eval` is its
-own job and does not gate the others. `pread` is the
+the script self-tests, then clippy, on one runner. `pread` is the
 Linux libc backend for `rbitcoin-store` and `rbitcoin-query`
 (`RBITCOIN_IO=pread`). `rust-forward` is `cargo check --workspace --all-targets`
-on the channel in [`rust-forward.toml`](./rust-forward.toml). Both start with
-`coverage`, after `qc` and `test`. The `test` job does not set `RBITCOIN_IO`
-and stays on 1.95.
+on the channel in [`rust-forward.toml`](./rust-forward.toml). `pread`,
+`rust-forward`, and `nixos-module-eval` start with `coverage`, after `qc` and
+`test`. The module eval does not gate `coverage`. The `test` job does not set
+`RBITCOIN_IO` and stays on 1.95.
 Label **`nixos-module-runtime`** to run the NixOS module qemu test (not
 eval). That job is not required.
 
