@@ -1,4 +1,8 @@
 //! OS name of the IBD header thread.
+//!
+//! The name is read from `/proc`, so this file is Linux-only.
+
+#![cfg(target_os = "linux")]
 
 use rbitcoin_ibd::ibd::published::IBD_HEADER_THREAD_NAME;
 use rbitcoin_ibd::ibd::{empty_header_fk_bus, spawn_header_thread, IbdWorkState};
@@ -7,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// `ps` / `top` show this thread as `ibd-header` for the whole catch-up.
-#[cfg(target_os = "linux")]
 #[test]
 fn header_thread_comm_is_ibd_header() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("ibd-header-name");
@@ -37,7 +40,6 @@ fn header_thread_comm_is_ibd_header() {
     );
 }
 
-#[cfg(target_os = "linux")]
 fn linux_task_comms() -> Vec<String> {
     let mut names = Vec::new();
     let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
