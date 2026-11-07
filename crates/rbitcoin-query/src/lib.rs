@@ -897,9 +897,12 @@ impl Query {
             if self.pruneheight().is_none() {
                 self.persist_pruneheight(u32::MAX)?;
             }
+            // Seed while the stem is still readable. Later confirms must not
+            // append it.
             if !was_on {
                 self.seed_recent_seqsigwit_from_store()?;
             }
+            self.store.set_prune_seqsigwit_mode(true);
         } else {
             self.clear_seqsigwit_ram_window();
             self.set_pruneheight(None)?;

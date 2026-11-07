@@ -230,6 +230,58 @@ impl Drop for Disarm {
     }
 }
 
+fn assert_witness_stem_unwritten(q: &Query, body_len: u64) {
+    let path = q.store().path().join("seqsigwit.body");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), body_len);
+    assert_eq!(
+        q.store().txs.seqsigwit.body_logical_len(),
+        rbitcoin_store::file::FILE_HEADER_LEN as u64
+    );
+    assert_eq!(q.store().txs.seqsigwit_loc.count(), 0);
+    assert_eq!(q.store().txs.input.count(), q.store().txs.count());
+    assert!(q.store().txs.count() > Query::SEQSIGWIT_KEEP_HEIGHTS as u64);
+}
+
+/// Prune from an empty store. Confirm keeps the witness stem at the size
+/// `create` left (header plus slack) and serves the keep window from spill files.
+#[test]
+fn pruned_from_genesis_does_not_grow_seqsigwit_body() {
+    let (dir, q) = temp_query("prune-from-genesis");
+    q.set_prune_seqsigwit(true).unwrap();
+    let body = q.store().path().join("seqsigwit.body");
+    let body_len = std::fs::metadata(&body).unwrap().len();
+    let mut hashes = Vec::new();
+    connect_range(&q, Fk::NULL, None, 300, &[0x55], &mut hashes);
+    let tip = q.tip_height().unwrap().0;
+    let ph = q.pruneheight().unwrap().0;
+    assert_eq!(ph, tip - Query::SEQSIGWIT_KEEP_HEIGHTS);
+    assert_witness_stem_unwritten(&q, body_len);
+    for h in (ph + 1)..=tip {
+        let block = q.reconstruct_block_at_height(Height(h)).unwrap();
+        assert_eq!(
+            block.txdata[0].input[0].witness.to_vec(),
+            vec![vec![0x55]]
+        );
+        assert!(q
+            .store()
+            .path()
+            .join(format!("seqsigwit.window/{h}.bin"))
+            .is_file());
+    }
+    let err = q.reconstruct_block_at_height(Height(ph)).unwrap_err();
+    assert!(matches!(err, StoreError::Pruned { height } if height == ph), "{err:?}");
+    q.store().sync_spend_durable(tip).unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(dir.path()).unwrap();
+    assert_witness_stem_unwritten(&q, body_len);
+    let block = q.reconstruct_block_at_height(Height(tip)).unwrap();
+    assert_eq!(
+        block.txdata[0].input[0].witness.to_vec(),
+        vec![vec![0x55]]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn pruned_seqsigwit_life() {
     let (dir, q) = temp_query("pruned-seqsigwit-life");
