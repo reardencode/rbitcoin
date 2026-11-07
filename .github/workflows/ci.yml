@@ -25,9 +25,11 @@ env:
 # fmt/clippy do not drift with GitHub Actions “stable”. The runner image's
 # rustup auto-installs that toolchain and its components on first cargo.
 #
-# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, scripts, clippy, then
-# nixos-module-eval. test, windows, and macos each have their own runner.
-# coverage and pread wait for qc and test so a red test does not start them.
+# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, scripts, clippy.
+# test, windows, and macos each have their own runner.
+# coverage, pread, rust-forward, and nixos-module-eval wait for qc and test.
+# The module eval runs beside pread and rust-forward. It does not gate coverage.
+# It is not a Protected status check until the ruleset names nixos-module-eval.
 # pread is the Linux libc backend (`RBITCOIN_IO=pread`) for store and query.
 # `test` leaves that variable unset, so Linux stays on io_uring.
 # Mutants are not a PR check. Nightly workspace runs live in mutants.yml.
@@ -38,7 +40,7 @@ env:
 # includes workflow YAML.
 jobs:
   # Quality checks on one runner, cheap steps first. A red fmt does not
-  # install Nix or compile clippy. Check name is `qc`.
+  # compile clippy. Check name is `qc`.
   qc:
     name: qc
     runs-on: ubuntu-latest
@@ -138,17 +140,6 @@ jobs:
       # doc(hidden) pub modules are rustdoc-visible; a broken link is an error.
       - name: cargo doc
         run: cargo doc --workspace --no-deps
-      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-        with:
-          github_access_token: ${{ github.token }}
-          enable_kvm: false
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
-        with:
-          primary-key: nixos-module-eval-${{ runner.os }}-${{ hashFiles('flake.lock') }}
-          restore-prefixes-first-match: nixos-module-eval-${{ runner.os }}-
-          gc-max-store-size-linux: 1G
-      - name: Evaluate NixOS module
-        run: timeout 2m nix build .#checks.x86_64-linux.nixos-module-eval --no-link
 
   test:
     runs-on: ubuntu-latest
@@ -222,6 +213,29 @@ jobs:
           workspaces: ". -> target/dev"
       - name: store + node smoke
         run: ./scripts/ci-os-smoke.sh
+
+  # NixOS module eval. Same wait as pread and rust-forward, so it takes a
+  # runner only after qc and test. coverage does not need this job.
+  nixos-module-eval:
+    name: nixos-module-eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [qc, test]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          github_access_token: ${{ github.token }}
+          enable_kvm: false
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nixos-module-eval-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nixos-module-eval-${{ runner.os }}-
+          gc-max-store-size-linux: 1G
+      - name: Evaluate NixOS module
+        run: timeout 5m nix build .#checks.x86_64-linux.nixos-module-eval --no-link
 
   # Linux libc pread. Same wait as coverage: a red `test` does not compile it.
   # Store and query own bulk IO. The `test` job does not set `RBITCOIN_IO`.

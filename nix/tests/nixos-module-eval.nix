@@ -298,20 +298,10 @@ let
   sv2KeyNotInStore = "services.rbitcoin.sv2.tp.authoritySecretFile must not be a store path (the store is world-readable)";
   failedAssertions =
     sys: map (a: a.message) (builtins.filter (a: !a.assertion) sys.config.assertions);
-  execOf =
-    opts:
-    (nixpkgs.lib.nixosSystem {
-      inherit (pkgs.stdenv.hostPlatform) system;
-      modules = [
-        module
-        {
-          services.rbitcoin = {
-            enable = true;
-            package = fakePackage;
-          } // opts;
-        }
-      ];
-    }).config.systemd.services.rbitcoin.serviceConfig.ExecStart;
+  # A full NixOS also fails boot assertions this stub does not model.
+  rbitcoinFailures = sys:
+    builtins.filter (nixpkgs.lib.hasPrefix "services.rbitcoin.") (failedAssertions sys);
+  execOf = opts: (moduleOnly opts).config.systemd.services.rbitcoin.serviceConfig.ExecStart;
   spExec = execOf {
     silentPaymentIndex = true;
     spTweaksDust = 546;
@@ -319,7 +309,7 @@ let
   inboundExec = execOf {
     p2p.maxInbound = 125;
   };
-  unixExec = execOf {
+  unixOpts = {
     rpc.unixSocket = true;
     esplora = {
       enable = true;
@@ -327,7 +317,8 @@ let
       openFirewall = true;
     };
   };
-  unixSystem = nixpkgs.lib.nixosSystem {
+  unixExec = execOf unixOpts;
+  fullSystem = opts: nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
       module
@@ -335,16 +326,11 @@ let
         services.rbitcoin = {
           enable = true;
           package = fakePackage;
-          rpc.unixSocket = true;
-          esplora = {
-            enable = true;
-            socketPath = "/run/rbitcoin/esplora.sock";
-            openFirewall = true;
-          };
-        };
+        } // opts;
       }
     ];
   };
+  unixSystem = fullSystem unixOpts;
   onionOffExec = execOf {
     tor.control = "127.0.0.1:9051";
     esplora = {
@@ -479,18 +465,80 @@ let
       }
     ];
   };
-  badSystem = opts: nixpkgs.lib.nixosSystem {
-    inherit (pkgs.stdenv.hostPlatform) system;
-    modules = [
-      module
-      {
-        services.rbitcoin = {
-          enable = true;
-          package = fakePackage;
-        } // opts;
-      }
-    ];
-  };
+  # Assertion and argv cases do not merge the rest of NixOS.
+  hostOptions =
+    { lib, ... }:
+    {
+      options = {
+        assertions = lib.mkOption {
+          type = lib.types.listOf lib.types.attrs;
+          default = [ ];
+        };
+        environment.systemPackages = lib.mkOption {
+          type = lib.types.listOf lib.types.package;
+          default = [ ];
+        };
+        ids.gids.tor = lib.mkOption {
+          type = lib.types.int;
+          # nixos/modules/misc/ids.nix on nixos-26.05. The ids module is not
+          # in this eval, so the default has to be the same number.
+          default = 35;
+        };
+        networking.firewall.allowedTCPPorts = lib.mkOption {
+          type = lib.types.listOf lib.types.port;
+          default = [ ];
+          apply = ports: lib.unique (builtins.sort builtins.lessThan ports);
+        };
+        services.prometheus.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+        };
+        services.prometheus.scrapeConfigs = lib.mkOption {
+          type = lib.types.listOf lib.types.attrs;
+          default = [ ];
+        };
+        services.tor.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+        };
+        services.tor.settings = lib.mkOption {
+          type = lib.types.attrs;
+          default = { };
+        };
+        systemd.services = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        systemd.tmpfiles.settings = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        users.groups = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        users.users = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+      };
+    };
+  moduleOnly =
+    opts:
+    nixpkgs.lib.evalModules {
+      modules = [
+        module
+        hostOptions
+        {
+          _module.args.pkgs = pkgs;
+          services.rbitcoin = {
+            enable = true;
+            package = fakePackage;
+          } // opts;
+        }
+      ];
+    };
+  badSystem = moduleOnly;
 in
 assert defaultCfg.package == expectedPackage;
 assert defaultCfg.network == "mainnet";
@@ -777,6 +825,11 @@ assert builtins.match ".*--rpc .*" unixExec != null;
 assert builtins.match ".*--rpc-listen.*" unixExec == null;
 assert builtins.match ".*--esplora-listen /run/rbitcoin/esplora.sock.*" unixExec != null;
 assert builtins.match ".*--esplora-listen 127.0.0.1:3000.*" unixExec == null;
+assert unixExec == unixSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart;
+assert rbitcoinFailures (moduleOnly unixOpts) == rbitcoinFailures unixSystem;
+assert rbitcoinFailures (badSystem { apiLog = "/api.jsonl"; }) == rbitcoinFailures (
+  fullSystem { apiLog = "/api.jsonl"; }
+);
 assert unixSystem.config.networking.firewall.allowedTCPPorts == [ ];
 assert unixSystem.config.systemd.tmpfiles.settings."10-rbitcoin"."/run/rbitcoin".d.mode == "0750";
 assert builtins.elem "/run/rbitcoin" unixSystem.config.systemd.services.rbitcoin.serviceConfig.ReadWritePaths;
@@ -906,6 +959,8 @@ assert !builtins.elem "tor.service" (badSystem {
 assert builtins.elem "tor" onionGroupSystem.config.systemd.services.rbitcoin.serviceConfig.SupplementaryGroups;
 assert onionGroupSystem.config.users.groups ? tor;
 assert listenOnionGroupSystem.config.users.groups ? tor;
+assert onionGroupSystem.config.ids.gids.tor == 35;
+assert (moduleOnly { }).config.ids.gids.tor == onionGroupSystem.config.ids.gids.tor;
 assert onionGroupSystem.config.users.groups.tor.gid == onionGroupSystem.config.ids.gids.tor;
 assert listenOnionGroupSystem.config.users.groups.tor.gid == listenOnionGroupSystem.config.ids.gids.tor;
 assert system.config.users.groups.tor.gid == system.config.ids.gids.tor;
