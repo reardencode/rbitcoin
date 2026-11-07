@@ -1242,7 +1242,13 @@ async fn accept_client_ping_and_shutdown() {
     .await;
     assert!(bad_hex.get("error").is_some(), "{bad_hex}");
 
+    // The port is free once shutdown returns, so a restart can bind it.
+    let addr = handle.local_addr;
     handle.shutdown().await;
+    assert!(
+        std::net::TcpListener::bind(addr).is_ok(),
+        "electrum listener open after shutdown"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

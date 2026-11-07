@@ -223,8 +223,11 @@ pub struct ElectrumHandle {
 impl ElectrumHandle {
     pub async fn shutdown(mut self) {
         self.shutdown.store(true);
+        // The accept task owns the listener. Await it so the port is closed
+        // when this returns, not when a worker next runs the abort.
         for t in self.tasks.drain(..) {
             t.abort();
+            let _ = t.await;
         }
         // Client tasks do not observe the accept-loop flag; abort so SIGINT
         // is not blocked behind a scripthash history / mempool restatus.

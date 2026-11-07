@@ -24,10 +24,18 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
+/// A port the kernel hands no other bind(0) or connect while this process
+/// runs. A dropped reserve is free for a parallel test to take before the
+/// node binds it, between restarts, or before a "closed" check. The held
+/// socket has SO_REUSEADDR and never listens, so on Linux the node can still
+/// bind and listen there, and a connect after the node closes is refused.
 fn ephemeral_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
+    static HELD: Mutex<Vec<tokio::net::TcpSocket>> = Mutex::new(Vec::new());
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_reuseaddr(true).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    HELD.lock().unwrap().push(socket);
     addr
 }
 
